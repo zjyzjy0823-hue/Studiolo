@@ -1,14 +1,42 @@
 import { spawnSync } from 'node:child_process'
 import { copyFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join, win32 } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+function patchBuildTask(source, cli, filename) {
+  const cliArgs = /(\blistOf\s*\(\s*)(["'])((?:\\.|(?!\2)[^\\\r\n])*)\2(?=\s*,\s*(["'])android\4\s*,\s*(["'])android-studio-script\5\s*[),])/g
+  for (const match of source.matchAll(cliArgs)) {
+    const [matched, prefix, , currentCli] = match
+    // Node resolves the first argument as a script path.
+    if (currentCli === 'tauri') {
+      const kotlinEscapes = { '$': '\\$', '\\f': '\\u000c' }
+      const kotlinCli = JSON.stringify(cli).replace(/\\.|\$/g, token => kotlinEscapes[token] ?? token)
+      return source.slice(0, match.index + prefix.length) + kotlinCli + source.slice(match.index + matched.length)
+    }
+
+    const normalizedCli = currentCli.replace(/\\+/g, '/')
+    if ((isAbsolute(normalizedCli) || win32.isAbsolute(normalizedCli)) &&
+        normalizedCli.endsWith('/node_modules/@tauri-apps/cli/tauri.js')) return source
+  }
+
+  const argsStart = Math.max(0, source.search(/\bval\s+args\b/))
+  const excerpt = source.slice(Math.max(0, argsStart - 200), argsStart + 200)
+  throw new Error(`Unexpected Tauri Android CLI args template in ${filename}\n${excerpt}`)
+}
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const tauri = join(root, 'src-tauri')
 const config = JSON.parse(await readFile(join(tauri, 'tauri.conf.json'), 'utf8'))
 const android = join(tauri, 'gen/android/app/src/main')
 const cli = join(root, 'node_modules/@tauri-apps/cli/tauri.js')
-const init = spawnSync(process.execPath, [cli, 'android', 'init', '--ci', '--skip-targets-install'], { cwd: root, stdio: 'inherit' })
+// Tauri picks the generated Gradle command from npm_execpath when this script runs via npm.
+const initEnv = { ...process.env }
+delete initEnv.npm_execpath
+const init = spawnSync(process.execPath, [cli, 'android', 'init', '--ci', '--skip-targets-install'], {
+  cwd: root,
+  stdio: 'inherit',
+  env: initEnv,
+})
 if (init.status !== 0) throw init.error ?? new Error('Tauri Android initialization failed')
 
 const buildTaskDir = join(tauri, 'gen/android/buildSrc/src/main/java')
@@ -21,17 +49,8 @@ if (!buildTask) throw new Error(`BuildTask.kt not found under ${buildTaskDir}. T
 
 const buildTaskPath = join(buildTask.parentPath, buildTask.name)
 const buildTaskSource = await readFile(buildTaskPath, 'utf8')
-const kotlinEscapes = { '$': '\\$', '\\f': '\\u000c' }
-const kotlinCli = JSON.stringify(cli).replace(/\\.|\$/g, token => kotlinEscapes[token] ?? token)
-const cliArgs = /^([ \t]*val args = listOf\()("(?:[^"\\\r\n]|\\.)*")(, "android", "android-studio-script"\);?[ \t]*)$/m
-const currentCli = buildTaskSource.match(cliArgs)?.[2]
-// Node resolves the first argument as a script path.
-if (currentCli === '"tauri"') {
-  const patched = buildTaskSource.replace(cliArgs, (_, prefix, _cli, suffix) => `${prefix}${kotlinCli}${suffix}`)
-  await writeFile(buildTaskPath, patched)
-} else if (currentCli !== kotlinCli) {
-  throw new Error(`Unexpected Tauri Android CLI args template in ${buildTaskPath}`)
-}
+const patchedBuildTask = patchBuildTask(buildTaskSource, cli, buildTaskPath)
+if (patchedBuildTask !== buildTaskSource) await writeFile(buildTaskPath, patchedBuildTask)
 
 const copy = async (file, destination) => {
   await mkdir(dirname(destination), { recursive: true })
