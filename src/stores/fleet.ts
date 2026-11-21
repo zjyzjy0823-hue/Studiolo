@@ -4,7 +4,7 @@
 
 import { defineStore } from 'pinia'
 import { Channel } from '@tauri-apps/api/core'
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, shallowReactive, watch } from 'vue'
 import { apiRequest, ApiError } from '../api/client'
 import { androidInvoke, isAndroidLocal } from '../desktop/androidLocal'
 import { downloadAndDecryptBlob, encryptAndUploadFile } from '../services/blobTransfer'
@@ -25,11 +25,13 @@ import type {
   AgentNode,
   ApprovalDecision,
   ArtifactRef,
+  ChatContextUsage,
   ChatMessage,
   ChatSession,
   ChatSystemEvent,
   CheckpointInfo,
-  ComposerMode,
+  ProjectPermission,
+  ProjectPermissionSetting,
   DiffAnnotation,
   DiffFileEntry,
   FilePreviewState,
@@ -212,7 +214,7 @@ export const useFleetStore = defineStore('fleet', () => {
   const composerDrafts = ref<Record<string, { text: string; files: File[] }>>({})
   const outbox = ref<FleetOutboxItem[]>([])
   const pendingOutboxWrites = new Set<string>()
-  const transmittingOutbox = new Map<string, object>()
+  const transmittingOutbox = shallowReactive(new Map<string, object>())
   const deliveredOutbox = new Map<string, FleetOutboxItem>()
   const cachedHistoryKeys = new Set<string>()
   const cachedHistoryTimes = new Map<string, number>()
@@ -268,6 +270,10 @@ export const useFleetStore = defineStore('fleet', () => {
   const historyLimitBySession = ref<Record<string, number>>({})
   const historyCursorBySession = ref<Record<string, string | null>>({})
   const pendingHistoryPages = ref<Record<string, string>>({})
+  const contextUsageBySession = ref<Record<string, ChatContextUsage>>({})
+  const contextReads = ref<Record<string, string>>({})
+  const contextWaitingForModel = ref<Record<string, { runId?: string }>>({})
+  const contextCompactions = ref<Record<string, string>>({})
   const historyStateBySession = ref<Record<string, { state: 'empty' | 'ready' | 'body-only' | 'error'; message?: string }>>({})
   const lastSeqBySession = ref<Record<string, number>>({})
   const streamIdBySession = new Map<string, string>()
@@ -275,7 +281,8 @@ export const useFleetStore = defineStore('fleet', () => {
   const forcedHistoryRequests = new Set<string>()
   const forkSeedBySession = ref<Record<string, string>>({})
   const sideChatSessionKeyByParent = ref<Record<string, string>>({})
-  const composerModeBySession = ref<Record<string, ComposerMode>>({})
+  const projectPermissionsByNode = ref<Record<string, ProjectPermission[]>>({})
+  const projectPermissionWrites = new Map<string, (error?: Error) => void>()
   const android = isAndroidLocal()
   const notificationsEnabled = ref(
     !android && typeof window !== 'undefined' && typeof Notification !== 'undefined' && Notification.permission === 'granted',
@@ -466,6 +473,10 @@ export const useFleetStore = defineStore('fleet', () => {
     historyLimitBySession.value = {}
     historyCursorBySession.value = {}
     pendingHistoryPages.value = {}
+    contextUsageBySession.value = {}
+    contextReads.value = {}
+    contextWaitingForModel.value = {}
+    contextCompactions.value = {}
     historyStateBySession.value = {}
     lastSeqBySession.value = {}
     streamIdBySession.clear()
@@ -473,7 +484,8 @@ export const useFleetStore = defineStore('fleet', () => {
     forcedHistoryRequests.clear()
     forkSeedBySession.value = {}
     sideChatSessionKeyByParent.value = {}
-    composerModeBySession.value = {}
+    for (const finish of projectPermissionWrites.values()) finish(new Error('节点连接已变更'))
+    projectPermissionsByNode.value = {}
     unreadNotifyTitle.value = ''
     tokenUsageStateBySession.value = {}
     todosBySession.value = {}
@@ -643,7 +655,7 @@ export const useFleetStore = defineStore('fleet', () => {
         }
       }
       if (wsState.value === 'online') {
-        fetched.forEach(autoPullSessionsForNode)
+        fetched.forEach(initializeOnlineNode)
         void flushOutbox()
       }
     } catch (err) {
@@ -752,7 +764,10 @@ export const useFleetStore = defineStore('fleet', () => {
       pendingStreamResync.clear()
       forcedHistoryRequests.clear()
       pendingHistoryPages.value = {}
+      contextReads.value = {}
+      contextCompactions.value = {}
       transmittingOutbox.clear()
+      for (const finish of projectPermissionWrites.values()) finish(new Error('节点连接已断开'))
       for (const target of pendingSessionLists.values()) sessionListStates.value[target] = {}
       pendingSessionLists.clear()
       if (intentionalClose || ev.code === 4401) {
@@ -796,6 +811,16 @@ export const useFleetStore = defineStore('fleet', () => {
       ? [...prev.slice(prev.length - MAX_MESSAGES_PER_SESSION + 1), msg]
       : [...prev, msg]
     messagesBySession.value = { ...messagesBySession.value, [sKey]: next }
+  }
+
+  function updatePromptDelivery(sKey: string, requestId: string, delivery: 'sent' | 'failed') {
+    const rows = messagesBySession.value[sKey] ?? []
+    const index = rows.findIndex(row => row.role === 'user' && row.requestId === requestId && row.delivery === 'sending')
+    if (index !== -1) {
+      const next = [...rows]
+      next[index] = { ...next[index], delivery }
+      messagesBySession.value = { ...messagesBySession.value, [sKey]: next }
+    }
   }
 
   function appendSystemEvent(sKey: string, nodeId: string, provider: AdapterProvider, id: string, event: ChatSystemEvent) {
@@ -880,6 +905,12 @@ export const useFleetStore = defineStore('fleet', () => {
   }
 
   // ---------------- 事件归并（WS 增量 & 控制帧） ----------------
+  function initializeOnlineNode(node: AgentNode) {
+    if (node.status !== 'online') return
+    autoPullSessionsForNode(node)
+    requestProjectPermissions(node.id)
+  }
+
   function handleWsEvent(frame: FleetWsEvent) {
     const etype = frame.type
 
@@ -902,9 +933,7 @@ export const useFleetStore = defineStore('fleet', () => {
           transferEndpoints: live.transferEndpoints ?? existing.transferEndpoints,
         }
       })
-      for (const n of nodes.value) {
-        if (n.status === 'online') autoPullSessionsForNode(n)
-      }
+      nodes.value.forEach(initializeOnlineNode)
       if (activeSessionKey.value) {
         subscribeSession(activeSessionKey.value)
       }
@@ -937,7 +966,7 @@ export const useFleetStore = defineStore('fleet', () => {
         }
       })
       const liveNode = nodes.value.find(n => n.id === frame.nodeId)
-      if (liveNode && liveStatus === 'online') autoPullSessionsForNode(liveNode)
+      if (liveNode) initializeOnlineNode(liveNode)
       if (liveStatus === 'online') {
         for (const key of new Set([activeSessionKey.value, ...Object.keys(runningBySession.value)])) {
           if (sessionsByKey.value[key]?.nodeId === frame.nodeId) subscribeSession(key)
@@ -947,15 +976,26 @@ export const useFleetStore = defineStore('fleet', () => {
       return
     }
 
+    if (etype === 'ProjectPermissionsSnapshot' && frame.nodeId && Array.isArray(frame.projectPermissions)) {
+      projectPermissionsByNode.value = { ...projectPermissionsByNode.value, [frame.nodeId]: frame.projectPermissions }
+      if (frame.requestId) projectPermissionWrites.get(frame.requestId)?.()
+      return
+    }
+
     if (frame.requestId && ['Failed', 'NodeUnavailable', 'Error'].includes(etype)) {
+      const projectWrite = projectPermissionWrites.get(frame.requestId)
+      if (projectWrite) {
+        projectWrite(new Error(frame.message || '无法保存项目默认权限'))
+        return
+      }
       const pendingPrompt = outbox.value.find(item => item.id === frame.requestId)
       if (pendingPrompt) {
         transmittingOutbox.delete(pendingPrompt.id)
+        const rows = messagesBySession.value[pendingPrompt.sessionKey] ?? []
+        messagesBySession.value = { ...messagesBySession.value, [pendingPrompt.sessionKey]: rows.filter(row => row.id !== `user-${pendingPrompt.id}`) }
         if (etype !== 'NodeUnavailable') {
           restoreOutboxDraft(pendingPrompt)
           void removeOutboxPrompt(pendingPrompt)
-          const rows = messagesBySession.value[pendingPrompt.sessionKey] ?? []
-          messagesBySession.value = { ...messagesBySession.value, [pendingPrompt.sessionKey]: rows.filter(row => row.id !== `user-${pendingPrompt.id}`) }
           lastError.value = frame.message || '发送失败，消息已还原到输入框'
         }
         return
@@ -973,6 +1013,13 @@ export const useFleetStore = defineStore('fleet', () => {
         return
       }
       if (forcedHistory) return
+      const contextRead = Object.keys(contextReads.value).find(key => contextReads.value[key] === frame.requestId)
+      if (contextRead) {
+        delete contextReads.value[contextRead]
+        return
+      }
+      const compaction = Object.keys(contextCompactions.value).find(key => contextCompactions.value[key] === frame.requestId)
+      if (compaction) delete contextCompactions.value[compaction]
       const listTarget = pendingSessionLists.get(frame.requestId)
       if (listTarget) {
         pendingSessionLists.delete(frame.requestId)
@@ -1117,6 +1164,7 @@ export const useFleetStore = defineStore('fleet', () => {
           worktreePath: s.worktreePath || next[k]?.worktreePath,
           projectKey: s.projectKey || next[k]?.projectKey,
           projectName: s.projectName || next[k]?.projectName,
+          projectDirectory: s.projectDirectory || next[k]?.projectDirectory,
           branch: s.branch || next[k]?.branch,
           model: s.model || next[k]?.model,
           updatedAt: s.updatedAt ?? next[k]?.updatedAt,
@@ -1146,6 +1194,7 @@ export const useFleetStore = defineStore('fleet', () => {
           worktreePath: frame.worktreePath ?? null,
           projectKey: frame.projectKey,
           projectName: frame.projectName,
+          projectDirectory: frame.projectDirectory,
           branch: frame.branch,
           updatedAt: existing?.updatedAt ?? Date.now(),
         },
@@ -1170,7 +1219,7 @@ export const useFleetStore = defineStore('fleet', () => {
         if (item.initialHandoff) {
           sendHandoff({ targetNodeId: nodeId, targetProvider: provider, targetSessionId: frame.sessionId, ...item.initialHandoff })
         } else if (item.initialPrompt) {
-          void sendPromptToSession(k, item.initialPrompt, item.initialAttachments ?? [], runSettings.value[k] ?? item.options)
+          void sendPromptToSession(k, item.initialPrompt, item.initialAttachments ?? [], runSettings.value[k])
         }
       } else {
         applyDefaultModelPref(k, nodeId, provider)
@@ -1210,7 +1259,9 @@ export const useFleetStore = defineStore('fleet', () => {
           Boolean(m.runId && (row.runId === m.runId || row.requestId === m.runId)) || Boolean(m.requestId && row.requestId === m.requestId)
         ))
         if (live && live.text.length >= (m.text?.length ?? 0) && (live.thought?.length ?? 0) >= (m.thought?.length ?? 0) &&
-          (live.toolCalls?.length ?? 0) >= (m.toolCalls?.length ?? 0)) return live
+          (live.toolCalls?.length ?? 0) >= (m.toolCalls?.length ?? 0)) {
+          return live.delivery === 'sending' ? { ...live, delivery: 'sent' } : live
+        }
         const mappedTools = Array.isArray(m.toolCalls) && m.toolCalls.length
           ? m.toolCalls.map((tc, tIdx) => ({
               id: tc.callId || tc.id || `hist-tc-${idx}-${tIdx}`,
@@ -1474,15 +1525,23 @@ export const useFleetStore = defineStore('fleet', () => {
 
     if (etype === 'Accepted') {
       const rid = frame.runId || frame.requestId || createRequestId()
-      const delivered = outbox.value.find(item => item.id === frame.requestId)
+      const requestId = frame.requestId || rid
+      const contextWait = contextWaitingForModel.value[sKey]
+      const submittedPrompt = pendingRunPrompts.get(`${sKey}::${requestId}`)
+      if (contextWait && !contextWait.runId
+        && (!submittedPrompt || (submittedPrompt.model ?? '') === (runSettings.value[sKey]?.model ?? ''))) {
+        contextWait.runId = rid
+      }
+      delete contextReads.value[sKey]
+      updatePromptDelivery(sKey, requestId, 'sent')
+      const delivered = outbox.value.find(item => item.id === requestId && item.sessionKey === sKey)
       if (delivered) {
         deliveredOutbox.set(rid, delivered)
         void removeOutboxPrompt(delivered)
       }
       lastError.value = null
       if (frame.requestId && frame.runId && frame.runId !== frame.requestId) {
-        const promptMeta = pendingRunPrompts.get(`${sKey}::${frame.requestId}`)
-        if (promptMeta) pendingRunPrompts.set(`${sKey}::${frame.runId}`, promptMeta)
+        if (submittedPrompt) pendingRunPrompts.set(`${sKey}::${frame.runId}`, submittedPrompt)
       }
       runningBySession.value = { ...runningBySession.value, [sKey]: rid }
       delete stopStatusBySession.value[sKey]
@@ -1796,6 +1855,10 @@ export const useFleetStore = defineStore('fleet', () => {
     }
 
     if (etype === 'SessionDeleted') {
+      delete contextUsageBySession.value[sKey]
+      delete contextReads.value[sKey]
+      delete contextWaitingForModel.value[sKey]
+      delete contextCompactions.value[sKey]
       const local = storage
       cachedHistoryKeys.delete(sKey)
       cachedHistoryTimes.delete(sKey)
@@ -1842,7 +1905,28 @@ export const useFleetStore = defineStore('fleet', () => {
       return
     }
 
+    if (etype === 'ContextSnapshot' || etype === 'ContextUsage') {
+      const snapshot = etype === 'ContextSnapshot'
+      if (snapshot && (!frame.requestId || contextReads.value[sKey] !== frame.requestId)) return
+      if (!snapshot && !frame.contextUsage) return
+      const contextWait = contextWaitingForModel.value[sKey]
+      if (contextWait && (snapshot || !contextWait.runId || frame.runId !== contextWait.runId)) return
+      delete contextReads.value[sKey]
+      const usage = frame.contextUsage
+      if (usage && Number.isFinite(usage.usedTokens) && usage.usedTokens >= 0) {
+        delete contextWaitingForModel.value[sKey]
+        contextUsageBySession.value[sKey] = usage
+      }
+      return
+    }
+
     if (etype === 'SessionCompacted') {
+      if (frame.requestId === contextCompactions.value[sKey]) delete contextCompactions.value[sKey]
+      if (frame.compactionPending || frame.systemEvent?.kind === 'compacted') {
+        delete contextUsageBySession.value[sKey]
+        delete contextReads.value[sKey]
+        if (frame.systemEvent) requestContextUsage(sKey)
+      }
       if (frame.systemEvent) {
         appendSystemEvent(sKey, nodeId, effProvider, frame.messageId ?? `sys-${frame.systemEvent.kind}-${frame.systemEvent.at}`, frame.systemEvent)
         return
@@ -1960,6 +2044,11 @@ export const useFleetStore = defineStore('fleet', () => {
       const copy = { ...runningBySession.value }
       delete copy[sKey]
       runningBySession.value = copy
+      const contextWait = contextWaitingForModel.value[sKey]
+      if (contextWait?.runId && contextWait.runId === (frame.runId || frame.requestId)) {
+        delete contextWaitingForModel.value[sKey]
+      }
+      if (effProvider === 'hermes' || !contextUsageBySession.value[sKey]?.capacityTokens) requestContextUsage(sKey)
       dismissSessionApprovals(sKey)
       steerSessionKeys.delete(sKey)
       if (sKey !== activeSessionKey.value || !sessionViewVisible) {
@@ -1999,6 +2088,7 @@ export const useFleetStore = defineStore('fleet', () => {
         silentFileReadRequests.delete(frame.requestId)
         return
       }
+      if (frame.requestId) updatePromptDelivery(sKey, frame.requestId, 'failed')
       const isActiveRunError = Boolean(
         (frame.runId && frame.runId === runningBySession.value[sKey]) ||
         (frame.runId && pendingRunPrompts.has(`${sKey}::${frame.runId}`)) ||
@@ -2021,6 +2111,9 @@ export const useFleetStore = defineStore('fleet', () => {
       }
       lastError.value = errText
       const deliveryId = frame.runId || frame.requestId
+      if (deliveryId && contextWaitingForModel.value[sKey]?.runId === deliveryId) {
+        contextWaitingForModel.value[sKey] = {}
+      }
       const failedPrompt = (frame.runId ? pendingRunPrompts.get(`${sKey}::${frame.runId}`) : undefined)
         ?? (frame.requestId ? pendingRunPrompts.get(`${sKey}::${frame.requestId}`) : undefined)
       if (deliveryId) {
@@ -2123,6 +2216,11 @@ export const useFleetStore = defineStore('fleet', () => {
     if (!keysToUpdate.length) return
     const next = { ...runSettings.value }
     for (const k of keysToUpdate) {
+      if (sessionsByKey.value[k] && (next[k]?.model ?? '') !== cleanModel) {
+        delete contextUsageBySession.value[k]
+        delete contextReads.value[k]
+        contextWaitingForModel.value[k] = {}
+      }
       next[k] = {
         ...(next[k] ?? {}),
         model: cleanModel,
@@ -2312,6 +2410,26 @@ export const useFleetStore = defineStore('fleet', () => {
     return sent
   }
 
+  function requestContextUsage(sKey: string) {
+    const sess = sessionsByKey.value[sKey]
+    if (!sess || wsState.value !== 'online' || contextReads.value[sKey] || contextWaitingForModel.value[sKey]) return false
+    const node = nodes.value.find(row => row.id === sess.nodeId)
+    if (node?.status !== 'online' || !node.adapters.find(adapter =>
+      adapter.provider === sess.provider && adapter.capabilities.includes('context-usage'),
+    )) return false
+    const requestId = createRequestId()
+    const sent = sendWsCommand({
+      type: 'session.context.read', nodeId: sess.nodeId, provider: sess.provider, sessionId: sess.sessionId, requestId,
+    }, false)
+    if (sent) {
+      contextReads.value[sKey] = requestId
+      setTimeout(() => {
+        if (contextReads.value[sKey] === requestId) delete contextReads.value[sKey]
+      }, 12_000)
+    }
+    return sent
+  }
+
   function loadSessionHistory(sKey: string, force = false) {
     const sess = sessionsByKey.value[sKey]
     if (wsState.value === 'online' && sess && !pendingHistoryPages.value[sKey] && (force || !messagesBySession.value[sKey]?.length)) {
@@ -2376,7 +2494,7 @@ export const useFleetStore = defineStore('fleet', () => {
     if (!sess) throw new Error('目标会话不存在')
     const reqId = queued?.id ?? createRequestId()
     const seed = queued ? undefined : forkSeedBySession.value[sKey]
-    const wireText = queued?.wireText ?? preparePromptText(sKey, text, options, seed)
+    const wireText = queued?.wireText ?? preparePromptText(text, seed)
 
     if (interruptedBySession.value[sKey]) {
       const nextInt = { ...interruptedBySession.value }
@@ -2428,18 +2546,15 @@ export const useFleetStore = defineStore('fleet', () => {
         nodeId: sess.nodeId,
         provider: sess.provider,
         text,
+        delivery: 'sending',
         artifacts: attachments.length ? attachments : undefined,
         createdAt: Date.now(),
       })
     }
   }
 
-  function preparePromptText(sKey: string, text: string, options: RunOptions | undefined, seed?: string) {
-    const wireText = seed ? `${seed}\n\n---\n${text}` : text
-    if ((options?.planMode || composerModeBySession.value[sKey] === 'plan') && !wireText.startsWith('[Plan Mode]')) {
-      return `[Plan Mode] 请先分析涉及的文件与影响范围，输出清晰的分步执行计划，待我确认后再修改代码或执行破坏性命令。\n\n${wireText}`
-    }
-    return wireText
+  function preparePromptText(text: string, seed?: string) {
+    return seed ? `${seed}\n\n---\n${text}` : text
   }
 
   function restoreOutboxDraft(item: FleetOutboxItem) {
@@ -2455,6 +2570,10 @@ export const useFleetStore = defineStore('fleet', () => {
     outbox.value = outbox.value.filter(row => row.id !== item.id)
     try { await local?.remove('outbox', item.id) }
     catch { if (local === storage) lastError.value = '无法更新本机待发队列' }
+  }
+
+  function isOutboxTransmitting(id: string) {
+    return transmittingOutbox.has(id)
   }
 
   function cancelDeferredPrompt(id: string) {
@@ -2607,7 +2726,7 @@ export const useFleetStore = defineStore('fleet', () => {
     const id = createRequestId()
     const seed = forkSeedBySession.value[sKey]
     const item: FleetOutboxItem = { id, sessionKey: sKey, session, text: body, files: [...files], options: options && { ...options },
-      wireText: preparePromptText(sKey, body, options, seed), createdAt: Date.now() }
+      wireText: preparePromptText(body, seed), createdAt: Date.now() }
     pendingOutboxWrites.add(id)
     try { await local.savePrompt(item) }
     finally { pendingOutboxWrites.delete(id) }
@@ -2680,11 +2799,6 @@ export const useFleetStore = defineStore('fleet', () => {
     delete nextInt[sKey]
     interruptedBySession.value = nextInt
     await sendPromptToSession(sKey, '请从刚才中断的地方继续完成剩余步骤。', [], runSettings.value[sKey])
-  }
-
-  function setComposerMode(sKey: string, mode: ComposerMode) {
-    if (!sKey) return
-    composerModeBySession.value = { ...composerModeBySession.value, [sKey]: mode }
   }
 
   function cancelActiveRun() {
@@ -2773,6 +2887,7 @@ export const useFleetStore = defineStore('fleet', () => {
         nodeId: options.targetNodeId,
         provider: options.targetProvider,
         text: `@Handoff · ${options.summary}`,
+        delivery: 'sending',
         artifacts: options.artifact ? [options.artifact] : undefined,
         createdAt: Date.now(),
       })
@@ -3093,10 +3208,11 @@ export const useFleetStore = defineStore('fleet', () => {
     const cleanQ = (question || '').trim()
     if (existingKey && sessionsByKey.value[existingKey]) {
       if (cleanQ) {
+        const sideOptions = runSettings.value[existingKey]
         if (runningBySession.value[existingKey]) {
-          enqueuePrompt(existingKey, cleanQ, [], { ...runSettings.value[parentKey], readOnly: false })
+          enqueuePrompt(existingKey, cleanQ, [], sideOptions)
         } else {
-          await sendPromptToSession(existingKey, cleanQ, [], runSettings.value[parentKey])
+          await sendPromptToSession(existingKey, cleanQ, [], sideOptions)
         }
       }
       return existingKey
@@ -3132,7 +3248,7 @@ export const useFleetStore = defineStore('fleet', () => {
             }
           }
           if (cleanQ) {
-            void sendPromptToSession(newKey, cleanQ, [], runSettings.value[newKey] ?? runSettings.value[parentKey])
+            void sendPromptToSession(newKey, cleanQ, [], runSettings.value[newKey])
           }
           resolve(newKey)
         },
@@ -3277,14 +3393,22 @@ export const useFleetStore = defineStore('fleet', () => {
 
   function compactSession(sKey: string) {
     const sess = sessionsByKey.value[sKey]
-    if (!sess) return false
-    return sendWsCommand({
+    if (!sess || contextCompactions.value[sKey]) return false
+    const requestId = createRequestId()
+    const sent = sendWsCommand({
       type: 'session.compact',
       nodeId: sess.nodeId,
       provider: sess.provider,
       sessionId: sess.sessionId,
-      requestId: createRequestId(),
+      requestId,
     })
+    if (sent) {
+      contextCompactions.value[sKey] = requestId
+      setTimeout(() => {
+        if (contextCompactions.value[sKey] === requestId) delete contextCompactions.value[sKey]
+      }, 100_000)
+    }
+    return sent
   }
 
   function renameSession(sKey: string, title: string) {
@@ -3411,7 +3535,7 @@ export const useFleetStore = defineStore('fleet', () => {
         }
         activeSessionKey.value = newKey
         if (followUpPrompt?.trim()) {
-          void sendPromptToSession(newKey, followUpPrompt.trim(), [], runSettings.value[sKey], true)
+          void sendPromptToSession(newKey, followUpPrompt.trim(), [], runSettings.value[newKey], true)
         }
       },
     })
@@ -3509,6 +3633,39 @@ export const useFleetStore = defineStore('fleet', () => {
       message: cleanMsg,
       ...(paths?.length ? { paths } : {}),
       requestId: createRequestId(),
+    })
+  }
+
+  function supportsProjectPermissions(nodeId: string) {
+    return Boolean(nodes.value.find(node => node.id === nodeId)?.adapters.some(
+      adapter => adapter.capabilities.includes('project-permissions'),
+    ))
+  }
+
+  function requestProjectPermissions(nodeId: string) {
+    if (wsState.value !== 'online' || !supportsProjectPermissions(nodeId)) return
+    sendWsCommand({ type: 'project.permissions.list', nodeId, requestId: createRequestId() }, false)
+  }
+
+  function saveProjectPermission(nodeId: string, cwd: string, mode: ProjectPermissionSetting) {
+    return new Promise<void>((resolve, reject) => {
+      if (wsState.value !== 'online' || nodes.value.find(node => node.id === nodeId)?.status !== 'online'
+        || !supportsProjectPermissions(nodeId)) {
+        reject(new Error('请连接支持项目权限的 Agent Node'))
+        return
+      }
+      const requestId = createRequestId()
+      const finish = (error?: Error) => {
+        clearTimeout(timer)
+        projectPermissionWrites.delete(requestId)
+        if (error) reject(error)
+        else resolve()
+      }
+      const timer = setTimeout(() => finish(new Error('未收到节点确认，请重新打开项目设置查看')), 8000)
+      projectPermissionWrites.set(requestId, finish)
+      if (!sendWsCommand({ type: 'project.permissions.set', nodeId, cwd, mode, requestId }, false)) {
+        finish(new Error('无法连接 Agent Node'))
+      }
     })
   }
 
@@ -3715,6 +3872,7 @@ export const useFleetStore = defineStore('fleet', () => {
     composerDrafts,
     chatNodes,
     outbox,
+    isOutboxTransmitting,
     cancelDeferredPrompt,
     runSettings,
     catalogs,
@@ -3737,7 +3895,10 @@ export const useFleetStore = defineStore('fleet', () => {
     interruptedBySession,
     stopStatusBySession,
     sideChatSessionKeyByParent,
-    composerModeBySession,
+    projectPermissionsByNode,
+    requestProjectPermissions,
+    saveProjectPermission,
+    supportsProjectPermissions,
     sendShortcut,
     soundEnabled,
     notificationsEnabled,
@@ -3786,9 +3947,11 @@ export const useFleetStore = defineStore('fleet', () => {
     historyStateBySession,
     deviceSessionScope: localCacheScope,
     pendingHistoryPages,
+    contextUsageBySession,
+    contextCompactions,
+    requestContextUsage,
     applyDefaultModelPref,
     setModelPreference,
-    setComposerMode,
     requestSessionsList,
     openSession,
     activateSession,

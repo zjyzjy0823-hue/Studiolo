@@ -54,6 +54,7 @@ from .worktree import current_session_ref, project_identity, recover_session_wor
 
 
 _LOG = logging.getLogger(__name__)
+_PROJECT_PERMISSION_MODES = ("default", "read", "deny")
 
 
 @dataclass
@@ -112,6 +113,9 @@ class AgentNodeDaemon:
         self._compacting_sessions: set[tuple[str, str]] = set()
         self._session_streams: OrderedDict[tuple[str, str], SessionStream] = OrderedDict()
         self._command_db = (staging_dir or Path.home() / ".studiolo" / "agent-node") / "chat-commands.sqlite3"
+        self._project_permissions_file = self._command_db.with_name("project-permissions.json")
+        self._project_permissions = self._load_project_permissions()
+        self._adapter_capabilities: dict[str, tuple[str, ...]] = {}
         self._command_scope = sha256(f"{config.core_url}\n{config.node_token}".encode()).hexdigest()
         self._send_lock = asyncio.Lock()
 
@@ -131,6 +135,72 @@ class AgentNodeDaemon:
             self._trust_file.write_text(json.dumps(self._trust_patterns, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
             pass
+
+    def _load_project_permissions(self) -> dict[Path, str]:
+        try:
+            data = json.loads(self._project_permissions_file.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        if not isinstance(data, dict) or any(mode not in _PROJECT_PERMISSION_MODES for mode in data.values()):
+            raise ValueError("项目权限配置无效")
+        return {Path(path): mode for path, mode in data.items()}
+
+    def _set_project_permission(self, directory: Path, mode: str) -> None:
+        policies = dict(self._project_permissions)
+        if mode == "inherit":
+            policies.pop(directory, None)
+        else:
+            policies[directory] = mode
+        self._project_permissions_file.parent.mkdir(parents=True, exist_ok=True)
+        pending = self._project_permissions_file.with_suffix(f".{uuid4().hex}.tmp")
+        try:
+            pending.write_text(json.dumps({str(path): value for path, value in policies.items()}, ensure_ascii=False), encoding="utf-8")
+            pending.replace(self._project_permissions_file)
+        finally:
+            pending.unlink(missing_ok=True)
+        self._project_permissions = policies
+
+    async def _resolve_run_permissions(
+        self, provider: str, session_id: str, adapter: AgentAdapter, options: dict[str, Any],
+    ) -> dict[str, Any]:
+        mode = options.get("permissionOverride")
+        if mode is not None and mode not in _PROJECT_PERMISSION_MODES:
+            raise ValueError("会话的临时权限设置无效")
+        key = (provider, session_id)
+        if self._project_permissions and key not in self._session_cwds and mode is None:
+            # A resumed session can send a prompt before its directory has been announced.
+            for page in range(1, 21):
+                sessions = await adapter.list_sessions(page=page, limit=50)
+                metadata = next((row for row in sessions if row.get("sessionId") == session_id), None)
+                if metadata:
+                    await asyncio.to_thread(self._remember_session_checkout, provider, metadata)
+                    break
+                if len(sessions) < 50:
+                    break
+            if key not in self._session_cwds:
+                raise ValueError("无法核实当前会话的项目权限，请刷新节点会话列表或临时选择本会话权限")
+        if mode is None:
+            worktree = self._session_worktrees.get(key)
+            directory = worktree[0] if worktree else self._session_cwds.get(key)
+            if directory is not None:
+                mode = next((self._project_permissions[path] for path in (directory, *directory.parents)
+                             if path in self._project_permissions), None)
+            if options.get("readOnly"):
+                mode = "read"
+            elif options.get("denyRequests") and mode not in (None, "read"):
+                mode = "deny"
+        if mode is None:
+            return options
+        if mode == "read" and provider not in ("codex", "mock"):
+            raise ValueError("当前代理不支持项目的只读权限，请切换代理或选择本会话的临时权限")
+        if mode == "deny":
+            caps = self._adapter_capabilities.get(provider)
+            if caps is None:
+                caps = (await adapter.probe()).capabilities
+                self._adapter_capabilities[provider] = caps
+            if "approval" not in caps:
+                raise ValueError("当前代理由宿主管理审批，请切换代理或选择本会话的临时权限")
+        return {**options, "readOnly": mode == "read", "denyRequests": mode == "deny", "autoApprove": False}
 
     @staticmethod
     def _derive_trust_prefix(command: str) -> str:
@@ -206,19 +276,21 @@ class AgentNodeDaemon:
             if project_dir not in cache:
                 cache[project_dir] = project_identity(project_dir, self.config.allowed_roots)
             meta = {**meta, **cache[project_dir]}
-        return meta
+        return {**meta, "projectDirectory": str(worktree[0] if worktree else cwd)}
 
     async def probe_adapters(self) -> list[dict[str, Any]]:
         results = []
         for name, adapter in self.adapters.items():
             try:
                 p = await adapter.probe()
+                self._adapter_capabilities[name] = p.capabilities
                 results.append({
                     "provider": p.provider,
                     "version": p.version,
                     "status": p.status,
                     "capabilities": [
                         *p.capabilities,
+                        "project-permissions",
                         *(["deny-requests", "auto-approve"] if "approval" in p.capabilities else []),
                     ],
                 })
@@ -412,6 +484,27 @@ class AgentNodeDaemon:
             if req_id and "requestId" not in payload:
                 payload["requestId"] = req_id
             await self._send_ws(ws, payload)
+
+        if cmd in ("project.permissions.list", "project.permissions.set"):
+            if cmd == "project.permissions.set":
+                try:
+                    mode = frame.get("mode")
+                    if mode not in (*_PROJECT_PERMISSION_MODES, "inherit"):
+                        raise ValueError("项目默认权限无效")
+                    if not isinstance(frame.get("cwd"), str) or not frame["cwd"].strip():
+                        raise ValueError("请选择项目目录")
+                    directory = ensure_allowed_path(frame["cwd"], self.config.allowed_roots)
+                    if not directory.is_dir():
+                        raise ValueError("项目目录不存在")
+                    self._set_project_permission(directory, mode)
+                except (ValueError, OSError, PathOutsideAllowedRootsError) as err:
+                    await send_back({"type": "Failed", "code": "project_permission_error", "message": str(err)})
+                    return
+            await send_back({
+                "type": "ProjectPermissionsSnapshot",
+                "projectPermissions": [{"cwd": str(path), "mode": mode} for path, mode in self._project_permissions.items()],
+            })
+            return
 
         if cmd == "permission.respond":
             call_id = str(frame.get("callId") or "")
@@ -755,6 +848,14 @@ class AgentNodeDaemon:
                                      "messages": msgs, "historyCursor": cursor, "beforeCursor": before})
                     return
                 await send_back({"type": "SessionHistory", "provider": provider, "sessionId": sid, "messages": msgs})
+            elif cmd == "session.context.read":
+                sid = str(frame.get("sessionId") or "")
+                try:
+                    usage = await asyncio.wait_for(adapter.get_context_usage(session_id=sid), timeout=8)
+                except Exception:
+                    _LOG.debug("Context usage unavailable for provider=%s", provider, exc_info=False)
+                    usage = None
+                await send_back({"type": "ContextSnapshot", "provider": provider, "sessionId": sid, "contextUsage": usage})
             elif cmd == "files.list":
                 sid = str(frame.get("sessionId") or "")
                 target_dir = self._resolve_session_dir(provider, sid or None, frame.get("cwd"))
@@ -1091,7 +1192,7 @@ class AgentNodeDaemon:
                 command_id = str(frame.get("commandId") or req_id or "")
                 if len(command_id) > 128:
                     raise ValueError("命令 ID 过长")
-                options = frame.get("options") or {}
+                options = await self._resolve_run_permissions(provider, sid, adapter, frame.get("options") or {})
                 if options.get("readOnly") and provider not in ("codex", "mock"):
                     raise ValueError("当前适配器不支持只读沙箱")
                 runtime = {k: options[k] for k in ("model", "effort", "readOnly", "agent") if options.get(k)}

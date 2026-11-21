@@ -30,6 +30,7 @@ from .base import (
     extract_usage_counts,
     merge_prompt_with_attachments,
     prepare_session_dir,
+    safe_token_int,
 )
 
 _QUIET_TURN_SECONDS = 120.0
@@ -411,6 +412,8 @@ class OpenCodeAdapter(AgentAdapter):
             "mcp",
             "forms",
             "subagents",
+            "context-usage",
+            "context-compact",
         )
         key_quota_caps = (*caps, "subscription-quota") if self._go_api_key else caps
         await self._ensure_managed_serve()
@@ -579,7 +582,7 @@ class OpenCodeAdapter(AgentAdapter):
             sid = str(data.get("id") or sid_seed)
             return {"sessionId": sid, "provider": self.provider, "cwd": str(eff_cwd), "worktreePath": wt_path, "title": data.get("title") or sid}
 
-    async def get_history(self, *, session_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    async def _history_items(self, session_id: str, limit: int) -> list[dict[str, Any]]:
         async with self._client() as c:
             prefix = await self._detect_api_prefix(c)
             directory = await self._session_directory(c, prefix, session_id)
@@ -601,8 +604,61 @@ class OpenCodeAdapter(AgentAdapter):
                 if isinstance(tm, dict) and isinstance(tm.get("created"), (int, float)):
                     ts_list.append(float(tm["created"]))
             if len(ts_list) >= 2 and ts_list[0] > ts_list[-1]:
-                items = list(reversed(items))
+                items.reverse()
+            return items
 
+    def _context_usage(self, message: dict[str, Any], fallback_model: str = "") -> dict[str, Any] | None:
+        tokens = message.get("tokens")
+        if not isinstance(tokens, dict):
+            return None
+        counts = extract_usage_counts(tokens)
+        cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
+        used = (counts["inputTokens"] + counts["outputTokens"] + counts["reasoningTokens"]
+                + counts["cachedInputTokens"] + safe_token_int(cache.get("write")))
+        if used <= 0:
+            return None
+        model = message.get("model")
+        provider = message.get("providerID")
+        model_id = message.get("modelID")
+        if isinstance(model, dict):
+            provider = model.get("providerID") or provider
+            model_id = model.get("modelID") or model.get("id") or model_id
+        elif isinstance(model, str):
+            model_id = model_id or model
+        if isinstance(model_id, str) and "/" in model_id:
+            model_name = model_id
+        elif provider and model_id:
+            model_name = f"{provider}/{model_id}"
+        elif fallback_model and (not model_id or model_id == fallback_model.rsplit("/", 1)[-1]):
+            model_name = fallback_model
+        else:
+            model_name = str(model_id or "")
+        capacity = self._model_context_windows.get(model_name)
+        return {"usedTokens": used, "source": "last-request",
+                **({"capacityTokens": capacity} if capacity else {}),
+                **({"model": model_name} if model_name else {})}
+
+    async def get_context_usage(self, *, session_id: str) -> dict[str, Any] | None:
+        for message in reversed(await self._history_items(session_id, limit=24)):
+            if _opencode_compaction(message):
+                return None
+            info = message.get("info") if isinstance(message.get("info"), dict) else message
+            if (info.get("role") or info.get("type")) != "assistant" or info.get("error") or info.get("summary"):
+                continue
+            usage = self._context_usage(info)
+            if usage:
+                if usage.get("model") and not usage.get("capacityTokens"):
+                    try:
+                        await self.list_models()
+                    except (httpx.HTTPError, ValueError):
+                        return usage
+                    return self._context_usage(info)
+                return usage
+        return None
+
+    async def get_history(self, *, session_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        items = await self._history_items(session_id, limit)
+        if items:
             out: list[dict[str, Any]] = []
             for msg in items:
                 boundary = _opencode_compaction(msg)
@@ -723,6 +779,7 @@ class OpenCodeAdapter(AgentAdapter):
                     entry_v1["media"] = v1_media
                 out.append(entry_v1)
             return out[-limit:]
+        return []
 
     async def send_prompt(
         self,
@@ -813,6 +870,7 @@ class OpenCodeAdapter(AgentAdapter):
             before = None
         baseline = {str(row["info"]["id"]) for row in before or [] if row["info"].get("id")}
         seen_compactions: set[str] = set()
+        seen_context: dict[str, dict[str, Any]] = {}
 
         async def consume(evt: dict[str, Any]) -> bool:
             etype = evt.get("type")
@@ -913,6 +971,10 @@ class OpenCodeAdapter(AgentAdapter):
                     if info.get("role", "assistant") == "assistant" and isinstance(info.get("tokens"), dict):
                         counts = extract_usage_counts(info["tokens"])
                         usage_id = str(info.get("id") or "")
+                        context = self._context_usage(info, (options or {}).get("model") or "")
+                        if context and not info.get("summary") and seen_context.get(usage_id) != context:
+                            seen_context[usage_id] = context
+                            await emit({**scoped, "type": "ContextUsage", "contextUsage": context})
                         if sum(counts.values()) > 0 and seen_usage.get(usage_id) != counts:
                             seen_usage[usage_id] = counts
                             await emit(
@@ -1324,6 +1386,10 @@ class OpenCodeAdapter(AgentAdapter):
                         if sum(counts.values()) > 0:
                             sel_model = (options or {}).get("model") or ""
                             ctx_win = self._model_context_windows.get(sel_model)
+                            context = self._context_usage(data, sel_model)
+                            if context:
+                                await emit({"type": "ContextUsage", "sessionId": session_id,
+                                            "runId": run_id, "requestId": request_id, "contextUsage": context})
                             await emit(
                                 build_token_usage_event(
                                     session_id=session_id,
@@ -1475,7 +1541,10 @@ class OpenCodeAdapter(AgentAdapter):
                 res = await c.post(f"{self.serve_url}/session/{session_id}/summarize", params=location, json=body)
             if not res.is_success:
                 return {"supported": False, "message": "OpenCode 未接受上下文压缩请求"}
-        for row in reversed(await self.get_history(session_id=session_id, limit=8)):
-            if row.get("systemEvents") and row["id"] not in existing:
-                return compaction_frame(row)
-        return {"supported": True, "message": "已提交 OpenCode 压缩请求，等待代理报告结果"}
+        for delay in (0, 0.25, 0.75, 1.5, 2.5):
+            if delay:
+                await asyncio.sleep(delay)
+            for row in reversed(await self.get_history(session_id=session_id, limit=8)):
+                if row.get("systemEvents") and row["id"] not in existing:
+                    return compaction_frame(row)
+        return {"supported": True, "compactionPending": True, "message": "已提交 OpenCode 压缩请求，等待代理报告结果"}

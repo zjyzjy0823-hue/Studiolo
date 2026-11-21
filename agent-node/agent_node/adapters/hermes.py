@@ -3,13 +3,15 @@
 import asyncio
 from collections import OrderedDict, deque
 from copy import deepcopy
+import json
 from pathlib import Path
 import time
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
 import httpx
+import websockets
 
 from ..config import PathOutsideAllowedRootsError, ensure_allowed_path
 from .base import (
@@ -24,6 +26,7 @@ from .base import (
     merge_prompt_with_attachments,
     prepare_session_dir,
     probe_cli_binary,
+    safe_token_int,
 )
 from .jsonrpc import StdioJsonRpcProcess
 
@@ -124,6 +127,20 @@ def _gateway_history(items: list[Any]) -> list[dict[str, Any]]:
     return history
 
 
+def _hermes_context(raw: dict[str, Any], *, acp: bool = False) -> dict[str, Any] | None:
+    used = raw.get("used" if acp else "context_used")
+    capacity = safe_token_int(raw.get("size" if acp else "context_max"))
+    if type(used) not in (int, float) or not 0 <= used < float("inf") or (used == 0 and not capacity):
+        return None
+    model = raw.get("model")
+    return {
+        "usedTokens": safe_token_int(used),
+        "source": "estimated" if acp or raw.get("context_estimated") else "reported",
+        **({"capacityTokens": capacity} if capacity else {}),
+        **({"model": model} if isinstance(model, str) and model else {}),
+    }
+
+
 class HermesAdapter(AgentAdapter):
     provider = "hermes"
 
@@ -150,14 +167,16 @@ class HermesAdapter(AgentAdapter):
         self._history_replays: dict[str, deque[dict[str, Any]]] = {}
         self._history_updated: dict[str, asyncio.Event] = {}
         self._history: OrderedDict[str, deque[dict[str, Any]]] = OrderedDict()
+        self._context_usage: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._context_waiters: dict[str, asyncio.Event] = {}
         self._turns: dict[str, tuple[str, EventEmitter]] = {}
         self._approvals: dict[str, ApprovalCallback] = {}
         self._tool_starts: dict[tuple[str, str], float] = {}
         # ACP 只在会话响应里给出模型清单（SessionModelState），所以把最近一次读到的缓存下来，
         # 供“模型选择器”（models.list）使用；current 与 ACP 的真实当前模型保持一致。
         self._picker_models: list[dict[str, Any]] | None = None
-        self._current_model: str | None = None
-        self._current_effort: str | None = None
+        self._model_by_session: dict[str, str] = {}
+        self._effort_by_session: dict[str, str] = {}
         self._effort_levels: list[str] = []
 
     async def _ensure_acp(self) -> StdioJsonRpcProcess:
@@ -178,13 +197,16 @@ class HermesAdapter(AgentAdapter):
             if await self._proc.start():
                 self._initialized = False
                 self._loaded_sessions.clear()
+                self._context_usage.clear()
+                self._model_by_session.clear()
+                self._effort_by_session.clear()
             if not self._initialized:
                 await self._proc.call("initialize", {"protocolVersion": 1, "clientInfo": {"name": "studiolo", "version": "0.8.1"}})
                 self._initialized = True
             return self._proc
 
     async def probe(self) -> AdapterProbe:
-        caps = ("chat", "history", "approval", "worktree", "models", "cron", "files", "diff", "checkpoints", "todos")
+        caps = ("chat", "history", "approval", "worktree", "models", "cron", "files", "diff", "checkpoints", "todos", "context-usage")
         if self.mode == "gateway" and self.serve_url:
             try:
                 headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
@@ -269,7 +291,7 @@ class HermesAdapter(AgentAdapter):
                         await asyncio.wait_for(updated.wait(), timeout=0.12)
             except TimeoutError:
                 pass
-            self._remember_models(response)
+            self._remember_models(response, sid)
             self._save_history(sid, messages)
         finally:
             self._history_replays.pop(sid, None)
@@ -290,7 +312,7 @@ class HermesAdapter(AgentAdapter):
             if self._picker_models is None and sid not in self._turns:
                 await self._load_acp_session(proc, sid)
 
-    def _remember_models(self, response: dict[str, Any] | None) -> None:
+    def _remember_models(self, response: dict[str, Any] | None, session_id: str) -> None:
         """缓存 ACP 会话响应里的 SessionModelState（availableModels / currentModelId）。
 
         思考档位不在 ModelInfo 里：ACP 把可选项放在会话响应的 ``configOptions`` 中
@@ -318,7 +340,7 @@ class HermesAdapter(AgentAdapter):
             return
         current = state.get("currentModelId") or state.get("current_model_id")
         if current:
-            self._current_model = str(current)
+            self._model_by_session[session_id] = str(current)
         rows = state.get("availableModels") or state.get("available_models") or []
         models: list[dict[str, Any]] = []
         for row in rows:
@@ -385,9 +407,9 @@ class HermesAdapter(AgentAdapter):
                     pass
         if self._picker_models is None:
             res = await proc.call("session/new", {"cwd": str(self.allowed_roots[0]), "mcpServers": []})
-            self._remember_models(res)
             new_sid = str((res or {}).get("sessionId") or "")
             if new_sid:
+                self._remember_models(res, new_sid)
                 self._session_cwds.setdefault(new_sid, self.allowed_roots[0])
                 self._loaded_sessions.add(new_sid)
                 self._save_history(new_sid, deque(maxlen=_HISTORY_LIMIT))
@@ -419,7 +441,7 @@ class HermesAdapter(AgentAdapter):
             self._session_cwds[sid] = eff_cwd
             self._loaded_sessions.add(sid)
             self._save_history(sid, deque(maxlen=_HISTORY_LIMIT))
-            self._remember_models(res)
+            self._remember_models(res, sid)
         return {"sessionId": sid, "provider": self.provider, "cwd": str(eff_cwd), "worktreePath": wt_path, "title": f"Hermes ({eff_cwd.name})"}
 
     async def get_history(self, *, session_id: str, limit: int = 50) -> list[dict[str, Any]]:
@@ -444,6 +466,68 @@ class HermesAdapter(AgentAdapter):
                 await self._load_acp_session(proc, session_id)
         return deepcopy(list(self._history.get(session_id, ()))[-limit:])
 
+    async def _gateway_context_usage(self, session_id: str) -> dict[str, Any] | None:
+        if not self.serve_url:
+            return None
+        base = urlsplit(self.serve_url)
+        if base.scheme not in ("http", "https") or base.username is not None or base.query or base.fragment:
+            return None
+        if session_id in self._session_cwds and self._session_cwds[session_id] is None:
+            return None
+        # The session REST API and the dashboard RPC may be served separately.
+        # Reuse configured credentials only on this host and send only a short-lived ticket on the socket.
+        partial = None
+        try:
+            async with asyncio.timeout(4):
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    response = await client.post(f"{self.serve_url}/api/auth/ws-ticket", headers=self._gateway_headers(), json={})
+                    if not response.is_success:
+                        return None
+                    payload = response.json()
+                    ticket = payload.get("ticket") if isinstance(payload, dict) else None
+                if not isinstance(ticket, str) or not ticket:
+                    return None
+                ws_uri = f"{'wss' if base.scheme == 'https' else 'ws'}://{base.netloc}{base.path}/api/ws"
+                async with websockets.connect(ws_uri, subprotocols=["hermes-gateway-v1", f"hermes-gateway-ticket.{ticket}"],
+                                              open_timeout=3.0, close_timeout=0.5) as ws:
+                    for rpc_id, method in enumerate(("session.stats", "session.context_breakdown"), 1):
+                        await ws.send(json.dumps({"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": {"session_id": session_id}}))
+                        async for frame in ws:
+                            reply = json.loads(frame)
+                            if not isinstance(reply, dict) or reply.get("id") != rpc_id:
+                                continue
+                            result = reply.get("result")
+                            if isinstance(result, dict):
+                                usage = result.get("usage")
+                                snapshot = _hermes_context(usage if isinstance(usage, dict) else result)
+                                if snapshot and snapshot.get("capacityTokens"):
+                                    return snapshot
+                                if snapshot:
+                                    partial = snapshot
+                            break
+        except (OSError, ValueError, TimeoutError, httpx.HTTPError, websockets.WebSocketException):
+            pass
+        return partial
+
+    async def get_context_usage(self, *, session_id: str) -> dict[str, Any] | None:
+        if self.mode == "gateway":
+            return await self._gateway_context_usage(session_id) or self._context_usage.get(session_id)
+        if session_id in self._context_usage:
+            return self._context_usage[session_id]
+        readiness = self._context_waiters.setdefault(session_id, asyncio.Event())
+        try:
+            proc = await self._ensure_acp()
+            async with self._history_lock:
+                if session_id not in self._turns and session_id not in self._loaded_sessions:
+                    await self._load_acp_session(proc, session_id)
+            try:
+                await asyncio.wait_for(readiness.wait(), timeout=0.7)
+            except TimeoutError:
+                pass
+            return self._context_usage.get(session_id)
+        finally:
+            self._context_waiters.pop(session_id, None)
+
     async def send_prompt(
         self,
         *,
@@ -466,19 +550,20 @@ class HermesAdapter(AgentAdapter):
         try:
             prompt_text = merge_prompt_with_attachments(text, attachments)
             requested_model = str((options or {}).get("model") or "")
-            if requested_model and requested_model != self._current_model and self.mode != "gateway":
+            if requested_model and requested_model != self._model_by_session.get(session_id) and self.mode != "gateway":
                 # ACP 的模型切换是会话级的（session/set_model），必须在空闲且发送 prompt 之前完成。
+                self._context_usage.pop(session_id, None)
                 await proc.call("session/set_model", {"sessionId": session_id, "modelId": requested_model})
-                self._current_model = requested_model
-                self._current_effort = None  # 换模型会重建 agent，档位需按新路由重设
+                self._model_by_session[session_id] = requested_model
+                self._effort_by_session.pop(session_id, None)  # 换模型会重建 agent，档位需按新路由重设
             requested_effort = str((options or {}).get("effort") or "").strip().lower()
-            if requested_effort and requested_effort != self._current_effort and self.mode != "gateway":
+            if requested_effort and requested_effort != self._effort_by_session.get(session_id) and self.mode != "gateway":
                 # 思考档位同样走会话级 config option（Hermes ACP 侧已经实现 reasoning_effort）。
                 await proc.call(
                     "session/set_config_option",
                     {"sessionId": session_id, "configId": "reasoning_effort", "value": requested_effort},
                 )
-                self._current_effort = requested_effort
+                self._effort_by_session[session_id] = requested_effort
             messages = self._history.get(session_id, deque(maxlen=_HISTORY_LIMIT))
             self._save_history(session_id, messages)
             messages.append({"role": "user", "text": text, "runId": request_id})
@@ -575,9 +660,23 @@ class HermesAdapter(AgentAdapter):
         replay = self._history_replays.get(sid)
         turn = self._turns.get(sid)
         upd = params.get("update")
-        if (replay is None and turn is None) or not isinstance(upd, dict):
+        if not isinstance(upd, dict) or not sid:
             return
         kind = upd.get("sessionUpdate") or upd.get("session_update")
+        if kind == "usage_update":
+            context = _hermes_context(upd, acp=True)
+            if context:
+                self._context_usage[sid] = context
+                self._context_usage.move_to_end(sid)
+                if len(self._context_usage) > _HISTORY_SESSIONS:
+                    self._context_usage.popitem(last=False)
+                if waiter := self._context_waiters.get(sid):
+                    waiter.set()
+                if turn:
+                    await turn[1]({"type": "ContextUsage", "sessionId": sid, "runId": turn[0], "contextUsage": context})
+            return
+        if replay is None and turn is None:
+            return
         content = upd.get("content")
         text = content.get("text") if isinstance(content, dict) else None
         tool = None

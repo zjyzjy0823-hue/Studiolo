@@ -10,6 +10,7 @@ import {
   fuzzyMatchFileScore,
   isQuotaOrModelError,
   readTurnTestResult,
+  repliedUserMessageIds,
   shouldConvertToPastedBlock,
   systemEventLabel,
 } from '../../services/chatHelpers'
@@ -25,11 +26,12 @@ import {
   type CustomPromptTemplate,
 } from '../../services/customPrompts'
 import { formatTokenCount } from '../../services/tokenUsage'
+import { findProjectPermission, supportsChatPermission } from '../../services/projectPermissions'
 import type {
   ApprovalDecision,
   ArtifactRef,
   ChatMessage,
-  ComposerMode,
+  ChatPermissionMode,
   FleetModel,
   PastedTextBlock,
   ToolCallBadge,
@@ -51,6 +53,7 @@ const props = defineProps<{
   mobile?: boolean
   compact?: boolean
   sessionKey?: string
+  projectSettings?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -61,6 +64,7 @@ const emit = defineEmits<{
   openSubagent: [sessionId: string]
   openSideChat: [question?: string]
   clearSession: []
+  openProjectSettings: [nodeId: string, directory: string]
 }>()
 
 const auth = useAuthStore()
@@ -89,11 +93,13 @@ const settingsId = useId()
 const settingsPopup = ref<HTMLElement>()
 const settingsTrigger = ref<HTMLButtonElement>()
 const modelTriggerRef = ref<HTMLButtonElement>()
+const contextTriggerRef = ref<HTMLButtonElement>()
 const settingsOpen = ref(false)
 const draftMeasure = ref<HTMLElement>()
 const editorHeight = ref<number>()
 const followLatest = ref(true)
-const panel = ref<'model' | 'permissions' | 'attach'>('model')
+type ComposerPanel = 'model' | 'permissions' | 'attach' | 'context'
+const panel = ref<ComposerPanel>('model')
 const adapter = computed(() => effectiveNode.value?.adapters.find(a => a.provider === effectiveProvider.value))
 const caps = computed(() => adapter.value?.capabilities ?? [])
 const target = computed(() => `${effectiveNode.value?.id}::${effectiveProvider.value}`)
@@ -106,9 +112,6 @@ const rulesList = computed(
 )
 const skillsList = computed(
   () => (effectiveKey.value ? fleet.skillsByTarget[effectiveKey.value] : undefined) ?? fleet.skillsByTarget[target.value] ?? [],
-)
-const composerMode = computed<ComposerMode>(() =>
-  (effectiveKey.value ? fleet.composerModeBySession[effectiveKey.value] : undefined) ?? 'build',
 )
 const isInterrupted = computed(() =>
   Boolean(effectiveKey.value && fleet.interruptedBySession[effectiveKey.value]),
@@ -125,11 +128,6 @@ const previewingPasteBlock = ref<PastedTextBlock | null>(null)
 // 划词引用浮层状态（Selection Quote）
 const selectionQuote = ref<{ text: string; top: number; left: number } | null>(null)
 const threadRootRef = ref<HTMLElement | null>(null)
-
-function setMode(next: ComposerMode) {
-  const key = settingsKey.value
-  if (key) fleet.setComposerMode(key, next)
-}
 
 function handleMessageSelection() {
   if (props.mobile || typeof window === 'undefined') {
@@ -221,20 +219,31 @@ const usageSourceLabel = computed(() => {
   if (src === 'mixed') return '混合'
   return '估算'
 })
-const usageContextRatio = computed(() => {
-  const usage = sessionUsage.value
-  if (!usage?.contextWindow || usage.contextWindow <= 0 || usage.lastTurnTokens <= 0) return 0
-  return Math.min(100, (usage.lastTurnTokens / usage.contextWindow) * 100)
+const contextUsage = computed(() => fleet.contextUsageBySession[effectiveKey.value])
+const contextCapacity = computed(() => {
+  const capacity = contextUsage.value?.capacityTokens
+  return capacity && Number.isFinite(capacity) && capacity > 0 ? capacity : null
 })
-const usageContextBarWidth = computed(() => {
-  const ratio = usageContextRatio.value
-  return ratio > 0 ? Math.max(2, ratio) : 0
+const contextRatio = computed(() =>
+  contextUsage.value && contextCapacity.value
+    ? contextUsage.value.usedTokens / contextCapacity.value * 100
+    : null,
+)
+const contextPercent = computed(() => {
+  const ratio = contextRatio.value
+  if (ratio === null) return ''
+  return ratio > 0 && ratio < 1 ? '<1%' : `${Math.round(ratio)}%`
 })
-const usageContextPercentLabel = computed(() => {
-  const ratio = usageContextRatio.value
-  if (ratio === 0) return '0%'
-  return ratio < 1 ? '<1%' : `${Math.round(ratio)}%`
+const contextCount = computed(() => {
+  const used = contextUsage.value?.usedTokens
+  if (used === undefined) return '—'
+  return used >= 10_000 ? `${(used / 10_000).toLocaleString('zh-CN', { maximumFractionDigits: 1 })}万` : String(used)
 })
+watch(
+  [effectiveKey, () => props.mobile, () => effectiveNode.value?.status, () => fleet.wsState, () => caps.value.includes('context-usage')],
+  ([key, mobile]) => { if (mobile && key) fleet.requestContextUsage(key) },
+  { immediate: true },
+)
 const usageTooltip = computed(() => {
   const u = sessionUsage.value
   if (!u) return '仅在浏览器内存中累计当前连接下的 Token 消耗'
@@ -249,60 +258,60 @@ const usageTooltip = computed(() => {
 })
 const currentDirectory = computed(() => effectiveSession.value?.cwd || effectiveNode.value?.allowedRoots?.[0] || '')
 const directoryName = computed(() => currentDirectory.value.split(/[\\/]/).filter(Boolean).pop() || currentDirectory.value)
-const permissionMode = computed(() =>
-  options.value.readOnly ? 'read'
-  : options.value.denyRequests ? 'deny'
-  : options.value.autoApprove ? 'turbo'
-  : 'default',
-)
+const projectDirectory = computed(() => effectiveSession.value?.projectDirectory
+  || currentDirectory.value.split(/[/\\]\.studiolo-worktrees(?:[/\\]|$)/i, 1)[0])
+const projectPermission = computed(() => {
+  const nodeId = effectiveNode.value?.id
+  if (!nodeId || !fleet.supportsProjectPermissions(nodeId)) return undefined
+  return findProjectPermission(fleet.projectPermissionsByNode[nodeId] ?? [], projectDirectory.value)
+})
+const permissionOverride = computed(() => options.value.permissionOverride
+  ?? (options.value.readOnly ? 'read' : options.value.denyRequests ? 'deny' : undefined))
+const permissionMode = computed(() => permissionOverride.value ?? projectPermission.value?.mode ?? 'default')
+const permissionSupported = computed(() => supportsChatPermission(permissionMode.value, caps.value))
+const permissionSource = computed(() => permissionOverride.value ? '本会话临时设置'
+  : projectPermission.value ? '项目默认' : '节点默认')
+const permissionSyncing = computed(() => {
+  const id = effectiveNode.value?.id
+  return !permissionOverride.value && Boolean(id && effectiveNode.value?.status === 'online'
+    && fleet.supportsProjectPermissions(id) && !fleet.projectPermissionsByNode[id])
+})
 interface PermissionChoice {
-  id: 'default' | 'read' | 'deny' | 'turbo'
-  icon: 'lock' | 'shield' | 'eye' | 'zap'
+  id: ChatPermissionMode
+  icon: 'lock' | 'shield' | 'eye'
   label: string
-  badge?: string
   description: string
   disabled: boolean
-  note?: string
 }
 const permissionChoices = computed<PermissionChoice[]>(() => [
+  {
+    id: 'default',
+    icon: caps.value.includes('approval') ? 'lock' : 'shield',
+    label: caps.value.includes('approval') ? '按需确认' : '宿主管理',
+    description: caps.value.includes('approval') ? '收到需要审批的请求时再询问。' : '使用当前代理宿主的权限策略。',
+    disabled: false,
+  },
   {
     id: 'read',
     icon: 'eye',
     label: '只读沙箱',
-    badge: caps.value.includes('read-only') ? undefined : '不可用',
-    description: '仅读取与分析文件，禁止写入或命令执行。',
-    disabled: !caps.value.includes('read-only'),
-    note: '当前代理引擎未开放只读沙箱能力',
-  },
-  {
-    id: 'default',
-    icon: caps.value.includes('approval') ? 'lock' : 'shield',
-    label: caps.value.includes('approval') ? '运行前确认' : '由宿主托管',
-    badge: '默认',
-    description: caps.value.includes('approval') ? '执行敏感操作或命令前先请求人工确认。' : '使用宿主机节点默认权限策略。',
-    disabled: false,
+    description: '在只读沙箱中执行这一会话的任务。',
+    disabled: !supportsChatPermission('read', caps.value),
   },
   {
     id: 'deny',
     icon: 'shield',
     label: '拒绝审批请求',
-    badge: caps.value.includes('deny-requests') ? undefined : '不可用',
-    description: '不弹窗询问，自动拦截并拒绝新审批请求。',
-    disabled: !caps.value.includes('deny-requests'),
-    note: '当前代理引擎不支持自动拒绝审批策略',
-  },
-  {
-    id: 'turbo',
-    icon: 'zap',
-    label: '极速模式',
-    badge: caps.value.includes('auto-approve') ? undefined : '不可用',
-    description: '无需人工审批，自动放行代理操作请求。',
-    disabled: !caps.value.includes('auto-approve'),
-    note: '当前代理引擎未启用审批直通能力',
+    description: '代理发出审批请求时直接拒绝。',
+    disabled: !supportsChatPermission('deny', caps.value),
   },
 ])
 const activePermission = computed(() => permissionChoices.value.find(choice => choice.id === permissionMode.value))
-const permissionLabel = computed(() => activePermission.value?.label ?? '执行权限')
+const permissionLabel = computed(() => {
+  if (permissionSyncing.value) return '读取权限中'
+  const label = activePermission.value?.label ?? '执行权限'
+  return permissionSupported.value ? label : `${label}不可用`
+})
 const permissionIcon = computed(() => activePermission.value?.icon ?? 'shield')
 const effortLabels: Record<string, string> = {
   none: '关闭', minimal: '极低', low: '低', medium: '中', high: '高', xhigh: '极高', max: '最高',
@@ -422,7 +431,6 @@ const sessionContextOptions = computed<Array<ComposerContextItem & { preview: st
 })
 
 const quickCommands = [
-  { id: '/plan', title: '/plan', desc: '先出分步方案，确认后再动手', text: '请先分析涉及模块并列出分步方案，确认后再执行修改：\n' },
   { id: '/review', title: '/review', desc: '审查当前工作区改动与风险', text: '请审查当前工作区代码改动，指出潜在 Bug、边界情况与优化建议。' },
   { id: '/status', title: '/status', desc: '汇报工作目录、Git 与运行状态', text: '请检查当前工作目录、Git 状态与环境运行健康状况并简洁汇报。' },
   { id: '/handoff', title: '/handoff', desc: '总结当前进展便于跨节点交接', text: '请整理当前任务已完成内容、关键结论与下一步行动清单，方便交接给其他节点继续执行。' },
@@ -562,15 +570,22 @@ function ensurePersonalStoresLoaded() {
   void websitesStore.loadRecent(token).catch(() => {})
 }
 
-function choosePermission(choice: PermissionChoice) {
-  if (choice.disabled) return
+function choosePermission(mode?: ChatPermissionMode) {
+  if (mode && !supportsChatPermission(mode, caps.value)) return
   fleet.runSettings[settingsKey.value] = {
     ...options.value,
-    readOnly: choice.id === 'read',
-    denyRequests: choice.id === 'deny',
-    autoApprove: choice.id === 'turbo',
+    permissionOverride: mode,
+    readOnly: mode === 'read',
+    denyRequests: mode === 'deny',
+    autoApprove: false,
   }
   closeSettings()
+}
+
+function openProjectPermissions() {
+  if (!effectiveNode.value || !projectDirectory.value) return
+  closeSettings()
+  emit('openProjectSettings', effectiveNode.value.id, projectDirectory.value)
 }
 
 function chooseModel(modelId: string) {
@@ -634,19 +649,19 @@ function positionSettings() {
   const trigger = settingsTrigger.value
   if (!popup || !trigger) return
   const { left, right, top } = trigger.getBoundingClientRect()
-  // 左侧「+」「模型」按左边缘对齐，右侧权限胶囊按右边缘对齐
-  popup.style.setProperty('--trigger-x', `${panel.value === 'permissions' ? right : left}px`)
+  const rightAligned = panel.value === 'permissions' || panel.value === 'context'
+  popup.style.setProperty('--trigger-x', `${rightAligned ? right : left}px`)
   popup.style.setProperty('--trigger-y', `${top}px`)
 }
 
-let dismissedBySelfTrigger: 'model' | 'permissions' | 'attach' | null = null
+let dismissedBySelfTrigger: ComposerPanel | null = null
 
-function noteTriggerPointerDown(next: 'model' | 'permissions' | 'attach') {
+function noteTriggerPointerDown(next: ComposerPanel) {
   // HTML popover="auto" 会在 pointerdown 阶段触发 light-dismiss，提前记录避免后续 click 又立刻重新打开
   dismissedBySelfTrigger = settingsOpen.value && panel.value === next ? next : null
 }
 
-function togglePanelWithButton(next: 'model' | 'permissions' | 'attach', triggerEl: HTMLButtonElement | null) {
+function togglePanelWithButton(next: ComposerPanel, triggerEl: HTMLButtonElement | null) {
   const popup = settingsPopup.value
   if (!popup || !triggerEl) return
   if (popup.matches(':popover-open') && panel.value === next) {
@@ -667,6 +682,8 @@ function togglePanelWithButton(next: 'model' | 'permissions' | 'attach', trigger
     fleet.requestModels(effectiveNode.value.id, effectiveProvider.value)
   } else if (next === 'permissions' && effectiveNode.value?.status === 'online') {
     fleet.requestTrustPolicies(effectiveNode.value.id)
+  } else if (next === 'context' && effectiveKey.value) {
+    fleet.requestContextUsage(effectiveKey.value)
   } else if (next === 'attach') {
     ensurePersonalStoresLoaded()
     if (effectiveNode.value?.status === 'online') {
@@ -678,7 +695,7 @@ function togglePanelWithButton(next: 'model' | 'permissions' | 'attach', trigger
   }
 }
 
-function showPanel(next: 'model' | 'permissions' | 'attach', event: MouseEvent) {
+function showPanel(next: ComposerPanel, event: MouseEvent) {
   if (dismissedBySelfTrigger === next) {
     dismissedBySelfTrigger = null
     return
@@ -954,8 +971,22 @@ const effectiveTodos = computed(() =>
 const effectiveQueue = computed(() =>
   effectiveKey.value ? fleet.queuedPromptsBySession[effectiveKey.value] ?? [] : [],
 )
-const effectiveOutbox = computed(() => fleet.outbox.filter(item => item.sessionKey === effectiveKey.value))
+const effectiveOutbox = computed(() =>
+  fleet.outbox.filter(item => item.sessionKey === effectiveKey.value && !fleet.isOutboxTransmitting(item.id)),
+)
 const waitsForReconnect = computed(() => fleet.wsState !== 'online' || effectiveNode.value?.status !== 'online')
+const receiptStyles = {
+  sending: { icon: 'clock', label: '发送中' },
+  sent: { icon: 'check', label: '已发送' },
+  replied: { icon: 'checks', label: 'Agent 已响应' },
+  failed: { icon: 'alert', label: '发送失败' },
+} as const
+const messageReceipts = computed(() => {
+  const replied = repliedUserMessageIds(effectiveMessages.value)
+  return new Map(effectiveMessages.value.filter(row => row.role === 'user').map(row => [
+    row.id, replied.has(row.id) ? 'replied' : row.delivery ?? 'sent',
+  ] as const))
+})
 const effectiveCheckpoints = computed(() =>
   effectiveKey.value ? fleet.checkpointsBySession[effectiveKey.value] ?? [] : [],
 )
@@ -1280,7 +1311,6 @@ let filesFetchTimer: ReturnType<typeof setTimeout> | null = null
 
 const slashCommandSpecs = [
   { id: '/btw', title: '/btw', desc: '开启不污染主上下文的临时侧边问答', run: 'btw' },
-  { id: '/plan', title: '/plan', desc: '切换至 Plan 规划模式（先方案后执行）', run: 'plan' },
   { id: '/diff', title: '/diff', desc: '打开右侧代码变更审查面板', run: 'diff' },
   { id: '/undo', title: '/undo', desc: '回滚上一轮文件修改检查点', run: 'undo' },
   { id: '/compact', title: '/compact', desc: '通知代理压缩早期历史上下文', run: 'compact' },
@@ -1350,11 +1380,6 @@ const suggestOptions = computed<SuggestOption[]>(() => {
           if (c.run === 'btw') {
             draft.value = '/btw '
             mentionMode.value = null
-          } else if (c.run === 'plan') {
-            setMode('plan')
-            draft.value = ''
-            mentionMode.value = null
-            emit('action', '已切换至 Plan 模式（先输出分步计划再动手）')
           } else if (c.run === 'template') {
             draft.value = c.template
             mentionMode.value = null
@@ -1554,7 +1579,11 @@ function insertFileReference(refOrPath: string) {
   void nextTick(() => textareaRef.value?.focus())
 }
 
-defineExpose({ insertFileReference, openThreadSearch })
+function openPermissions() {
+  togglePanelWithButton('permissions', contextTriggerRef.value ?? null)
+}
+
+defineExpose({ insertFileReference, openThreadSearch, openPermissions })
 
 watch(
   () => effectiveMessages.value.length,
@@ -1704,18 +1733,6 @@ function tryExecuteDirectSlash(text: string): boolean {
     emit('openSideChat', q || undefined)
     return true
   }
-  if (clean === '/plan') {
-    setMode('plan')
-    draft.value = ''
-    emit('action', '已切换至 Plan 模式（先输出分步方案再执行）')
-    return true
-  }
-  if (clean === '/build') {
-    setMode('build')
-    draft.value = ''
-    emit('action', '已切换至 Build 执行模式')
-    return true
-  }
   if (clean === '/prompts') {
     draft.value = ''
     promptLibraryOpen.value = true
@@ -1795,10 +1812,11 @@ async function handleSubmit() {
     : ''
   const baseBody = text || (files.length ? '' : '请结合以上附加上下文进行分析或处理。')
   const payloadText = `${contextBlock}${baseBody}${pastedSection}`.trim()
-  const runOpts = {
-    ...options.value,
-    ...(composerMode.value === 'plan' ? { planMode: true } : {}),
+  if (!permissionSupported.value) {
+    emit('action', '当前 Agent 不支持该权限，请调整会话权限后再发送')
+    return
   }
+  const runOpts = { ...options.value }
 
   const clearSubmittedExtras = () => {
     if (submitted.text === originalText) submitted.text = ''
@@ -2323,6 +2341,16 @@ async function retryTurn(msg: ChatMessage) {
                       <span>分支</span>
                     </button>
                   </div>
+                  <span
+                    v-if="messageReceipts.get(msg.id)"
+                    class="message-receipt"
+                    :class="`is-${messageReceipts.get(msg.id)}`"
+                    role="img"
+                    :aria-label="receiptStyles[messageReceipts.get(msg.id)!].label"
+                    :title="receiptStyles[messageReceipts.get(msg.id)!].label"
+                  >
+                    <OpusIcon :name="receiptStyles[messageReceipts.get(msg.id)!].icon" />
+                  </span>
                 </div>
               </div>
             </template>
@@ -2408,29 +2436,34 @@ async function retryTurn(msg: ChatMessage) {
                   v-if="msg.role === 'assistant' && !msg.streaming && (msg.text || msg.error || msg.checkpointId || msg.diffSummary?.filesChanged || assistantTurns.get(msg.id)?.testResult)"
                   class="msg-foot msg-foot--outside"
                 >
-                  <span v-if="msg.createdAt" class="msg-time num" :title="usageTooltip">
-                    {{ formatMsgTime(msg.createdAt) }}
-                    <template v-if="msg.modelLabel"> · {{ msg.modelLabel }}</template>
-                    <template v-if="!assistantTurns.get(msg.id)?.singleLog && formatDurationShort(msg.durationMs)"> · {{ formatDurationShort(msg.durationMs) }}</template>
-                    <template v-if="msg.turnTokens"> · {{ formatTokenCount(msg.turnTokens) }} tok</template>
-                  </span>
-                  <div v-if="assistantTurns.get(msg.id)?.testResult" class="turn-diff-bar" aria-label="本轮测试结果">
-                    <span class="num">{{ assistantTurns.get(msg.id)?.testResult?.passed }} 项测试通过
-                      <template v-if="assistantTurns.get(msg.id)?.testResult?.failed"> · {{ assistantTurns.get(msg.id)?.testResult?.failed }} 项失败</template>
-                      <template v-else-if="!assistantTurns.get(msg.id)?.testResult?.successful"> · 测试命令失败</template>
+                  <div class="msg-foot-meta">
+                    <span v-if="msg.createdAt" class="msg-time num" :title="usageTooltip">
+                      {{ formatMsgTime(msg.createdAt) }}
+                      <template v-if="msg.modelLabel"> · {{ msg.modelLabel }}</template>
+                      <template v-if="!assistantTurns.get(msg.id)?.singleLog && formatDurationShort(msg.durationMs)"> · {{ formatDurationShort(msg.durationMs) }}</template>
+                      <template v-if="msg.turnTokens"> · {{ formatTokenCount(msg.turnTokens) }} tok</template>
                     </span>
+                    <div v-if="assistantTurns.get(msg.id)?.testResult" class="turn-diff-bar" aria-label="本轮测试结果">
+                      <span class="num">{{ assistantTurns.get(msg.id)?.testResult?.passed }} 项测试通过
+                        <template v-if="assistantTurns.get(msg.id)?.testResult?.failed"> · {{ assistantTurns.get(msg.id)?.testResult?.failed }} 项失败</template>
+                        <template v-else-if="!assistantTurns.get(msg.id)?.testResult?.successful"> · 测试命令失败</template>
+                      </span>
+                    </div>
+                    <div v-if="msg.checkpointId || msg.diffSummary?.filesChanged" class="turn-diff-bar">
+                      <button
+                        type="button"
+                        class="diff-pill num"
+                        title="在右侧检查代码改动详情"
+                        @click="inspectTurnDiff(msg.checkpointId)"
+                      >
+                        <OpusIcon name="branch" />
+                        <span>+{{ msg.diffSummary?.additions ?? 0 }} -{{ msg.diffSummary?.deletions ?? 0 }}</span>
+                        <span>· {{ msg.diffSummary?.filesChanged ?? 0 }} 文件</span>
+                      </button>
+                      <span v-if="msg.checkpointId && isCheckpointReverted(msg.checkpointId)" class="reverted-tag">已回滚</span>
+                    </div>
                   </div>
-                  <div v-if="msg.checkpointId || msg.diffSummary?.filesChanged" class="turn-diff-bar">
-                    <button
-                      type="button"
-                      class="diff-pill num"
-                      title="在右侧检查代码改动详情"
-                      @click="inspectTurnDiff(msg.checkpointId)"
-                    >
-                      <OpusIcon name="branch" />
-                      <span>+{{ msg.diffSummary?.additions ?? 0 }} -{{ msg.diffSummary?.deletions ?? 0 }}</span>
-                      <span>· {{ msg.diffSummary?.filesChanged ?? 0 }} 文件</span>
-                    </button>
+                  <div class="msg-foot-actions">
                     <button
                       v-if="msg.checkpointId && !isCheckpointReverted(msg.checkpointId)"
                       type="button"
@@ -2441,9 +2474,6 @@ async function retryTurn(msg: ChatMessage) {
                       <OpusIcon name="history" />
                       <span>回滚此轮</span>
                     </button>
-                    <span v-else-if="msg.checkpointId" class="reverted-tag">已回滚</span>
-                  </div>
-                  <div class="msg-foot-actions">
                     <button
                       v-if="msg.text"
                       type="button"
@@ -2651,18 +2681,7 @@ async function retryTurn(msg: ChatMessage) {
         @review="fp => emit('openDiff', fp)"
       />
 
-      <!-- 移动端极简运行配置栏：左右紧凑图标钮（模式 / 权限），中间模型选择拉长 -->
       <div v-if="mobile" class="m-status-strip" role="toolbar" aria-label="移动端运行配置">
-        <button
-          type="button"
-          class="m-status-icon-btn"
-          :class="{ 'is-accent': composerMode === 'plan' }"
-          :title="composerMode === 'plan' ? 'Plan 方案模式（点击切回 Build）' : 'Build 执行模式（点击切换 Plan）'"
-          :aria-label="composerMode === 'plan' ? 'Plan 方案模式' : 'Build 执行模式'"
-          @click="setMode(composerMode === 'plan' ? 'build' : 'plan')"
-        >
-          <OpusIcon :name="composerMode === 'plan' ? 'note' : 'zap'" />
-        </button>
         <button
           ref="modelTriggerRef"
           type="button"
@@ -2682,16 +2701,22 @@ async function retryTurn(msg: ChatMessage) {
           <OpusIcon name="chevD" class="m-pill-chev" />
         </button>
         <button
+          ref="contextTriggerRef"
           type="button"
-          class="m-status-icon-btn"
-          :class="`is-perm-${permissionMode}`"
-          :title="`${permissionLabel} · 点击切换权限`"
-          :aria-label="`执行权限：${permissionLabel}`"
-          :aria-expanded="settingsOpen && panel === 'permissions'"
-          @pointerdown="noteTriggerPointerDown('permissions')"
-          @click="showPanel('permissions', $event)"
+          class="m-status-pill m-status-pill--context"
+          :aria-label="`查看上下文占用，已用 ${contextCount}${contextPercent ? `，占用率 ${contextPercent}` : ''}`"
+          :aria-expanded="settingsOpen && panel === 'context'"
+          :aria-controls="settingsId"
+          @pointerdown="noteTriggerPointerDown('context')"
+          @click="showPanel('context', $event)"
         >
-          <OpusIcon :name="permissionIcon" />
+          <svg class="context-ring" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+            <circle class="context-ring-track" cx="9" cy="9" r="7" />
+            <circle v-if="contextRatio !== null && contextRatio > 0" cx="9" cy="9" r="7"
+              pathLength="100" :stroke-dasharray="`${Math.min(contextRatio, 100)} 100`" transform="rotate(-90 9 9)" />
+          </svg>
+          <span class="num">{{ contextCount }}</span>
+          <span v-if="contextPercent" class="context-percent num">· {{ contextPercent }}</span>
         </button>
       </div>
 
@@ -2859,22 +2884,6 @@ async function retryTurn(msg: ChatMessage) {
           >
             <OpusIcon name="plus" />
           </button>
-          <div v-if="!compact" class="mode-seg" role="group" aria-label="对话执行模式">
-            <button
-              type="button"
-              class="mode-seg-btn"
-              :class="{ 'is-active': composerMode === 'build' }"
-              title="Build 模式：直接编码与执行任务"
-              @click="setMode('build')"
-            >Build</button>
-            <button
-              type="button"
-              class="mode-seg-btn"
-              :class="{ 'is-active': composerMode === 'plan' }"
-              title="Plan 模式：先输出分步方案，确认后再修改代码"
-              @click="setMode('plan')"
-            >Plan</button>
-          </div>
           <span class="trigger-wrap">
             <button
               ref="modelTriggerRef"
@@ -2921,16 +2930,17 @@ async function retryTurn(msg: ChatMessage) {
             :class="{ 'is-recording': speechActive }"
             :title="speechActive ? '停止语音听写' : '语音输入（中文/英文识别）'"
             :aria-label="speechActive ? '停止语音输入' : '开始语音输入'"
+            :aria-pressed="speechActive"
             @click="toggleVoiceDictation"
           >
-            <OpusIcon name="sparkle" />
+            <OpusIcon name="microphone" />
           </button>
           <button
             type="button"
             class="safety-badge"
             :class="[`is-${permissionMode}`, { 'is-active-pill': settingsOpen && panel === 'permissions' }]"
             :aria-label="permissionLabel + ' · 沙箱与权限'"
-            :title="permissionLabel + ' · 沙箱与权限'"
+            :title="`${permissionLabel} · ${permissionSource}`"
             aria-haspopup="dialog"
             :aria-controls="settingsId"
             :aria-expanded="settingsOpen && panel === 'permissions'"
@@ -2971,7 +2981,7 @@ async function retryTurn(msg: ChatMessage) {
         ref="settingsPopup"
         popover="auto"
         role="dialog"
-        :aria-label="panel === 'model' ? '模型与思考强度' : panel === 'attach' ? '添加上下文' : '执行权限'"
+        :aria-label="{ model: '模型与思考强度', attach: '添加上下文', permissions: '执行权限', context: '上下文占用' }[panel]"
         class="run-popover"
         :class="`is-${panel}`"
         @toggle="onPopoverToggle"
@@ -3350,6 +3360,14 @@ async function retryTurn(msg: ChatMessage) {
             </template>
           </div>
         </template>
+        <template v-else-if="panel === 'context'">
+          <dl class="context-details">
+            <div><dt>上下文总量</dt><dd>{{ contextCapacity?.toLocaleString('zh-CN') ?? '—' }}</dd></div>
+            <div><dt>已占用</dt><dd>{{ contextUsage ? contextUsage.usedTokens.toLocaleString('zh-CN') : '—' }}</dd></div>
+            <div><dt>剩余</dt><dd>{{ contextUsage && contextCapacity
+              ? Math.max(0, contextCapacity - contextUsage.usedTokens).toLocaleString('zh-CN') : '—' }}</dd></div>
+          </dl>
+        </template>
         <template v-else-if="panel === 'model'">
           <div class="popover-head popover-head--row">
             <span>模型</span>
@@ -3474,14 +3492,6 @@ async function retryTurn(msg: ChatMessage) {
               <div v-else class="usage-meta">
                 发送消息后仅在内存中统计本连接用量
               </div>
-              <div v-if="sessionUsage?.contextWindow" class="usage-meter">
-                <div class="usage-meter-track">
-                  <div class="usage-meter-fill" :style="{ width: `${usageContextBarWidth}%` }" />
-                </div>
-                <span class="usage-meter-pct num">
-                  {{ formatTokenCount(sessionUsage.lastTurnTokens) }} / {{ formatTokenCount(sessionUsage.contextWindow) }} · {{ usageContextPercentLabel }}
-                </span>
-              </div>
             </div>
           </div>
           <div
@@ -3518,28 +3528,40 @@ async function retryTurn(msg: ChatMessage) {
           </div>
         </template>
         <template v-else>
-          <div class="popover-head">执行权限</div>
+          <div class="popover-head">执行权限 <span class="picker-badge">{{ permissionSource }}</span></div>
+          <p v-if="!permissionSupported" class="permission-warning" role="status">
+            当前 Agent 不支持此权限，请临时选择可用权限或切换 Agent。
+          </p>
           <div role="group" aria-label="执行权限" class="picker-list picker-list--perm">
+            <button v-if="permissionOverride || projectPermission" type="button" class="picker-option"
+              :aria-pressed="!permissionOverride" @click="choosePermission()">
+              <OpusIcon name="shield" class="option-lead" />
+              <span class="option-title">使用项目或节点默认</span>
+              <OpusIcon v-if="!permissionOverride" name="check" class="option-tail is-check" />
+            </button>
             <button
-              v-for="choice in permissionChoices"
+              v-for="choice in permissionChoices.filter(item => !item.disabled)"
               :key="choice.id"
               type="button"
               class="picker-option picker-option--rich"
-              :class="{ 'is-unavailable': choice.disabled }"
-              :disabled="choice.disabled"
-              :title="choice.disabled ? choice.note : choice.description"
-              :aria-pressed="permissionMode === choice.id"
-              @click="choosePermission(choice)"
+              :title="choice.description"
+              :aria-pressed="(permissionOverride ?? (projectPermission ? undefined : 'default')) === choice.id"
+              @click="choosePermission(choice.id)"
             >
               <OpusIcon :name="choice.icon" class="option-lead" />
               <span class="option-copy">
                 <span class="option-title-row">
                   <span class="option-title">{{ choice.label }}</span>
-                  <span v-if="choice.badge" class="picker-badge">{{ choice.badge }}</span>
                 </span>
-                <span class="option-desc">{{ choice.disabled ? (choice.note || choice.description) : choice.description }}</span>
+                <span class="option-desc">{{ choice.description }}</span>
               </span>
-              <OpusIcon v-if="permissionMode === choice.id" name="check" class="option-tail is-check" />
+              <OpusIcon v-if="(permissionOverride ?? (projectPermission ? undefined : 'default')) === choice.id" name="check" class="option-tail is-check" />
+            </button>
+            <button v-if="projectSettings && projectDirectory && effectiveNode && fleet.supportsProjectPermissions(effectiveNode.id)"
+              type="button" class="picker-option" @click="openProjectPermissions">
+              <OpusIcon name="settings" class="option-lead" />
+              <span class="option-title">项目设置</span>
+              <OpusIcon name="chevR" class="option-tail" />
             </button>
           </div>
           <details :key="settingsKey" class="sandbox-details">
@@ -3819,29 +3841,6 @@ async function retryTurn(msg: ChatMessage) {
   gap: 8px;
   padding: 2px 0 7px;
 }
-.m-status-icon-btn {
-  flex: none;
-  display: inline-grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface-2);
-  color: var(--text-2);
-  cursor: pointer;
-}
-.m-status-icon-btn .i { width: 15px; height: 15px; }
-.m-status-icon-btn.is-accent {
-  border-color: var(--accent-line);
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-.m-status-icon-btn.is-perm-full-auto {
-  border-color: color-mix(in srgb, var(--warn) 38%, transparent);
-  background: var(--warn-soft);
-  color: var(--warn);
-}
 .m-status-pill {
   flex: none;
   display: inline-flex;
@@ -3849,15 +3848,31 @@ async function retryTurn(msg: ChatMessage) {
   gap: 5px;
   min-height: 32px;
   padding: 0 12px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: 999px;
-  background: var(--surface-2);
+  background: var(--solid);
+  box-shadow: 0 2px 10px rgba(15, 23, 42, .05);
   color: var(--text-2);
   font-size: 12.5px;
   font-weight: 520;
   white-space: nowrap;
   cursor: pointer;
 }
+.m-status-pill--context {
+  min-width: 66px;
+  justify-content: center;
+  font-variant-numeric: tabular-nums;
+}
+.context-ring {
+  width: 17px;
+  height: 17px;
+  flex: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+.context-ring-track { stroke: var(--line-strong); }
+.context-percent { color: var(--text-3); }
 .m-status-pill--model {
   flex: 1 1 0;
   min-width: 0;
@@ -3875,16 +3890,6 @@ async function retryTurn(msg: ChatMessage) {
 .m-status-pill .i { width: 13px; height: 13px; flex: none; }
 .m-status-pill .m-pill-chev { width: 11px; height: 11px; opacity: .7; }
 .m-status-pill .m-pill-sub { color: var(--text-3); font-size: 11.5px; }
-.m-status-pill.is-accent {
-  border-color: var(--accent-line);
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-.m-status-pill.is-perm-full-auto {
-  border-color: color-mix(in srgb, var(--warn) 38%, transparent);
-  background: var(--warn-soft);
-  color: var(--warn);
-}
 .m-composer-bar {
   display: flex;
   align-items: flex-end;
@@ -3992,6 +3997,11 @@ async function retryTurn(msg: ChatMessage) {
   border-radius: 14px;
   padding: 6px;
   transform-origin: bottom center;
+}
+.thread-mobile .run-popover.is-context {
+  --popup-width: min(160px, calc(100vw - 24px));
+  left: clamp(12px, var(--popup-left), calc(100vw - var(--popup-width) - 12px));
+  transform-origin: bottom right;
 }
 .thread-mobile .picker-option {
   min-height: 36px;
@@ -4326,32 +4336,19 @@ async function retryTurn(msg: ChatMessage) {
   line-height: 1.3;
   color: var(--text-3);
 }
-.usage-meter {
+.context-details {
+  margin: 2px 0;
+  padding: 0 8px;
+  font-size: 12px;
+}
+.context-details > div {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 1px;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 0;
 }
-.usage-meter-track {
-  flex: 1;
-  min-width: 0;
-  height: 3px;
-  border-radius: 999px;
-  background: var(--line);
-  overflow: hidden;
-}
-.usage-meter-fill {
-  height: 100%;
-  border-radius: 999px;
-  background: var(--accent, var(--text));
-  transition: width 180ms var(--ease-out);
-}
-.usage-meter-pct {
-  flex: none;
-  font-size: 9.5px;
-  color: var(--text-3);
-  white-space: nowrap;
-}
+.context-details dt { color: var(--text-3); }
+.context-details dd { margin: 0; font-variant-numeric: tabular-nums; text-align: right; }
 .sandbox-details {
   margin: 5px -5px 0;
   padding: 5px 5px 0;
@@ -4679,9 +4676,6 @@ dialog.img-lightbox::backdrop {
   flex: none;
   color: var(--text-2);
 }
-.safety-badge.is-turbo .trigger-lead {
-  color: var(--warn);
-}
 .chip-x {
   margin-left: 2px;
   color: var(--text-3);
@@ -4756,6 +4750,17 @@ dialog.img-lightbox::backdrop {
   margin-top: 4px;
   padding-right: 2px;
 }
+.message-receipt {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: var(--text-3);
+}
+.message-receipt .i { width: 16px; height: 16px; }
+.message-receipt.is-replied { color: var(--info, #1675c2); }
+.message-receipt.is-failed { color: var(--warn, #a84a18); }
 .user-hover-actions {
   display: inline-flex;
   align-items: center;
@@ -5314,30 +5319,11 @@ dialog.img-lightbox::backdrop {
 .interrupted-txt {
   color: var(--text-2);
 }
-.mode-seg {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px;
-  border-radius: var(--r-full);
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  flex: none;
-}
-.mode-seg-btn {
-  padding: 2px 8px;
-  border: 0;
-  border-radius: var(--r-full);
-  background: transparent;
-  color: var(--text-3);
-  font-size: 11px;
-  font-weight: 550;
-  cursor: pointer;
-  transition: background-color 0.14s ease, color 0.14s ease;
-}
-.mode-seg-btn.is-active {
-  background: var(--solid);
-  color: var(--text);
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+.permission-warning {
+  margin: 0;
+  padding: 6px 12px;
+  color: var(--warn);
+  font-size: 12px;
 }
 .queue-att-badge {
   margin-left: 5px;
@@ -5429,10 +5415,6 @@ dialog.img-lightbox::backdrop {
   .draft-token-pill {
     display: none;
   }
-  .mode-seg-btn {
-    padding: 2px 6px;
-    font-size: 10.5px;
-  }
   .model-trigger {
     max-width: 150px;
   }
@@ -5474,14 +5456,21 @@ dialog.img-lightbox::backdrop {
   padding: 2px 4px 0;
   border-top: 0;
   background: transparent;
-  justify-content: flex-start;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+.msg-foot-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  font-size: 11px;
+  color: var(--text-3);
 }
 .msg-foot--outside .msg-foot-actions {
   margin-left: 0;
   justify-content: flex-start;
-}
-.thread-mobile .msg-foot--outside {
-  gap: 4px 8px;
 }
 .thread-mobile .msg-foot--outside .msg-foot-actions {
   gap: 4px;

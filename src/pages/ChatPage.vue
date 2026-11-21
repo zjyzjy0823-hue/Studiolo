@@ -13,6 +13,7 @@ import { getPlatformIcon, getProviderMeta } from '../components/chat/providerMet
 import OpusIcon from '../components/ui/OpusIcon.vue'
 import { isAndroidLocal } from '../desktop/androidLocal'
 import { searchSessionsAndMessages, sessionInboxProject } from '../services/chatHelpers'
+import { findProjectPermission, projectPathKey, supportsChatPermission } from '../services/projectPermissions'
 import {
   readStoredWidth,
   saveStoredWidth,
@@ -24,7 +25,7 @@ import FleetCoreSignIn from '../components/chat/FleetCoreSignIn.vue'
 import { chatBubbleStyleLabel, chatBubbleStyleOptions, useWorkbenchTheme } from '../composables/useWorkbenchTheme'
 import { useSessionOrganization, type SessionOrganization } from '../composables/useSessionOrganization'
 import { useInboxProjects } from '../composables/useInboxProjects'
-import type { AdapterProvider, AgentNode, ArtifactRef, ChatSession } from '../types/fleet'
+import type { AdapterProvider, AgentNode, ArtifactRef, ChatSession, ProjectPermissionSetting } from '../types/fleet'
 
 const props = defineProps<{ mobile?: boolean }>()
 
@@ -54,6 +55,7 @@ const TREE_SNAP_CLOSE = 84
 const TREE_SESSION_LIMIT = 5
 const workspace = ref<HTMLElement>()
 const primaryThreadRef = ref<InstanceType<typeof AgentChatThread> | null>(null)
+const mobileThreadRef = ref<InstanceType<typeof AgentChatThread> | null>(null)
 const treeOpen = ref(true)
 const treeWidth = ref(readStoredWidth('studiolo:chat-tree-w', TREE_DEFAULT_W, TREE_MIN_W, TREE_MAX_W))
 type RightPaneMode = 'none' | 'split' | 'diff' | 'file' | 'tree' | 'terminal' | 'side' | 'subagent'
@@ -174,6 +176,11 @@ const showAddProject = ref(false)
 const newProjectNodeId = ref('')
 const newProjectDirectory = ref('')
 const newProjectError = ref('')
+const projectSettings = ref<{ name: string; directories: { nodeId: string; cwd: string }[] } | null>(null)
+const projectSettingsNodeId = ref('')
+const projectSettingsDraft = ref<ProjectPermissionSetting>()
+const projectSettingsSaving = ref(false)
+const projectSettingsError = ref('')
 const mobileCreateMenuOpen = ref(false)
 const mobileCreateButton = ref<HTMLButtonElement>()
 const mobileCreateMenu = ref<HTMLElement>()
@@ -182,6 +189,14 @@ const mobileFilterSub = ref<'node' | 'status' | null>(null)
 const mobileSessionSheetRef = ref<HTMLDialogElement | null>(null)
 const mobileRenameDraft = ref('')
 const mobileRenaming = ref(false)
+const canCompactMobileSession = computed(() => {
+  const session = fleet.currentSession
+  if (!session || fleet.wsState !== 'online') return false
+  const node = fleet.nodes.find(item => item.id === session.nodeId)
+  return node?.status === 'online' && node.adapters.some(adapter =>
+    adapter.provider === session.provider && adapter.capabilities.includes('context-compact'),
+  )
+})
 
 const mobileHasActiveFilter = computed(() =>
   mobileNodeFilter.value !== 'all' || mobileStatusFilter.value !== 'all',
@@ -475,12 +490,11 @@ function openAddProject() {
 }
 
 function projectDirectoryKey(nodeId: string, cwd: string) {
-  const path = cwd.replace(/\\/g, '/').replace(/\/+$/, '') || '/'
-  return JSON.stringify([nodeId, /^[a-z]:|^\/\//i.test(path) ? path.toLowerCase() : path])
+  return JSON.stringify([nodeId, projectPathKey(cwd)])
 }
 
 function sessionProjectDirectory(session: ChatSession) {
-  return (session.worktreePath || session.cwd || '').split(/[/\\]\.studiolo-worktrees(?:[/\\]|$)/i, 1)[0]
+  return session.projectDirectory || (session.worktreePath || session.cwd || '').split(/[/\\]\.studiolo-worktrees(?:[/\\]|$)/i, 1)[0]
 }
 
 const savedInboxProjects = computed(() => {
@@ -510,12 +524,10 @@ function saveInboxProject() {
   emit('action', persisted ? '已添加项目' : '已添加项目，当前设备存储不可用')
 }
 
-const createProjectDirectories = computed(() => {
-  const scope = mobileCreateScope.value
-  if (!scope || !('projectKey' in scope)) return
+function directoriesForProject(projectKey: string) {
   const directories = new Map<string, { cwd: string; activity: number }>()
   for (const session of fleet.allSessions) {
-    if (session.provider === 'hermes' || sessionInboxProject(session).key !== scope.projectKey) continue
+    if (session.provider === 'hermes' || sessionInboxProject(session).key !== projectKey) continue
     const node = fleet.nodes.find(item => item.id === session.nodeId)
     const cwd = sessionProjectDirectory(session)
     if (!cwd || !node || resolveAllowedSessionCwd(node, cwd) !== cwd) continue
@@ -525,13 +537,86 @@ const createProjectDirectories = computed(() => {
     }
   }
   for (const entry of savedInboxProjects.value) {
-    if (entry.project.key !== scope.projectKey) continue
+    if (entry.project.key !== projectKey) continue
     const node = fleet.nodes.find(item => item.id === entry.nodeId)
     if (!node?.allowedRoots.some(root => sessionBelongsToRoot(entry, root))) continue
     directories.set(entry.nodeId, { cwd: entry.cwd, activity: 0 })
   }
   return new Map([...directories].map(([nodeId, entry]) => [nodeId, entry.cwd]))
+}
+
+const createProjectDirectories = computed(() => {
+  const scope = mobileCreateScope.value
+  return scope && 'projectKey' in scope ? directoriesForProject(scope.projectKey) : undefined
 })
+
+const projectSettingsDirectory = computed(() =>
+  projectSettings.value?.directories.find(directory => directory.nodeId === projectSettingsNodeId.value))
+const projectSettingsNode = computed(() => fleet.nodes.find(node => node.id === projectSettingsNodeId.value))
+const projectSettingsPolicies = computed(() => fleet.projectPermissionsByNode[projectSettingsNodeId.value])
+const projectSettingsReady = computed(() => fleet.wsState === 'online' && projectSettingsNode.value?.status === 'online'
+  && fleet.supportsProjectPermissions(projectSettingsNodeId.value) && projectSettingsPolicies.value !== undefined)
+const exactProjectPermission = computed(() => projectSettingsPolicies.value?.find(
+  entry => projectPathKey(entry.cwd) === projectPathKey(projectSettingsDirectory.value?.cwd ?? ''),
+))
+const parentProjectPermission = computed(() => findProjectPermission(
+  (projectSettingsPolicies.value ?? []).filter(entry => entry !== exactProjectPermission.value),
+  projectSettingsDirectory.value?.cwd ?? '',
+))
+const projectPermissionOptions = [
+  { id: 'inherit', label: '跟随上级默认' },
+  { id: 'default', label: '按 Agent 默认（按需确认或宿主管理）' },
+  { id: 'read', label: '只读沙箱' },
+  { id: 'deny', label: '拒绝审批请求' },
+] as const
+const availableProjectPermissions = computed(() => projectPermissionOptions.filter(option => option.id === 'inherit' || option.id === 'default'
+  || projectSettingsNode.value?.adapters.some(adapter => adapter.status === 'ready'
+    && supportsChatPermission(option.id, adapter.capabilities))))
+const projectSettingsMode = computed(() => projectSettingsDraft.value ?? exactProjectPermission.value?.mode ?? 'inherit')
+
+function changeProjectSettingsNode() {
+  projectSettingsDraft.value = undefined
+  projectSettingsError.value = ''
+  if (projectSettingsNode.value?.status === 'online') fleet.requestProjectPermissions(projectSettingsNodeId.value)
+}
+
+function showProjectSettings(name: string, directories: { nodeId: string; cwd: string }[]) {
+  const target = directories.find(directory => directory.nodeId === mobileNodeFilter.value)
+    ?? directories.find(directory => fleet.nodes.find(node => node.id === directory.nodeId)?.status === 'online')
+    ?? directories[0]
+  if (!target) return
+  projectSettings.value = { name, directories }
+  projectSettingsNodeId.value = target.nodeId
+  projectSettingsSaving.value = false
+  changeProjectSettingsNode()
+  void nextTick(() => document.getElementById('project-permission-mode')?.focus())
+}
+
+function openProjectSettings(nodeId: string, cwd: string) {
+  showProjectSettings(leafPathName(cwd), [{ nodeId, cwd }])
+}
+
+function openGroupedProjectSettings(projectKey: string, name: string) {
+  showProjectSettings(name, [...directoriesForProject(projectKey)].map(([nodeId, cwd]) => ({ nodeId, cwd })))
+}
+
+async function saveProjectSettings() {
+  const current = projectSettings.value
+  const directory = projectSettingsDirectory.value
+  if (!current || !directory || projectSettingsSaving.value || !projectSettingsReady.value) return
+  projectSettingsSaving.value = true
+  projectSettingsError.value = ''
+  try {
+    await fleet.saveProjectPermission(directory.nodeId, directory.cwd, projectSettingsMode.value)
+    if (projectSettings.value !== current) return
+    projectSettings.value = null
+    emit('action', '项目默认权限已保存到节点')
+  } catch (err) {
+    if (projectSettings.value === current) projectSettingsError.value = err instanceof Error ? err.message : '保存权限失败'
+  } finally {
+    if (projectSettings.value === current) projectSettingsSaving.value = false
+  }
+}
 
 function adaptersForCreate(nodeId: string, scope = mobileCreateScope.value) {
   const adapters = readyAt(nodeId)
@@ -975,7 +1060,6 @@ const paletteCommands = [
   { id: 'tree', label: '浏览工作区目录树', description: '按文件夹懒加载浏览并只读预览项目文件', command: '__open_tree__' },
   { id: 'terminal', label: '打开受控工作区终端', description: '在会话允许目录下执行交互式 Shell 命令', command: '__open_terminal__' },
   { id: 'split', label: '切换并排协同分屏', description: '同时对比两个模型或节点输出', command: '__toggle_split__' },
-  { id: 'plan', label: '/plan 分步规划模板', description: '向输入框填入 /plan 模板', command: '/plan 请先分析涉及模块并列出分步方案，确认后再修改：' },
   { id: 'review', label: '/review 审查代码改动', description: '向输入框填入代码审查指令', command: '请审查当前工作区代码改动，指出潜在 Bug 与优化建议。' },
   { id: 'compact', label: '/compact 压缩当前上下文', description: '触发上游代理整理并压缩早期历史', command: '__compact__' },
   { id: 'undo', label: '/undo 回滚最近检查点', description: '还原上一轮产生的工作区修改', command: '__undo__' },
@@ -1350,6 +1434,7 @@ watch(() => fleet.deviceSessionScope, () => {
   mobileManageDialog.value?.close()
   showArchivedSessions.value = false
   showAddProject.value = false
+  projectSettings.value = null
   mobileMoreMenuOpen.value = false
   mobileCreateMenuOpen.value = false
   showNewSession.value = false
@@ -1915,6 +2000,9 @@ function handleClearMemory() {
                 <span class="m-project-name">{{ group.name }}</span>
               </button>
             </h2>
+            <button v-if="group.key !== 'hermes' && group.key !== 'no-project'" type="button" class="m-project-add"
+              :aria-label="`${group.name} 项目设置`"
+              @click="openGroupedProjectSettings(group.key, group.name)"><OpusIcon name="settings" /></button>
             <button v-if="group.key === 'hermes'" type="button" class="m-project-add" aria-label="新建 Hermes 对话"
               @click="openMobileCreate({ provider: 'hermes' })"><OpusIcon name="plus" /></button>
             <button v-else-if="group.key !== 'no-project'" type="button" class="m-project-add" :aria-label="`在 ${group.name} 新建对话`"
@@ -2065,8 +2153,11 @@ function handleClearMemory() {
       </div>
 
       <AgentChatThread
+        ref="mobileThreadRef"
         class="mchat-thread"
         :mobile="true"
+        project-settings
+        @open-project-settings="openProjectSettings"
         @action="emit('action', $event)"
         @open-handoff="openHandoffDialog"
         @open-diff="openDiffPanel"
@@ -2178,9 +2269,16 @@ function handleClearMemory() {
               <OpusIcon name="send" />
               <span class="msheet-row-text">@Handoff 跨节点转交</span>
             </button>
-            <button v-if="fleet.currentSession" type="button" class="msheet-row" @click="closeMobileSessionSheet(); handleCompactActive()">
+            <button v-if="fleet.currentSession" type="button" class="msheet-row"
+              @click="closeMobileSessionSheet(); mobileThreadRef?.openPermissions()">
+              <OpusIcon name="lock" />
+              <span class="msheet-row-text">执行权限</span>
+            </button>
+            <button v-if="canCompactMobileSession" type="button" class="msheet-row"
+              :disabled="Boolean(fleet.runningBySession[fleet.activeSessionKey] || fleet.contextCompactions[fleet.activeSessionKey])"
+              @click="closeMobileSessionSheet(); handleCompactActive()">
               <OpusIcon name="layers" />
-              <span class="msheet-row-text">压缩会话上下文 (/compact)</span>
+              <span class="msheet-row-text">{{ fleet.contextCompactions[fleet.activeSessionKey] ? '正在压缩上下文' : '压缩上下文' }}</span>
             </button>
             <button v-if="fleet.currentSession" type="button" class="msheet-row" @click="closeMobileSessionSheet(); handleExportActive()">
               <OpusIcon name="file" />
@@ -2402,8 +2500,12 @@ function handleClearMemory() {
                   <button type="button" class="tree-mini-btn" title="新建 Hermes 对话" aria-label="新建 Hermes 对话"
                     @click="openCreateSession(node, undefined, 'hermes')"><OpusIcon name="plus" /></button>
                 </template>
-                <button v-else-if="section.root" type="button" class="tree-mini-btn" title="在此目录打开会话"
-                  aria-label="在此目录打开会话" @click="openCreateSession(node, section.root)"><OpusIcon name="plus" /></button>
+                <template v-else-if="section.root">
+                  <button type="button" class="tree-mini-btn" title="项目设置" :aria-label="`${section.name} 项目设置`"
+                    @click="openProjectSettings(node.id, section.root)"><OpusIcon name="settings" /></button>
+                  <button type="button" class="tree-mini-btn" title="在此目录打开会话"
+                    aria-label="在此目录打开会话" @click="openCreateSession(node, section.root)"><OpusIcon name="plus" /></button>
+                </template>
               </header>
               <div v-show="!section.collapsed" :id="section.id" class="tree-section-body">
                 <p v-if="section.icon === 'hermes' && fleet.sessionListStates[`${node.id}::hermes`]?.error" class="tree-section-note">
@@ -2666,6 +2768,8 @@ function handleClearMemory() {
 
       <AgentChatThread
         ref="primaryThreadRef"
+        project-settings
+        @open-project-settings="openProjectSettings"
         :session-key="fleet.activeSessionKey || undefined"
         @action="emit('action', $event)"
         @open-handoff="openHandoffDialog"
@@ -2806,6 +2910,8 @@ function handleClearMemory() {
             </div>
             <AgentChatThread
               v-if="secondaryTabKey"
+              project-settings
+              @open-project-settings="openProjectSettings"
               :session-key="secondaryTabKey"
               @action="emit('action', $event)"
               @open-handoff="openHandoffDialog"
@@ -2961,6 +3067,51 @@ function handleClearMemory() {
       <div class="modal-foot">
         <button type="button" class="btn btn-ghost" @click="showAddProject = false">取消</button>
         <button type="submit" class="btn btn-primary" :disabled="!addProjectNode || !newProjectDirectory.trim()">添加项目</button>
+      </div>
+    </form>
+  </div>
+
+  <div v-if="projectSettings" class="modal-scrim" @click.self="!projectSettingsSaving && (projectSettings = null)">
+    <form class="modal-card card" role="dialog" aria-modal="true" aria-labelledby="project-settings-heading"
+      @submit.prevent="saveProjectSettings" @keydown.esc.stop="!projectSettingsSaving && (projectSettings = null)">
+      <h3 id="project-settings-heading">项目设置</h3>
+      <div class="field">
+        <strong>{{ projectSettings.name }}</strong>
+        <small class="faint project-settings-directory">{{ projectSettingsDirectory?.cwd }}</small>
+      </div>
+      <div class="field">
+        <label for="project-permission-node">机器</label>
+        <select id="project-permission-node" v-model="projectSettingsNodeId" class="input"
+          :disabled="projectSettingsSaving || projectSettings.directories.length === 1" @change="changeProjectSettingsNode">
+          <option v-for="directory in projectSettings.directories" :key="directory.nodeId" :value="directory.nodeId">
+            {{ fleet.nodes.find(node => node.id === directory.nodeId)?.name ?? directory.nodeId }}
+          </option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="project-permission-mode">默认执行权限</label>
+        <select id="project-permission-mode" class="input" :value="projectSettingsMode"
+          :disabled="!projectSettingsReady || projectSettingsSaving"
+          @change="projectSettingsDraft = ($event.target as HTMLSelectElement).value as ProjectPermissionSetting">
+          <option v-for="option in availableProjectPermissions" :key="option.id" :value="option.id">{{ option.label }}</option>
+          <option v-if="!availableProjectPermissions.some(option => option.id === projectSettingsMode)"
+            :value="projectSettingsMode" disabled>{{ projectPermissionOptions.find(option => option.id === projectSettingsMode)?.label }}（当前不可用）</option>
+        </select>
+        <small v-if="projectSettingsNode?.status !== 'online' || fleet.wsState !== 'online'" class="faint">机器离线，连接后可以修改。</small>
+        <small v-else-if="!fleet.supportsProjectPermissions(projectSettingsNodeId)" class="faint">需要更新 Agent Node 才能设置项目默认权限。</small>
+        <small v-else-if="!projectSettingsReady" class="faint">正在读取节点设置…</small>
+        <small v-else-if="projectSettingsMode === 'inherit' && parentProjectPermission" class="faint">
+          继承 {{ projectPermissionOptions.find(option => option.id === parentProjectPermission?.mode)?.label }}。
+        </small>
+        <small v-else class="faint">适用于这台机器上的项目。会话中可以临时调整。</small>
+      </div>
+      <p v-if="projectSettingsError" class="faint" role="alert">{{ projectSettingsError }}</p>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-ghost" :disabled="projectSettingsSaving" @click="projectSettings = null">取消</button>
+        <button type="submit" class="btn btn-primary" :disabled="!projectSettingsReady || projectSettingsSaving
+          || projectSettingsMode === (exactProjectPermission?.mode ?? 'inherit')">
+          {{ projectSettingsSaving ? '保存中…' : '保存' }}
+        </button>
       </div>
     </form>
   </div>
@@ -3518,6 +3669,7 @@ function handleClearMemory() {
 .kv-pill { padding: 6px 10px; border-radius: var(--r-sm); background: var(--surface-2); }
 
 /* 弹窗 */
+.project-settings-directory { overflow-wrap: anywhere; }
 .modal-scrim {
   position: fixed;
   inset: 0;
@@ -4561,6 +4713,7 @@ function handleClearMemory() {
 }
 .msheet-row + .msheet-row { border-top: 1px solid var(--line); }
 .msheet-row:active { background: var(--surface-3); }
+.msheet-row:disabled { opacity: .52; cursor: default; }
 .msheet-row .i { width: 16px; height: 16px; color: var(--text-2); flex: none; }
 .msheet-row-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .msheet-row.is-danger,

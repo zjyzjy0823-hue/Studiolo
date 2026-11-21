@@ -310,6 +310,10 @@ class AgentAdapter(ABC):
     async def read_subscription_quota(self) -> dict[str, Any]:
         return {"status": "unsupported"}
 
+    async def get_context_usage(self, *, session_id: str) -> dict[str, Any] | None:
+        """Current context occupancy, independent of billed or cumulative token counts."""
+        return None
+
     @abstractmethod
     async def probe(self) -> AdapterProbe:
         """检查本地 CLI / Gateway 是否安装就绪及支持的能力清单。"""

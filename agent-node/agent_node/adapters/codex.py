@@ -237,7 +237,7 @@ class CodexAdapter(AgentAdapter):
         return probe_cli_binary(
             self.provider,
             self.command,
-            ("chat", "history", "approval", "worktree", "models", "read-only", "files", "diff", "checkpoints", "todos", "subscription-quota"),
+            ("chat", "history", "approval", "worktree", "models", "read-only", "files", "diff", "checkpoints", "todos", "subscription-quota", "context-compact"),
         )
 
     async def read_subscription_quota(self) -> dict[str, Any]:

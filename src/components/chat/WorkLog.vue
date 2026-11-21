@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { describeToolCall } from '../../services/chatHelpers'
 import type { WorkLogProgress, WorkLogStep } from '../../services/messageSegments'
 import OpusIcon from '../ui/OpusIcon.vue'
+import ThoughtPulseIcon from './ThoughtPulseIcon.vue'
 import ToolCallCard from './ToolCallCard.vue'
 
 const props = defineProps<{
@@ -37,10 +38,11 @@ function formatTime(ms?: number): string {
 
 const tools = computed(() => props.steps.flatMap(step => step.type === 'tool' ? [step.tool] : []))
 const currentTool = computed(() => props.progress?.type === 'tool' ? describeToolCall(props.progress.tool) : undefined)
+const isThinking = computed(() => props.progress?.type === 'thought')
 const isWorking = computed(() => Boolean(props.progress) && (props.progress?.type !== 'tool' || props.progress.tool.status === 'running'))
 const label = computed(() => {
   if (currentTool.value) return currentTool.value.label
-  if (props.progress?.type === 'thought') return '思考中'
+  if (isThinking.value) return '思考中'
   if (props.progress?.type === 'text') return '回复中'
   const elapsed = formatTime(props.durationMs)
   if (elapsed) return `用时 ${elapsed}`
@@ -56,8 +58,9 @@ const label = computed(() => {
   <details class="work-log" :open="isOpen" @toggle.self="onToggle">
     <summary class="work-log-toggle">
       <OpusIcon v-if="currentTool" :name="currentTool.icon" class="work-log-icon" />
+      <ThoughtPulseIcon v-else-if="isThinking" class="work-log-icon" :active="!isOpen" />
       <span v-else-if="isWorking" class="work-log-spinner" aria-hidden="true" />
-      <span class="work-log-label" :class="{ 'chat-progress-shimmer': isWorking }" aria-live="polite">{{ label }}</span>
+      <span class="work-log-label" :class="{ 'chat-progress-shimmer': isWorking && !isThinking }" aria-live="polite">{{ label }}</span>
       <OpusIcon name="chevD" class="work-log-chevron" />
     </summary>
 
@@ -71,7 +74,8 @@ const label = computed(() => {
         <span class="step-marker" aria-hidden="true" />
         <details v-if="step.type === 'thought'" class="work-log-thought" :open="reveal?.stepId === step.id">
           <summary class="thought-label">
-            <OpusIcon name="sparkle" />思考过程<OpusIcon name="chevD" class="thought-chevron" />
+            <ThoughtPulseIcon :active="isThinking && step.id === steps.at(-1)?.id" />
+            思考过程<OpusIcon name="chevD" class="thought-chevron" />
           </summary>
           <p>{{ step.text }}</p>
         </details>
@@ -117,22 +121,30 @@ const label = computed(() => {
   border-inline-end-color: transparent;
   border-radius: 50%;
 }
-.work-log-timeline { display: grid; gap: 0; padding: 3px 2px 0 10px; margin: 0; list-style: none; }
+.work-log-timeline {
+  --work-step-height: 26px;
+  display: grid;
+  padding: 1px 2px 0 10px;
+  margin: 0;
+  list-style: none;
+}
 .work-log-timeline > li {
   position: relative;
   min-width: 0;
-  padding: 3px 0 3px 16px;
+  padding-inline-start: 16px;
 }
 .work-log-timeline > li:not(:last-child)::before {
   position: absolute;
-  inset: 15px auto -15px 2px;
+  inset-block: calc(var(--work-step-height) / 2) calc(var(--work-step-height) / -2);
+  inset-inline-start: 2px;
   width: 1px;
   background: var(--line-strong, var(--line));
   content: '';
 }
 .step-marker {
   position: absolute;
-  inset: 14px auto auto 0;
+  inset-block-start: calc((var(--work-step-height) - 5px) / 2);
+  inset-inline-start: 0;
   width: 5px;
   height: 5px;
   border-radius: 50%;
@@ -141,19 +153,27 @@ const label = computed(() => {
 }
 .step-thought .step-marker, .step-running .step-marker { background: var(--accent); }
 .step-error .step-marker { background: var(--warn); }
-.work-log-thought { min-width: 0; padding: 4px 6px 7px; }
+.work-log-thought { min-width: 0; }
 .thought-label {
-  display: inline-flex; align-items: center; gap: 6px; padding: 1px 2px;
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  min-block-size: var(--work-step-height);
+  align-items: center;
+  gap: 7px;
   color: var(--text-2); font-weight: 540; list-style: none; cursor: pointer;
 }
 .thought-label::-webkit-details-marker { display: none; }
 .thought-label .i { width: 13px; height: 13px; color: var(--accent); }
 .thought-label .thought-chevron { width: 10px; height: 10px; color: var(--text-3); }
 .work-log-thought[open] .thought-chevron { transform: rotate(180deg); }
-.work-log-thought p { margin: 4px 0 0; color: var(--text-2); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.work-log-thought p { margin: 2px 0 6px; color: var(--text-2); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 @keyframes work-log-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: no-preference) {
   .work-log-spinner { animation: work-log-spin .85s linear infinite; }
 }
-@media (pointer: coarse) { .work-log-toggle { min-height: 44px; } }
+@media (pointer: coarse) {
+  .work-log-toggle { min-height: 44px; }
+  .work-log-timeline { --work-step-height: 44px; }
+}
 </style>
