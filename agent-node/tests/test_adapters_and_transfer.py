@@ -411,6 +411,7 @@ for line in sys.stdin:
             {'session_update': 'tool_call', 'tool_call_id': 'old-tool', 'title': 'read_file: notes.md', 'kind': 'read'},
             {'session_update': 'tool_call_update', 'tool_call_id': 'old-tool', 'status': 'completed', 'raw_output': 'ok'},
             {'session_update': 'agent_message_chunk', 'content': {'type': 'text', 'text': 'Older answer'}},
+            {'session_update': 'usage_update', 'used': 0, 'size': 128000},
         ]:
             print(json.dumps({'jsonrpc': '2.0', 'method': 'session/update', 'params': {
                 'session_id': sid, 'update': update,
@@ -424,6 +425,7 @@ for line in sys.stdin:
         opt = reply.get('result', {}).get('outcome', {}).get('optionId')
         sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'sessionId': 'herm-1', 'update': {'sessionUpdate': 'tool_call_update', 'toolCallId': 'live-tool', 'status': 'completed'}}}) + '\\n')
         sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'sessionId': 'herm-1', 'update': {'sessionUpdate': 'agent_message_chunk', 'content': {'text': f'choice={opt}'}}}}) + '\\n')
+        sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'sessionId': 'herm-1', 'update': {'sessionUpdate': 'usage_update', 'used': 90000, 'size': 128000}}}) + '\\n')
         sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': mid, 'result': {'stopReason': 'end_turn', 'usage': {'inputTokens': 240, 'outputTokens': 55}}}) + '\\n')
     sys.stdout.flush()
 """
@@ -550,6 +552,10 @@ def test_codex_and_hermes_jsonrpc_adapters(tmp_path):
         hermes_usage = next(e for e in h_events if e["type"] == "TokenUsage")
         assert hermes_usage["inputTokens"] == 240 and hermes_usage["outputTokens"] == 55
         assert hermes_usage["totalTokens"] == 295
+        context = next(e["contextUsage"] for e in h_events if e["type"] == "ContextUsage")
+        assert context == {"usedTokens": 90000, "capacityTokens": 128000, "source": "estimated"}
+        assert await hermes.get_context_usage(session_id="herm-1") == context
+        assert (await hermes.get_context_usage(session_id="herm-older"))["usedTokens"] == 0
         assert any(e["type"] == "Completed" for e in h_events)
         await hermes._proc.stop()
 
@@ -779,7 +785,8 @@ def test_opencode_sse_dedup_user_echo_tools_and_history(tmp_path):
                 {"info": {"id": "m-u", "role": "user", "model": {"providerID": "demo-provider", "modelID": "demo-model"}},
                  "parts": [{"type": "text", "text": "fix tests"}]},
                 {
-                    "info": {"id": "m-a", "role": "assistant"},
+                    "info": {"id": "m-a", "role": "assistant", "providerID": "demo-provider", "modelID": "demo-model",
+                             "tokens": {"input": 400, "output": 20, "reasoning": 10, "cache": {"read": 70, "write": 50}}},
                     "parts": [
                         {"type": "reasoning", "text": "check logs"},
                         {
@@ -844,6 +851,9 @@ def test_opencode_sse_dedup_user_echo_tools_and_history(tmp_path):
         assert hist[1]["thought"] == "check logs"
         assert hist[1]["toolCalls"][0]["name"] == "bash"
         assert hist[1]["text"] == "All fixed."
+        assert (await adapter.get_context_usage(session_id="oc-rich")) == {
+            "usedTokens": 550, "source": "last-request", "model": "demo-provider/demo-model",
+        }
 
         assert (await adapter.rename_session(session_id="oc-rich", title="Renamed OC"))["title"] == "Renamed OC"
         assert renamed_titles == ["Renamed OC"]
@@ -851,10 +861,59 @@ def test_opencode_sse_dedup_user_echo_tools_and_history(tmp_path):
         assert compact["systemEvent"]["detail"]["summary"] == "Tests fixed and verified."
         after = await adapter.get_history(session_id="oc-rich")
         assert after[:-1] == hist and after[-1]["id"] == compact["messageId"]
+        assert await adapter.get_context_usage(session_id="oc-rich") is None
         await adapter.delete_session(session_id="oc-rich")
         assert deleted_ids == ["oc-rich"]
 
     asyncio.run(_run())
+
+
+def test_hermes_gateway_context_reads_the_requested_session(tmp_path, monkeypatch):
+    async def run():
+        methods = []
+
+        async def http_handler(request):
+            assert request.url.path == "/api/auth/ws-ticket"
+            assert request.headers["Authorization"] == "Bearer gateway-key"
+            return httpx.Response(200, json={"ticket": "one-use"})
+
+        real_client = httpx.AsyncClient
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(
+            **kwargs, transport=httpx.MockTransport(http_handler),
+        ))
+
+        class FakeSocket:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                pass
+
+            async def send(self, raw):
+                self.request = json.loads(raw)
+                assert self.request["params"] == {"session_id": "existing"}
+                methods.append(self.request["method"])
+
+            async def __aiter__(self):
+                yield json.dumps({"method": "unrelated", "params": {}})
+                result = {"usage": {"total_tokens": 2000000}} if self.request["id"] == 1 else {
+                    "context_used": 45000, "context_max": 128000, "context_estimated": True,
+                }
+                yield json.dumps({"jsonrpc": "2.0", "id": self.request["id"], "result": result})
+
+        def connect(url, *, subprotocols, **kwargs):
+            assert url == "wss://hermes.local/api/ws"
+            assert subprotocols == ["hermes-gateway-v1", "hermes-gateway-ticket.one-use"]
+            return FakeSocket()
+
+        monkeypatch.setattr("agent_node.adapters.hermes.websockets.connect", connect)
+        adapter = HermesAdapter((tmp_path,), mode="gateway", serve_url="https://hermes.local", api_key="gateway-key")
+        assert await adapter.get_context_usage(session_id="existing") == {
+            "usedTokens": 45000, "capacityTokens": 128000, "source": "estimated",
+        }
+        assert methods == ["session.stats", "session.context_breakdown"]
+
+    asyncio.run(run())
 
 
 def test_hermes_gateway_history_preserves_structured_tools_and_order():
@@ -1009,6 +1068,8 @@ def test_opencode_v2_protocol_adapter(tmp_path):
                     {
                         "id": "a1",
                         "type": "assistant",
+                        "model": {"providerID": "opencode-go", "id": "deepseek-v4.1-flash"},
+                        "tokens": {"input": 500, "output": 80, "reasoning": 10, "cache": {"read": 100}},
                         "content": [
                             {"type": "reasoning", "text": "checking"},
                             {"type": "tool", "id": "c1", "name": "read", "state": {"status": "completed", "input": {"path": "README.md"}, "content": [{"type": "text", "text": "hello"}]}},
@@ -1055,6 +1116,10 @@ def test_opencode_v2_protocol_adapter(tmp_path):
         assert "".join(e["text"] for e in events if e["type"] == "TextDelta") == "done!"
         usage = next(e for e in events if e["type"] == "TokenUsage")
         assert usage["contextWindow"] == 1000000 and usage["totalTokens"] == 590
+        context = next(e["contextUsage"] for e in events if e["type"] == "ContextUsage")
+        assert context == {"usedTokens": 690, "capacityTokens": 1000000, "source": "last-request",
+                           "model": "opencode-go/deepseek-v4.1-flash"}
+        assert await adapter.get_context_usage(session_id="ses-v2") == context
         assert any(e["type"] == "Completed" for e in events)
 
         hist = await adapter.get_history(session_id="ses-v2")

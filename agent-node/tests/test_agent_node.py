@@ -161,6 +161,64 @@ def test_session_approval_remembers_only_the_exact_non_high_risk_command(tmp_pat
     asyncio.run(run())
 
 
+def test_project_permission_persists_and_controls_approval_with_session_override(tmp_path):
+    async def run():
+        project = tmp_path / "project"
+        subdirectory = project / "src"
+        subdirectory.mkdir(parents=True)
+        config = NodeConfig("http://127.0.0.1:8000", "sn_live_test", (tmp_path,),
+                            direct=DirectTransferConfig(enabled=False))
+        adapter = MockAdapter((tmp_path,))
+        staging = tmp_path / "stage"
+        daemon = AgentNodeDaemon(config, adapters={"mock": adapter}, staging_dir=staging)
+        frames = asyncio.Queue()
+
+        class Socket:
+            async def send(self, payload):
+                await frames.put(json.loads(payload))
+
+        ws = Socket()
+        await daemon.handle_command(ws, {"type": "project.permissions.set", "cwd": str(tmp_path.parent), "mode": "deny"})
+        assert (await frames.get())["code"] == "project_permission_error"
+        await daemon.handle_command(ws, {"type": "project.permissions.set", "cwd": str(project), "mode": "deny"})
+        assert (await frames.get())["projectPermissions"] == [{"cwd": str(project), "mode": "deny"}]
+        await daemon.handle_command(ws, {"type": "session.open", "sessionId": "example", "cwd": str(subdirectory)})
+        assert (await frames.get())["projectDirectory"] == str(subdirectory)
+
+        # Reconnect with the same node data and no cached session directory.
+        daemon = AgentNodeDaemon(config, adapters={"mock": adapter}, staging_dir=staging)
+        await asyncio.wait_for(daemon.handle_command(ws, {
+            "type": "prompt.send", "sessionId": "example", "requestId": "deny", "text": "RUN_CMD",
+        }), timeout=3)
+        inherited = [frames.get_nowait() for _ in range(frames.qsize())]
+        assert any(frame.get("decision") == "deny" for frame in inherited)
+        assert not any(frame["type"] == "PermissionRequest" for frame in inherited)
+
+        prompt = asyncio.create_task(daemon.handle_command(ws, {
+            "type": "prompt.send", "sessionId": "example", "requestId": "override", "text": "RUN_CMD",
+            "options": {"permissionOverride": "default"},
+        }))
+        try:
+            while True:
+                approval = await asyncio.wait_for(frames.get(), timeout=3)
+                if approval["type"] == "PermissionRequest":
+                    break
+            await daemon.handle_command(ws, {"type": "permission.respond", "callId": approval["callId"], "decision": "deny"})
+            await asyncio.wait_for(prompt, timeout=3)
+        finally:
+            if not prompt.done():
+                prompt.cancel()
+                await asyncio.gather(prompt, return_exceptions=True)
+
+        await daemon.handle_command(ws, {"type": "project.permissions.set", "cwd": str(subdirectory), "mode": "default"})
+        assert not (await daemon._resolve_run_permissions("mock", "example", adapter, {}))["denyRequests"]
+        await daemon.handle_command(ws, {"type": "project.permissions.set", "cwd": str(subdirectory), "mode": "inherit"})
+        assert (await daemon._resolve_run_permissions("mock", "example", adapter, {}))["denyRequests"]
+        assert (await daemon._resolve_run_permissions("mock", "example", adapter, {"readOnly": True}))["readOnly"]
+
+    asyncio.run(run())
+
+
 def test_daemon_mock_approval_and_handoff_and_stdio_jsonrpc(tmp_path):
     async def _run():
         root = tmp_path / "work"

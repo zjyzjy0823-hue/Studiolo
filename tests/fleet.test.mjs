@@ -44,6 +44,7 @@ import {
   stripHostMediaDirectives,
 } from '../src/services/messageSegments.ts'
 import { resolveSavedModelPref, saveAgentModelPref } from '../src/services/modelPrefs.ts'
+import { findProjectPermission } from '../src/services/projectPermissions.ts'
 import {
   appendMessagePart,
   branchFromUserMessage,
@@ -63,6 +64,7 @@ import {
   mergeToolCallUpdate,
   parseCodeBlockLang,
   readTurnTestResult,
+  repliedUserMessageIds,
   searchSessionsAndMessages,
   sessionInboxProject,
   shouldConvertToPastedBlock,
@@ -70,6 +72,22 @@ import {
   systemEventLabel,
   switchMessageBranch,
 } from '../src/services/chatHelpers.ts'
+
+test('a delivery receipt advances only for the current user turn with actual reply content', () => {
+  const messages = [
+    { id: 'older-user', role: 'user', text: 'first' },
+    { id: 'boundary', role: 'system', text: '' },
+    { id: 'older-agent', role: 'assistant', text: 'legacy reply' },
+    { id: 'sent-user', role: 'user', requestId: 'sent', delivery: 'sent', text: 'second' },
+    { id: 'thinking', role: 'assistant', requestId: 'sent', text: '', thought: 'still working' },
+    { id: 'replied-user', role: 'user', requestId: 'answered', delivery: 'sent', text: 'third' },
+    { id: 'replied-agent', role: 'assistant', requestId: 'answered', text: 'reply' },
+    { id: 'waiting-user', role: 'user', requestId: 'pending', delivery: 'sending', text: 'fourth' },
+    { id: 'unrelated-agent', role: 'assistant', requestId: 'other', text: 'unrelated reply' },
+    { id: 'unbound-agent', role: 'assistant', text: 'reply without a turn ID' },
+  ]
+  assert.deepEqual([...repliedUserMessageIds(messages)], ['older-user', 'replied-user'])
+})
 
 test('工作记录按单步工具选用操作类别', () => {
   assert.equal(classifyToolKind({ name: 'browser_navigate' }), 'browser')
@@ -81,7 +99,42 @@ test('工作记录按单步工具选用操作类别', () => {
   assert.equal(describeToolCall({ name: 'tool', title: 'read_file: README.md' }).icon, 'file')
   assert.equal(describeToolCall({ name: 'tool', toolKind: 'edit', title: 'Update source' }).icon, 'pencil')
   assert.equal(describeToolCall({ name: 'tool', toolKind: 'search' }).icon, 'search')
-  assert.equal(describeToolCall({ name: 'tool', toolKind: 'fetch' }).icon, 'globe')
+  assert.equal(describeToolCall({ name: 'tool', toolKind: 'fetch' }).icon, 'link')
+})
+
+test('项目权限匹配最近的目录并保留各系统的路径规则', () => {
+  const permissions = [
+    { cwd: 'D:\\Projects', mode: 'deny' },
+    { cwd: 'D:\\Projects\\Preview', mode: 'read' },
+    { cwd: '/work/Preview', mode: 'deny' },
+  ]
+  assert.equal(findProjectPermission(permissions, 'd:/projects/PREVIEW/src')?.mode, 'read')
+  assert.equal(findProjectPermission(permissions, 'd:/projects/Preview2')?.mode, 'deny')
+  assert.equal(findProjectPermission(permissions, '/work/preview'), undefined)
+  assert.equal(findProjectPermission(permissions, '/work/Preview')?.mode, 'deny')
+})
+
+test('工具图标区分命名空间工具、文件操作和单一用途的命令', () => {
+  const examples = [
+    [{ name: 'mcp__playwright__browser_navigate', toolKind: 'fetch' }, 'browser'],
+    [{ name: 'mcp__playwright__browser_take_screenshot', toolKind: 'read' }, 'camera'],
+    [{ name: 'WebSearch', toolKind: 'search' }, 'globeSearch'],
+    [{ name: 'mcp__workspace__list_directory', toolKind: 'read' }, 'folder'],
+    [{ name: 'tool', toolKind: 'move' }, 'move'],
+    [{ name: 'tool', toolKind: 'delete' }, 'trash'],
+    [{ name: 'functions.exec_command', input: { command: 'git status --short' } }, 'branch'],
+    [{ name: 'terminal', input: { command: 'python -m pytest -q' } }, 'testTube'],
+    [{ name: 'terminal', input: { command: 'git status && pytest -q' } }, 'terminal'],
+    [{ name: 'todowrite', toolKind: 'edit' }, 'checklist'],
+    [{ name: 'memory_search', toolKind: 'search' }, 'data'],
+    [{ name: 'view_image', toolKind: 'read' }, 'image'],
+    [{ name: 'inspect_trace' }, 'trace'],
+    [{ name: 'mcp__calendar__get_events' }, 'plug'],
+    [{ name: 'tool', title: 'config/file-write.json' }, 'api'],
+  ]
+  for (const [tool, icon] of examples) {
+    assert.equal(describeToolCall(tool).icon, icon, tool.name)
+  }
 })
 
 test('通用工具更新保留已有名称和类别', () => {

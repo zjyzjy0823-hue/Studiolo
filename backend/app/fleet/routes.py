@@ -499,6 +499,7 @@ async def fleet_node_ws(websocket: WebSocket):
                 target_client_id=target_client_id if evt_type in (
                     "SessionsSnapshot",
                     "SessionHistory",
+                    "ContextSnapshot",
                     "SessionStreamReplay",
                     "RunStopStatus",
                     "TerminalPreview",

@@ -60,6 +60,13 @@ export interface SessionTokenUsage {
   updatedAt: number
 }
 
+export interface ChatContextUsage {
+  usedTokens: number
+  capacityTokens?: number
+  source: 'reported' | 'estimated' | 'last-request'
+  model?: string
+}
+
 export interface FleetModel {
   id: string
   label: string
@@ -76,7 +83,13 @@ export interface FleetModel {
   unavailable?: boolean
 }
 
-export type ComposerMode = 'build' | 'plan'
+export type ChatPermissionMode = 'default' | 'read' | 'deny'
+export type ProjectPermissionSetting = ChatPermissionMode | 'inherit'
+
+export interface ProjectPermission {
+  cwd: string
+  mode: ChatPermissionMode
+}
 
 export interface RunOptions {
   model?: string
@@ -86,8 +99,7 @@ export interface RunOptions {
   denyRequests?: boolean
   /** 极速模式：自动放行代理工具审批请求，无需人工确认 */
   autoApprove?: boolean
-  /** Plan 模式：要求代理先输出结构化方案并在执行前确认 */
-  planMode?: boolean
+  permissionOverride?: ChatPermissionMode
 }
 
 export interface WorkspaceSkill {
@@ -272,6 +284,7 @@ export interface ChatSession {
   worktreePath?: string | null
   projectKey?: string
   projectName?: string
+  projectDirectory?: string
   branch?: string
   model?: string
   updatedAt?: string | number
@@ -439,6 +452,8 @@ export interface ChatMessage {
   nodeId: string
   provider: AdapterProvider
   text: string
+  /** Optimistic user messages track delivery until the node acknowledges them. */
+  delivery?: 'sending' | 'sent' | 'failed'
   thought?: string
   streaming?: boolean
   interrupted?: boolean
@@ -465,6 +480,7 @@ export type FleetConnectionState = 'disconnected' | 'connecting' | 'reconnecting
 
 export interface FleetWsEvent {
   type: string
+  contextUsage?: ChatContextUsage | null
   nodeId?: string
   provider?: AdapterProvider
   sessionId?: string
@@ -499,6 +515,7 @@ export interface FleetWsEvent {
   checkpointId?: string
   restoredFiles?: string[]
   supported?: boolean
+  compactionPending?: boolean
   systemEvent?: ChatSystemEvent
   handoffSummary?: string
   handoffSource?: string
@@ -545,7 +562,7 @@ export interface FleetWsEvent {
   data?: string
   exitCode?: number
   nodes?: AgentNode[]
-  sessions?: Array<Pick<ChatSession, 'sessionId' | 'provider' | 'worktreePath' | 'branch' | 'model' | 'updatedAt' | 'projectKey' | 'projectName'> & { title?: string; cwd?: string }>
+  sessions?: Array<Pick<ChatSession, 'sessionId' | 'provider' | 'worktreePath' | 'branch' | 'model' | 'updatedAt' | 'projectKey' | 'projectName' | 'projectDirectory'> & { title?: string; cwd?: string }>
   messages?: Array<{
     id?: string
     role: string
@@ -563,6 +580,8 @@ export interface FleetWsEvent {
   worktreePath?: string | null
   projectKey?: string
   projectName?: string
+  projectDirectory?: string
+  projectPermissions?: ProjectPermission[]
   messageId?: string
   scope?: 'turn' | 'cumulative'
   inputTokens?: number

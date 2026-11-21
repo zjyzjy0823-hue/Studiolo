@@ -52,6 +52,8 @@ class MockAdapter(AgentAdapter):
             capabilities=(
                 "chat",
                 "history",
+                "context-usage",
+                "context-compact",
                 "approval",
                 "worktree",
                 "artifacts",
@@ -101,6 +103,20 @@ class MockAdapter(AgentAdapter):
     async def get_history(self, *, session_id: str, limit: int = 50) -> list[dict[str, Any]]:
         items = self._histories.get(session_id, [])
         return items[-limit:]
+
+    async def get_context_usage(self, *, session_id: str) -> dict[str, Any] | None:
+        history = self._histories.get(session_id)
+        session = self._sessions.get(session_id)
+        if history is None or session is None:
+            return None
+        model = session.get("model", "mock-balanced")
+        used = sum(
+            estimate_tokens(item["systemEvents"][0]["detail"].get("summary", "")) if item.get("systemEvents")
+            else estimate_tokens(item.get("text") or "")
+            for item in history[self._context_start.get(session_id, 0):]
+        )
+        return {"usedTokens": used, "capacityTokens": MOCK_CONTEXT_WINDOWS[model],
+                "source": "estimated", "model": model}
 
     async def send_prompt(
         self,
@@ -169,6 +185,10 @@ class MockAdapter(AgentAdapter):
                         source="estimated",
                     )
                 )
+                if session_id in self._sessions:
+                    self._sessions[session_id]["model"] = model_id
+                    await emit({"type": "ContextUsage", "sessionId": session_id, "runId": run_id,
+                                "contextUsage": await self.get_context_usage(session_id=session_id)})
                 await emit({"type": "Completed", "sessionId": session_id, "runId": run_id, "requestId": request_id})
 
             if text.lstrip().startswith("/plan") or "TODO" in text or "TOOL_DEMO" in text:

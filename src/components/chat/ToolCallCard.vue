@@ -224,12 +224,12 @@ onUnmounted(() => {
 }
 .tool-card-head {
   list-style: none;
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 7px;
+  width: fit-content;
   max-width: 100%;
-  min-block-size: 28px;
-  padding-block: 4px;
+  min-block-size: var(--work-step-height, 26px);
   cursor: pointer;
   user-select: none;
   color: var(--text);
@@ -282,8 +282,6 @@ onUnmounted(() => {
   background: var(--accent-soft);
   color: var(--accent);
 }
-@media (pointer: coarse) { .tool-card-head { min-height: 44px; } }
-
 .tool-card::details-content {
   interpolate-size: allow-keywords;
   overflow: clip;

@@ -16,6 +16,28 @@ import type {
   ToolCallStatus,
 } from '../types/fleet'
 
+export function repliedUserMessageIds(messages: readonly ChatMessage[]): Set<string> {
+  const replied = new Set<string>()
+  let user: ChatMessage | undefined
+  for (const message of messages) {
+    if (message.role === 'user') {
+      user = message
+      continue
+    }
+    if (message.role !== 'assistant' || !user || user.delivery === 'failed') continue
+    const hasReply = message.text.trim() || message.forms?.length || message.media?.length || message.artifacts?.length
+    if (!hasReply) continue
+    const userId = user.requestId || user.runId
+    const assistantIds = [message.requestId, message.runId].filter(Boolean)
+    const matches = userId && assistantIds.includes(userId)
+    // Older provider histories omit turn identifiers. In that case, pair only within the current turn.
+    if (matches || (user.delivery !== 'sending' && (!userId || !assistantIds.length))) {
+      replied.add(user.id)
+    }
+  }
+  return replied
+}
+
 export function sessionInboxProject(session: Pick<ChatSession, 'cwd' | 'worktreePath' | 'projectKey' | 'projectName'>) {
   const path = (session.worktreePath || session.cwd || '').replace(/\\/g, '/')
   const base = path.split(/\/\.studiolo-worktrees(?:\/|$)/i, 1)[0]
@@ -460,51 +482,104 @@ export type GroupedMessagePart =
   | { type: 'tool'; callId: string; tool: ToolCallBadge }
   | GroupedToolRun
 
-type ToolKind = 'browser' | 'read' | 'edit' | 'cmd' | 'search' | 'subagent'
-
-const acpToolKinds: Readonly<Record<string, ToolKind>> = {
-  read: 'read', edit: 'edit', delete: 'edit', move: 'edit', execute: 'cmd', search: 'search', fetch: 'browser',
-}
-
-function inferToolKind(label = ''): ToolKind | undefined {
-  const name = label.trim().toLowerCase()
-  if (/browser|playwright|web.?fetch/.test(name)) return 'browser'
-  if (/sub.?agent|delegate|spawn.?agent|^task$/.test(name)) return 'subagent'
-  if (/edit|write|patch|replace|create|filechange|delete|move.?file|写入|修改|编辑/.test(name)) return 'edit'
-  if (/terminal|bash|shell|command|exec|^run|运行命令/.test(name)) return 'cmd'
-  if (/grep|search|glob|find|^list|搜索|检索/.test(name)) return 'search'
-  if (/read|view|^cat\b|file|读取/.test(name)) return 'read'
-}
-
-export function classifyToolKind(tool: Pick<ToolCallBadge, 'name' | 'title' | 'detail' | 'toolKind' | 'subagentSessionId'>): ToolKind | 'other' {
-  if (tool.subagentSessionId) return 'subagent'
-  const kind = tool.toolKind?.toLowerCase()
-  if (kind && Object.hasOwn(acpToolKinds, kind)) return acpToolKinds[kind]!
-  return inferToolKind(tool.name.split(/[:：]/, 1)[0])
-    ?? inferToolKind(tool.title?.split(/[:：]/, 1)[0])
-    ?? inferToolKind(tool.detail?.split(/[:：]/, 1)[0])
-    ?? 'other'
-}
-
 const toolOperations = {
-  browser: { icon: 'globe', action: '使用浏览器' },
-  read: { icon: 'file', action: '读取文件' },
-  edit: { icon: 'pencil', action: '编辑文件' },
-  cmd: { icon: 'terminal', action: '运行命令' },
-  search: { icon: 'search', action: '检索内容' },
-  subagent: { icon: 'branch', action: '调用子代理' },
+  browser: { icon: 'browser', action: '使用浏览器', summary: '浏览器' },
+  read: { icon: 'file', action: '读取文件', summary: '读取' },
+  search: { icon: 'search', action: '检索内容', summary: '检索' },
+  edit: { icon: 'pencil', action: '编辑文件', summary: '修改' },
+  cmd: { icon: 'terminal', action: '运行命令', summary: '命令' },
+  subagent: { icon: 'bot', action: '调用子代理', summary: '子代理' },
+  folder: { icon: 'folder', action: '查看目录', summary: '目录' },
+  move: { icon: 'move', action: '移动或重命名文件', summary: '移动' },
+  delete: { icon: 'trash', action: '删除文件', summary: '删除' },
+  git: { icon: 'branch', action: '执行 Git 操作', summary: 'Git' },
+  test: { icon: 'testTube', action: '运行测试', summary: '测试' },
+  webSearch: { icon: 'globeSearch', action: '搜索网页', summary: '网页搜索' },
+  fetch: { icon: 'link', action: '获取网页', summary: '网页获取' },
+  screenshot: { icon: 'camera', action: '截取屏幕', summary: '截图' },
+  image: { icon: 'image', action: '处理图片', summary: '图片' },
+  todo: { icon: 'checklist', action: '操作待办', summary: '待办' },
+  memory: { icon: 'data', action: '访问记忆', summary: '记忆' },
+  trace: { icon: 'trace', action: '检查运行记录', summary: '运行记录' },
+  mcp: { icon: 'plug', action: '调用集成', summary: '集成' },
+  other: { icon: 'api', action: '调用工具', summary: '工具' },
 } as const
 
+type ToolKind = keyof typeof toolOperations
+
+const acpToolKinds: Readonly<Partial<Record<string, ToolKind>>> = {
+  read: 'read', edit: 'edit', delete: 'delete', move: 'move', execute: 'cmd',
+  search: 'search', fetch: 'fetch',
+}
+
+// Match tool aliases before generic ACP kinds such as read, search, and execute.
+const toolNameRules: ReadonlyArray<readonly [RegExp, ToolKind]> = [
+  [/^(?:(?:browser|playwright|desktop|page)_)?(?:(?:take|capture)_)?screenshot(?:_|$)|^截图/, 'screenshot'],
+  [/^(?:web_?search|search_web|search_internet)(?:_|$)|^搜索网页/, 'webSearch'],
+  [/^(?:web_?fetch|fetch|open_url|http_request|http_get)(?:_|$)|^抓取网页/, 'fetch'],
+  [/^(?:browser|playwright)(?:_|$)|^使用浏览器/, 'browser'],
+  [/^(?:sub_?agent|delegate|spawn_?agent)(?:_|$)|^task$|^调用子代理/, 'subagent'],
+  [/^(?:todo_?(?:read|write|list|update)|update_plan|create_todo|(?:list|manage|update)_tasks)(?:_|$)/, 'todo'],
+  [/^(?:memory|recall|remember|save_memory|search_memory)(?:_|$)/, 'memory'],
+  [/^(?:image_?gen|image|(?:view|open|read|analyze|generate|edit)_image)(?:_|$)/, 'image'],
+  [/^(?:inspect_trace|read_trace|trace_query)(?:_|$)/, 'trace'],
+  [/^(?:list(?:_(?:dir(?:ectory)?|files|folders))?|read_dir(?:ectory)?|tree|ls|directory_list)(?:_|$)|^查看目录/, 'folder'],
+  [/^(?:(?:move|rename)(?:_file)?|file_move)(?:_|$)|^移动文件/, 'move'],
+  [/^(?:(?:delete|remove)(?:_file)?|file_delete)(?:_|$)|^删除文件/, 'delete'],
+  [/^git(?:_|$)/, 'git'],
+  [/^(?:run_tests?|unit_test|test_run)(?:_|$)/, 'test'],
+  [/^(?:edit|write|patch|apply_patch|replace|create_file|file_?change|str_replace)(?:_|$)|^(?:写入|修改|编辑)/, 'edit'],
+  [/^(?:terminal|bash|shell|command|exec|execute|run)(?:_|$)|^运行命令/, 'cmd'],
+  [/^(?:grep|search|glob|find)(?:_|$)|^(?:搜索|检索)/, 'search'],
+  [/^(?:read|view|cat|open_file|file_read)(?:_|$)|^读取/, 'read'],
+]
+
+function inferToolKind(label = '') {
+  const name = label.split(/[:：]/, 1)[0].trim()
+    .replace(/^functions\./i, '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[.\s-]+/g, '_')
+    .toLowerCase()
+  const operation = name.split('__').at(-1) ?? name
+  return toolNameRules.find(([pattern]) => pattern.test(operation))?.[1]
+}
+
+function classifyTerminalCommand(rawCommand: unknown): ToolKind {
+  const command = typeof rawCommand === 'string' ? rawCommand.trim().replace(/^\$\s+/, '') : ''
+  // Compound commands can involve several types of work.
+  if (/[;&|\r\n]/.test(command)) return 'cmd'
+  if (/^git(?:\s|$)/i.test(command)) return 'git'
+  if (/^(?:pytest|(?:python3?|py)\s+-m\s+pytest|(?:npx\s+)?(?:vitest|jest)|(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test|cargo\s+test|node\s+--test)(?:\s|$)/i.test(command)) return 'test'
+  return 'cmd'
+}
+
+export function classifyToolKind(tool: Pick<ToolCallBadge, 'name' | 'title' | 'detail' | 'toolKind' | 'subagentSessionId' | 'input'>): ToolKind {
+  if (tool.subagentSessionId) return 'subagent'
+  const declaredKind = tool.toolKind?.trim().toLowerCase()
+  const kind = inferToolKind(tool.name)
+    ?? (declaredKind && Object.hasOwn(acpToolKinds, declaredKind) ? acpToolKinds[declaredKind] : undefined)
+    ?? inferToolKind(tool.title)
+    ?? inferToolKind(tool.detail)
+    ?? (/^mcp__(?:browser|playwright)__/i.test(tool.name) ? 'browser' : undefined)
+    ?? (/^mcp(?:__|_tool_call\b|\.)/i.test(tool.name) ? 'mcp' : 'other')
+  if (kind !== 'cmd') return kind
+  const command = typeof tool.input === 'string' ? tool.input
+    : (tool.input as { command?: unknown } | undefined)?.command ?? tool.title
+  return classifyTerminalCommand(command)
+}
+
 export function describeToolCall(tool: ToolCallBadge) {
-  const kind = classifyToolKind(tool)
-  const operation = kind === 'other' ? { icon: 'api' as const, action: `调用 ${tool.name}` } : toolOperations[kind]
   const input = tool.input
   const fields = input && typeof input === 'object' ? input as Record<string, unknown> : {}
   const path = fields.filePath ?? fields.path ?? fields.file ?? fields.target_file ?? fields.filename
   const filePath = typeof path === 'string' && !path.includes('://') ? path.trim() : ''
   const title = tool.title?.trim()
-  const argument = typeof input === 'string' ? input : fields.command ?? fields.url ?? fields.query ?? fields.pattern ?? fields.resource
-  const target = ((kind === 'read' || kind === 'edit') && filePath)
+  const kind = classifyToolKind(tool)
+  const operation = toolOperations[kind]
+  const action = kind === 'other' || kind === 'mcp' ? `${operation.action} · ${tool.name}` : operation.action
+  const argument = typeof input === 'string' ? input : fields.command ?? fields.url ?? fields.query ?? fields.pattern
+    ?? fields.directory ?? fields.dirPath ?? fields.source ?? fields.resource
+  const target = (['read', 'edit', 'move', 'delete', 'folder'].includes(kind) && filePath)
     || (title !== tool.name && title)
     || filePath
     || (typeof argument === 'string' && argument)
@@ -515,8 +590,8 @@ export function describeToolCall(tool: ToolCallBadge) {
   const plain = hasAnsiSequences(line) ? parseAnsiText(line).map(span => span.text).join('') : line
   const excerpt = plain.length > 180 ? `${plain.slice(0, 180)}…` : plain
   const label = tool.status === 'error'
-    ? `${operation.action}失败`
-    : `${tool.status === 'running' ? '正在' : '已'}${operation.action}`
+    ? `${action}失败`
+    : `${tool.status === 'running' ? '正在' : '已'}${action}`
   return { icon: operation.icon, filePath, label: excerpt ? `${label} · ${excerpt}` : label }
 }
 
@@ -548,14 +623,6 @@ export function readTurnTestResult(tools: ToolCallBadge[] = []) {
   return undefined
 }
 
-function countWorkTools(tools: ToolCallBadge[]) {
-  const counts = { browser: 0, read: 0, edit: 0, cmd: 0, search: 0, subagent: 0, other: 0 }
-  for (const tool of tools) {
-    counts[classifyToolKind(tool)] += 1
-  }
-  return counts
-}
-
 /**
  * 将消息时间轴中的连续多步工具调用聚合成紧凑的 Work Run（>= 2 个连续 tool 时折叠分组），
  * 减少长工具流刷屏并保留单步工具和错误/运行中状态可见性。
@@ -576,25 +643,23 @@ export function groupMessageParts(
       toolBucket = []
       return
     }
-    const counts = countWorkTools(toolBucket.map(item => item.tool))
+    const counts = new Map<ToolKind, number>()
     let totalDurationMs = 0
     let hasRunning = false
     let hasError = false
     for (const item of toolBucket) {
+      const kind = classifyToolKind(item.tool)
+      counts.set(kind, (counts.get(kind) ?? 0) + 1)
       if (typeof item.tool.durationMs === 'number' && !Number.isNaN(item.tool.durationMs)) {
         totalDurationMs += item.tool.durationMs
       }
       if (item.tool.status === 'running') hasRunning = true
       if (item.tool.status === 'error') hasError = true
     }
-    const parts: string[] = []
-    if (counts.browser) parts.push(`浏览器 ${counts.browser}`)
-    if (counts.read) parts.push(`读取 ${counts.read}`)
-    if (counts.search) parts.push(`检索 ${counts.search}`)
-    if (counts.edit) parts.push(`修改 ${counts.edit}`)
-    if (counts.cmd) parts.push(`命令 ${counts.cmd}`)
-    if (counts.subagent) parts.push(`子代理 ${counts.subagent}`)
-    if (counts.other) parts.push(`工具 ${counts.other}`)
+    const parts = (Object.keys(toolOperations) as ToolKind[]).flatMap(kind => {
+      const count = counts.get(kind)
+      return count ? [`${toolOperations[kind].summary} ${count}`] : []
+    })
 
     out.push({
       type: 'tool-group',
