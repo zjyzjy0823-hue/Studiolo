@@ -171,11 +171,12 @@ def build_tool_call_update(
     *,
     session_id: str,
     call_id: str,
-    name: str,
+    name: str | None = None,
     status: str = "running",
     run_id: str | None = None,
     request_id: str | None = None,
     title: str | None = None,
+    tool_kind: str | None = None,
     tool_input: Any = None,
     output: str | None = None,
     delta_output: str | None = None,
@@ -189,15 +190,18 @@ def build_tool_call_update(
         "type": "ToolCallUpdate",
         "sessionId": session_id,
         "callId": call_id,
-        "name": name,
         "status": status,
     }
+    if name:
+        frame["name"] = name
     if run_id:
         frame["runId"] = run_id
     if request_id:
         frame["requestId"] = request_id
     if title:
         frame["title"] = title
+    if tool_kind:
+        frame["toolKind"] = tool_kind
     if tool_input is not None:
         frame["input"] = tool_input
     if output is not None:

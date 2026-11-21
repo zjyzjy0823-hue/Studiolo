@@ -2533,7 +2533,7 @@ async function retryTurn(msg: ChatMessage) {
           title="回到底部"
           @click="scrollToBottomSmooth"
         >
-          <OpusIcon name="arrowDown" />
+          <span class="jump-latest-icon"><OpusIcon name="arrowDown" /></span>
           <span v-if="!mobile || unseenBelowCount > 0">{{ unseenBelowCount > 0 ? `新回复 (${unseenBelowCount})` : '回到底部' }}</span>
         </button>
       </Transition>
@@ -5228,22 +5228,23 @@ dialog.img-lightbox::backdrop {
 .jump-latest-pill {
   position: absolute;
   left: 50%;
-  bottom: calc(100% + 10px);
+  bottom: calc(100% + 12px);
   transform: translateX(-50%);
   z-index: 25;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  padding: 5px 12px;
+  gap: 7px;
+  min-height: 36px;
+  padding: 4px 13px 4px 7px;
   border: 1px solid var(--line-strong);
-  border-radius: var(--r-full);
+  border-radius: 999px;
   background: color-mix(in srgb, var(--solid) 92%, transparent);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   color: var(--text);
-  font-size: 11.5px;
-  font-weight: 550;
+  font-size: 12px;
+  font-weight: 580;
   box-shadow: var(--shadow-2);
   cursor: pointer;
 }
@@ -5253,8 +5254,8 @@ dialog.img-lightbox::backdrop {
   transform: none;
 }
 .jump-latest-pill.is-mobile-circle {
-  width: 34px;
-  height: 34px;
+  width: 38px;
+  height: 38px;
   padding: 0;
   border-radius: 50%;
 }
@@ -5271,6 +5272,17 @@ dialog.img-lightbox::backdrop {
   background: var(--solid);
   border-color: var(--accent-line);
 }
+.jump-latest-pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.jump-latest-icon {
+  display: grid;
+  place-items: center;
+  width: 23px;
+  height: 23px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--accent-soft);
+}
+.is-mobile-circle .jump-latest-icon { background: transparent; }
 .jump-latest-pill .i {
   width: 12px;
   height: 12px;
@@ -5285,6 +5297,8 @@ dialog.img-lightbox::backdrop {
   opacity: 0;
   transform: translate(-50%, 8px);
 }
+:global([data-motion="reduced"]) .jump-pill-enter-active,
+:global([data-motion="reduced"]) .jump-pill-leave-active { transition: none; }
 .interrupted-bar {
   display: flex;
   align-items: center;

@@ -208,6 +208,9 @@ class CodexAdapter(AgentAdapter):
 
     async def _ensure_proc(self) -> StdioJsonRpcProcess:
         async with self._init_lock:
+            if self._proc is not None and self._proc.started and not self._proc.is_alive():
+                await self._proc.stop()
+                self._proc = None
             if self._proc is None:
                 self._proc = StdioJsonRpcProcess(
                     [self.command, "app-server"],
@@ -454,6 +457,7 @@ class CodexAdapter(AgentAdapter):
             raise ValueError("当前会话已有任务运行中")
         turn = ActiveTurn(request_id, "", emit, request_approval, asyncio.get_running_loop().create_future())
         self._turns[session_id] = turn
+        transport_closed = asyncio.create_task(proc.wait_closed())
         try:
             image_inputs: list[dict[str, Any]] = []
             extra_attachments: list[dict[str, Any]] = []
@@ -491,9 +495,15 @@ class CodexAdapter(AgentAdapter):
                 method, params = turn.early.popleft()
                 await self._dispatch_notification(session_id, turn, method, params)
             turn.ready = True
-            await asyncio.wait_for(turn.done, timeout=300.0)
+            await asyncio.wait((turn.done, transport_closed), return_when=asyncio.FIRST_COMPLETED)
+            if not turn.done.done():
+                raise RuntimeError("Codex app-server 连接在本轮完成前关闭")
+            await turn.done
         finally:
             self._turns.pop(session_id, None)
+            transport_closed.cancel()
+            turn.done.cancel()
+            await asyncio.gather(transport_closed, return_exceptions=True)
 
     async def cancel(self, *, session_id: str, run_id: str | None = None) -> None:
         if self._proc is None:

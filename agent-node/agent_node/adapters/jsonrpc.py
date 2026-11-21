@@ -104,7 +104,7 @@ class StdioJsonRpcProcess:
                 fut.set_exception(RuntimeError("JSON-RPC process closed"))
         self._pending.clear()
 
-    async def call(self, method: str, params: dict[str, Any] | None = None, *, timeout: float = 60.0) -> Any:
+    async def call(self, method: str, params: dict[str, Any] | None = None, *, timeout: float | None = 60.0) -> Any:
         if self.auto_start:
             await self.start()
         req_id = self._next_id
@@ -128,6 +128,11 @@ class StdioJsonRpcProcess:
         if self.auto_start:
             await self.start()
         await self._write({"jsonrpc": "2.0", "method": method, "params": params or {}})
+
+    async def wait_closed(self) -> None:
+        """Wait for the current reader without cancelling it when a turn finishes."""
+        if self._reader_task is not None:
+            await asyncio.shield(self._reader_task)
 
     async def _write(self, msg: dict[str, Any], proc: asyncio.subprocess.Process | None = None) -> None:
         proc = proc or self._proc

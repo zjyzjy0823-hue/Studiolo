@@ -85,6 +85,9 @@ def _gateway_history(items: list[Any]) -> list[dict[str, Any]]:
             function = item.get("function") if isinstance(item.get("function"), dict) else {}
             tool = {"callId": call_id, "name": item.get("name") or function.get("name") or "tool"}
             tool.update({key: item[key] for key in ("title", "detail", "output", "error", "durationMs", "subagentSessionId", "media") if key in item})
+            tool_kind = item.get("toolKind") or item.get("kind")
+            if isinstance(tool_kind, str) and tool_kind:
+                tool["toolKind"] = tool_kind
             tool["input"] = item.get("input", function.get("arguments"))
             status = item.get("status")
             tool["status"] = "error" if status in ("error", "failed", "cancelled") else "running" if status in ("running", "in_progress") else "completed"
@@ -480,7 +483,12 @@ class HermesAdapter(AgentAdapter):
             self._save_history(session_id, messages)
             messages.append({"role": "user", "text": text, "runId": request_id})
             await emit({"type": "Accepted", "sessionId": session_id, "runId": request_id, "requestId": request_id, "provider": self.provider})
-            prompt_res = await proc.call("session/prompt", {"sessionId": session_id, "prompt": [{"type": "text", "text": prompt_text}]})
+            # ACP resolves the prompt only after the whole turn, including tools and user approvals.
+            prompt_res = await proc.call(
+                "session/prompt",
+                {"sessionId": session_id, "prompt": [{"type": "text", "text": prompt_text}]},
+                timeout=None,
+            )
             if isinstance(prompt_res, dict) and isinstance(prompt_res.get("usage"), dict):
                 c = extract_usage_counts(prompt_res["usage"])
                 if sum(c.values()) > 0:
@@ -587,9 +595,17 @@ class HermesAdapter(AgentAdapter):
             raw_output = upd.get("rawOutput", upd.get("raw_output"))
             if output is None and raw_output is not None:
                 output = str(raw_output)
+            title = upd.get("title")
+            title = title if isinstance(title, str) and title else None
+            name = upd.get("name") or upd.get("toolName") or upd.get("tool_name")
+            if not isinstance(name, str) or not name:
+                name = (title.split(":", 1)[0].strip() if title else "tool") if kind == "tool_call" else None
+            tool_kind = upd.get("toolKind") or upd.get("tool_kind") or upd.get("kind")
             tool = {
                 "callId": call_id,
-                "name": upd.get("title") or ("tool" if kind == "tool_call" else None),
+                "name": name,
+                "title": title,
+                "toolKind": tool_kind if isinstance(tool_kind, str) and tool_kind != "other" else None,
                 "status": status or ("running" if raw_status or kind == "tool_call" else None),
                 "input": upd.get("rawInput", upd.get("raw_input")),
                 "output": output,
@@ -614,9 +630,10 @@ class HermesAdapter(AgentAdapter):
             await emit({"type": event_type, "sessionId": sid, "text": text})
         elif tool:
             if kind == "tool_call":
-                await emit({"type": "ToolCall", "sessionId": sid, "callId": tool["callId"], "name": tool["name"]})
+                await emit({"type": "ToolCall", "sessionId": sid, "callId": tool["callId"], "name": tool["name"],
+                            "title": tool["title"], "toolKind": tool["toolKind"]})
             await emit(build_tool_call_update(
-                session_id=sid, call_id=tool["callId"], name=tool["name"] or "tool",
+                session_id=sid, call_id=tool["callId"], name=tool["name"], title=tool["title"], tool_kind=tool["toolKind"],
                 status=tool["status"] or "running", tool_input=tool["input"],
                 output=tool["output"], duration_ms=tool["durationMs"],
             ))

@@ -77,6 +77,20 @@ test('工作记录按单步工具选用操作类别', () => {
   assert.equal(classifyToolKind({ name: 'shell' }), 'cmd')
   assert.equal(classifyToolKind({ name: 'read_file' }), 'read')
   assert.equal(classifyToolKind({ name: 'read_file', subagentSessionId: 'child' }), 'subagent')
+  assert.equal(describeToolCall({ name: 'tool', title: 'terminal: npm run build' }).icon, 'terminal')
+  assert.equal(describeToolCall({ name: 'tool', title: 'read_file: README.md' }).icon, 'file')
+  assert.equal(describeToolCall({ name: 'tool', toolKind: 'edit', title: 'Update source' }).icon, 'pencil')
+  assert.equal(describeToolCall({ name: 'tool', toolKind: 'search' }).icon, 'search')
+  assert.equal(describeToolCall({ name: 'tool', toolKind: 'fetch' }).icon, 'globe')
+})
+
+test('通用工具更新保留已有名称和类别', () => {
+  const started = mergeToolCallUpdate([], { callId: 'acp', name: 'read_file', toolKind: 'read', title: 'Open notes' })
+  const [finished] = mergeToolCallUpdate(started, { callId: 'acp', name: 'tool', toolKind: 'other', status: 'completed' })
+  assert.equal(finished.name, 'read_file')
+  assert.equal(finished.toolKind, 'read')
+  assert.equal(finished.status, 'completed')
+  assert.equal(describeToolCall(finished).icon, 'file')
 })
 
 test('收件箱按仓库标识合并不同机器的检出，并保留旧节点的项目文件夹', () => {

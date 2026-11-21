@@ -1216,6 +1216,7 @@ export const useFleetStore = defineStore('fleet', () => {
               id: tc.callId || tc.id || `hist-tc-${idx}-${tIdx}`,
               callId: tc.callId,
               name: tc.name || 'tool',
+              toolKind: tc.toolKind,
               title: tc.title || tc.detail || tc.name,
               detail: tc.detail,
               status: tc.status || 'completed',

@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import type { ChatSession } from '../../types/fleet'
 import OpusIcon from '../ui/OpusIcon.vue'
+import SessionStatusBadge from './SessionStatusBadge.vue'
 import { getProviderMeta } from './providerMeta'
 
 const props = defineProps<{
@@ -38,16 +39,15 @@ const provider = computed(() => getProviderMeta(props.session.provider))
       :title="session.title"
       @click="emit('open')"
     >
-      <span class="node-session-status" :class="`is-${status.key}`" aria-hidden="true" />
       <OpusIcon :name="provider.icon" class="node-session-icon" :title="provider.label" />
       <span class="node-session-name">
         <span class="node-session-title">{{ session.title }}</span>
         <span v-if="snippet || branch" class="node-session-subtitle" :title="snippet || branch">{{ snippet || branch }}</span>
       </span>
       <span class="node-session-facts">
-        <span class="node-session-badge" :class="`is-${status.key}`">{{ status.label }}</span>
         <span v-if="session.model" class="node-session-model" :title="session.model">{{ session.model }}</span>
-        <span v-if="time" class="node-session-time">{{ time }}</span>
+        <SessionStatusBadge v-if="status.key !== 'done'" :status="status" compact />
+        <span v-else-if="time" class="node-session-time">{{ time }}</span>
       </span>
     </button>
     <div v-if="!renaming" class="node-session-actions">
@@ -71,7 +71,7 @@ const provider = computed(() => getProviderMeta(props.session.provider))
 .node-session-row.is-active { background: var(--solid); color: var(--text); border-color: var(--line-strong); }
 .node-session-open {
   display: grid;
-  grid-template-columns: 10px 16px minmax(0, 1fr) auto;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
   align-items: center;
   gap: 7px;
   width: 100%;
@@ -81,16 +81,6 @@ const provider = computed(() => getProviderMeta(props.session.provider))
   text-align: left;
   border-radius: inherit;
 }
-.node-session-status {
-  width: 8px;
-  height: 8px;
-  border: 1px solid var(--ok);
-  border-radius: 50%;
-}
-.node-session-status.is-running { border: 2px solid var(--warn); border-right-color: transparent; }
-.node-session-status.is-approval { background: var(--warn); border-color: var(--warn); }
-.node-session-status.is-input, .node-session-status.is-waiting { border-color: var(--text-3); }
-.node-session-badge.is-approval, .node-session-badge.is-running { color: var(--warn); }
 .node-session-icon { width: 16px; height: 16px; }
 .node-session-name { display: grid; min-width: 0; }
 .node-session-title, .node-session-subtitle, .node-session-model {

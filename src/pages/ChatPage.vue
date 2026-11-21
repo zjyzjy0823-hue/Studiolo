@@ -5,6 +5,7 @@ import CommandPaletteModal from '../components/chat/CommandPaletteModal.vue'
 import DiffReviewDrawer from '../components/chat/DiffReviewDrawer.vue'
 import FileViewerDrawer from '../components/chat/FileViewerDrawer.vue'
 import NodeSessionRow from '../components/chat/NodeSessionRow.vue'
+import SessionStatusBadge from '../components/chat/SessionStatusBadge.vue'
 import SideChatDrawer from '../components/chat/SideChatDrawer.vue'
 import TerminalDrawer from '../components/chat/TerminalDrawer.vue'
 import WorkspaceTreeDrawer from '../components/chat/WorkspaceTreeDrawer.vue'
@@ -157,7 +158,7 @@ const showFanout = ref(false)
 const fanoutTargets = ref<Array<{ nodeId: string; provider: AdapterProvider }>>([])
 const fanoutPrompt = ref('')
 const mobileView = ref<'inbox' | 'thread'>('inbox')
-const mobileInboxNow = ref(Date.now())
+const sessionListNow = ref(Date.now())
 const mobileNodeFilter = ref<string>('all')
 const mobileStatusLabels = {
   all: '全部状态', running: '运行中', approval: '待审批', input: '待回复', complete: '已完成',
@@ -236,9 +237,9 @@ watch(
   ([isMob, view], _, onCleanup) => {
     emit('mobileFullscreen', Boolean(isMob && view === 'thread'))
     fleet.setSessionViewVisible(!isMob || view === 'thread')
-    if (isMob && view === 'inbox') {
-      mobileInboxNow.value = Date.now()
-      const clock = setInterval(() => { mobileInboxNow.value = Date.now() }, 15_000)
+    if (!isMob || view === 'inbox') {
+      sessionListNow.value = Date.now()
+      const clock = setInterval(() => { sessionListNow.value = Date.now() }, 15_000)
       onCleanup(() => clearInterval(clock))
     }
   },
@@ -647,12 +648,24 @@ const sessionStatus = computed(() => {
   const waiting = new Set(fleet.outbox.map(item => item.sessionKey))
   return (key: string) => {
     if (approvals.has(key)) return { key: 'approval', label: '待审批', rank: 0 }
-    if (inputs.has(key)) return { key: 'input', label: '待输入', rank: 1 }
+    if (inputs.has(key)) return { key: 'input', label: '待回复', rank: 1 }
     if (fleet.runningBySession[key]) return { key: 'running', label: '运行中', rank: 2 }
     if (waiting.has(key)) return { key: 'waiting', label: '待发送', rank: 3 }
-    return { key: 'done', label: '已结束', rank: 4 }
+    return { key: 'done', label: '', rank: 4 }
   }
 })
+
+function displayedSessionStatus(session: ChatSession, key: string, preference = organization.get(key)) {
+  const runtime = sessionStatus.value(key)
+  if (runtime.key !== 'done') return runtime
+  if (fleet.queuedPromptsBySession[key]?.length) return { key: 'queued', label: '排队中', rank: 3 }
+  if (preference.placement === 'snoozed') return { key: 'snoozed', label: '已暂缓', rank: 5 }
+  if (preference.placement === 'settled') return { key: 'settled', label: '已整理', rank: 6 }
+  if (preference.placement === 'archived') return { key: 'archived', label: '已归档', rank: 7 }
+  if (session.todoCount) return { key: 'todo', label: `${session.todoCount} 项待办`, rank: 4 }
+  if (fleet.unreadCountBySession[key]) return { key: 'complete', label: '已完成', rank: 4 }
+  return runtime
+}
 function compareSessionRows(a: TreeSession, b: TreeSession): number {
   return sessionStatus.value(a.key).rank - sessionStatus.value(b.key).rank || b.activity - a.activity
 }
@@ -734,7 +747,7 @@ const nodeTree = computed(() => visibleNodes.value.map(node => {
     }
   })
   const historyAdapters = node.adapters.filter(adapter => adapter.status === 'ready' && (adapter.supports?.history ?? adapter.capabilities.includes('history')))
-  return { node, sections: displayedSections, count: all.length, hasHermes, historyAdapters }
+  return { node, sections: displayedSections, hasHermes, historyAdapters }
 }))
 
 function refreshNodeSessions(nodeId: string, adapters: AgentNode['adapters']) {
@@ -1239,19 +1252,9 @@ const mobileInboxSessions = computed(() => {
     .map(sess => {
       const key = sessionKey(sess.nodeId, sess.provider, sess.sessionId)
       const nodeName = fleet.nodes.find(n => n.id === sess.nodeId)?.name ?? sess.nodeId
-      const runtime = sessionStatus.value(key)
       const preference = organization.get(key)
-      const queued = Boolean(fleet.queuedPromptsBySession[key]?.length)
       const unread = fleet.unreadCountBySession[key] ?? 0
-      const todos = sess.todoCount ?? 0
-      const status = runtime.key === 'input' ? { ...runtime, label: '待回复' }
-        : runtime.key !== 'done' ? runtime : queued ? { key: 'queued', label: '排队中', rank: 3 }
-        : preference.placement === 'snoozed' ? { key: 'snoozed', label: '已暂缓', rank: 5 }
-        : preference.placement === 'settled' ? { key: 'settled', label: '已整理', rank: 6 }
-        : preference.placement === 'archived' ? { key: 'archived', label: '已归档', rank: 7 }
-        : todos ? { key: 'todo', label: `${todos} 项待办`, rank: 4 }
-        : unread ? { key: 'complete', label: '已完成', rank: 4 }
-        : runtime
+      const status = displayedSessionStatus(sess, key, preference)
       const diff = fleet.diffBySession[key]
       const diffCount = diff?.summary?.filesChanged ?? (sess.hasDiff ? 1 : 0)
       const branchName = sess.provider !== 'hermes' ? sessionDisplayBranch(sess, key) || (sess.worktreePath ? leafPathName(sess.worktreePath) : '') : ''
@@ -1333,15 +1336,6 @@ const mobileSessionGroups = computed(() => {
     }
   })
 })
-
-const mobileStatusIcons = {
-  approval: 'shield', input: 'chat', waiting: 'wifiOff', queued: 'tasks', todo: 'tasks', snoozed: 'moon',
-  settled: 'layers', archived: 'folder',
-} as const
-
-function statusIcon(key: string) {
-  return mobileStatusIcons[key as keyof typeof mobileStatusIcons] ?? 'check'
-}
 
 watch(() => new Set([...Object.keys(fleet.runningBySession), ...fleet.outbox.map(item => item.sessionKey)]), keys => {
   for (const key of keys) {
@@ -1958,22 +1952,11 @@ function handleClearMemory() {
                 </span>
               </span>
               <span class="m-sess-trailing">
-                <span v-if="item.status.key !== 'done'" class="m-sess-state" :class="`is-${item.status.key}`">
-                  <svg v-if="item.status.key === 'running'" class="m-state-ic m-state-wave" viewBox="0 0 16 16" aria-hidden="true">
-                    <rect x="2" y="5" width="2.5" height="6" rx="1.25" />
-                    <rect x="6.75" y="2" width="2.5" height="12" rx="1.25" />
-                    <rect x="11.5" y="4" width="2.5" height="8" rx="1.25" />
-                  </svg>
-                  <svg v-else-if="item.status.key === 'complete'" class="m-state-ic m-state-check" viewBox="0 0 16 16" aria-hidden="true">
-                    <path d="m3 8 3 3 7-7" pathLength="1" />
-                  </svg>
-                  <OpusIcon v-else :name="statusIcon(item.status.key)" class="m-state-ic" />
-                  {{ item.status.label }}
-                </span>
+                <SessionStatusBadge :status="item.status" />
                 <span v-if="item.status.key === 'snoozed' && item.preference.until" class="m-sess-time">
                   {{ new Date(item.preference.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}
                 </span>
-                <span v-else-if="item.status.key === 'done' && item.lastAt" class="m-sess-time num">{{ formatShortTime(item.lastAt, false, mobileInboxNow) }}</span>
+                <span v-else-if="item.status.key === 'done' && item.lastAt" class="m-sess-time num">{{ formatShortTime(item.lastAt, false, sessionListNow) }}</span>
               </span>
             </button>
             </div>
@@ -2368,13 +2351,12 @@ function handleClearMemory() {
         </div>
 
         <div class="tree-body">
-          <section v-for="{ node, sections, count, hasHermes, historyAdapters } in nodeTree" :key="node.id" class="tree-node-group">
+          <section v-for="{ node, sections, hasHermes, historyAdapters } in nodeTree" :key="node.id" class="tree-node-group">
             <div class="tree-node-hdr" :class="{ 'is-selected': fleet.selectedNode?.id === node.id }">
               <button type="button" class="tree-node-select" :title="node.hostname || node.name" @click="fleet.selectNode(node.id)">
                 <OpusIcon :name="node.platform === 'android' || node.platform === 'ios' ? 'phone' : 'server'" />
                 <span class="tree-node-name">{{ node.name }}</span>
                 <span v-if="node.hostname && node.hostname !== node.name" class="tree-hostname">{{ node.hostname }}</span>
-                <span class="tree-count" :title="`${count} 个会话`">{{ count }}</span>
               </button>
               <span class="conn" :class="nodeIndicatorStatus(node.id, node.status)" :aria-label="nodeStatusText(node.id, node.status)" :title="nodeStatusText(node.id, node.status)" />
               <button
@@ -2449,12 +2431,12 @@ function handleClearMemory() {
                     :key="row.key"
                     v-model:draft="renameDraft"
                     :session="row.session"
-                    :status="sessionStatus(row.key)"
+                    :status="displayedSessionStatus(row.session, row.key)"
                     :active="fleet.activeSessionKey === row.key"
                     :renaming="renamingSessionKey === row.key"
                     :snippet="searchSnippetFor(row.session)"
                     :branch="!space.path && section.icon !== 'hermes' ? row.branch : undefined"
-                    :time="formatShortTime(row.activity, true)"
+                    :time="formatShortTime(row.activity, true, sessionListNow)"
                     @open="openSessionTab(row.session)"
                     @rename="startRenameSession(row.session)"
                     @save="commitRenameSession(row.key)"
@@ -3221,15 +3203,6 @@ function handleClearMemory() {
 }
 .tree-node-name { font-size: 13px; font-weight: 650; }
 .tree-hostname { color: var(--text-3); font-size: 11px; }
-.tree-count {
-  flex: none;
-  padding: 0 6px;
-  border: 1px solid var(--line-strong);
-  border-radius: 999px;
-  color: var(--text-2);
-  font-size: 11px;
-  line-height: 17px;
-}
 .tree-mini-btn {
   display: grid;
   place-items: center;
@@ -3329,7 +3302,6 @@ function handleClearMemory() {
   .tree-hostname { display: none; }
 }
 @container node-sidebar (max-width: 170px) {
-  .tree-count { display: none; }
   .tree-workspace, .tree-workspace.is-worktree { margin-left: 2px; }
   .tree-workspace.is-worktree :deep(.node-session-row) { margin-left: 2px; }
 }
@@ -4379,55 +4351,7 @@ function handleClearMemory() {
   gap: 3px;
   flex: none;
 }
-.m-sess-state {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-height: 26px;
-  padding: 3px 9px;
-  border-radius: 999px;
-  background: var(--surface-2);
-  font-size: 12px;
-  font-weight: 560;
-  line-height: 1.3;
-  white-space: nowrap;
-  color: var(--text-2);
-}
-.m-sess-state.is-complete { color: var(--ok); background: var(--ok-soft); }
-.m-sess-state.is-running, .m-sess-state.is-input { color: var(--accent); background: var(--accent-soft); }
-.m-sess-state.is-approval { color: var(--warn); background: var(--warn-soft); }
 .m-sess-sub-mini code { font-family: var(--mono); }
-.m-state-ic {
-  width: 14px;
-  height: 14px;
-  flex: none;
-}
-.m-state-wave { fill: currentColor; }
-.m-state-check { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-@media (prefers-reduced-motion: no-preference) {
-  .m-state-wave rect { transform-box: fill-box; transform-origin: center; animation: m-status-wave 1.05s ease-in-out infinite; }
-  .m-state-wave rect:nth-child(2) { animation-delay: -.23s; }
-  .m-state-wave rect:nth-child(3) { animation-delay: -.46s; }
-  .m-sess-state.is-input .m-state-ic,
-  .m-sess-state.is-approval .m-state-ic { animation: m-status-attention 2.1s ease-in-out infinite; }
-  .m-state-check path { animation: m-status-check .48s ease-out both; }
-}
-@keyframes m-status-wave {
-  0%, 100% { transform: scaleY(.58); opacity: .65; }
-  50% { transform: scaleY(1); opacity: 1; }
-}
-@keyframes m-status-attention {
-  0%, 75%, 100% { transform: scale(1); }
-  25% { transform: scale(1.14); }
-}
-@keyframes m-status-check {
-  from { stroke-dasharray: 1; stroke-dashoffset: 1; }
-  to { stroke-dasharray: 1; stroke-dashoffset: 0; }
-}
-:global([data-motion="reduced"]) .m-state-wave rect,
-:global([data-motion="reduced"]) .m-sess-state .m-state-ic,
-:global([data-motion="reduced"]) .m-state-check path { animation: none; }
 
 .m-inbox-empty {
   display: grid;

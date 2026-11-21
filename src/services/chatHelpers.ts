@@ -91,6 +91,7 @@ export function mergeToolCallUpdate(
     FleetWsEvent,
     | 'callId'
     | 'name'
+    | 'toolKind'
     | 'title'
     | 'detail'
     | 'status'
@@ -117,6 +118,7 @@ export function mergeToolCallUpdate(
       id: key,
       callId: evt.callId,
       name: evt.name || 'tool',
+      toolKind: evt.toolKind || undefined,
       title: evt.title || evt.detail || evt.name || 'tool',
       detail: evt.detail,
       status,
@@ -142,7 +144,8 @@ export function mergeToolCallUpdate(
 
   list[matchIdx] = {
     ...prev,
-    name: evt.name || prev.name,
+    name: evt.name && evt.name !== 'tool' ? evt.name : prev.name,
+    toolKind: evt.toolKind && evt.toolKind !== 'other' ? evt.toolKind : prev.toolKind,
     title: evt.title ?? evt.detail ?? prev.title,
     detail: evt.detail ?? prev.detail,
     status: nextStatus,
@@ -457,16 +460,30 @@ export type GroupedMessagePart =
   | { type: 'tool'; callId: string; tool: ToolCallBadge }
   | GroupedToolRun
 
-export function classifyToolKind(tool: Pick<ToolCallBadge, 'name' | 'subagentSessionId'>): 'browser' | 'read' | 'edit' | 'cmd' | 'search' | 'subagent' | 'other' {
-  const n = tool.name.toLowerCase()
+type ToolKind = 'browser' | 'read' | 'edit' | 'cmd' | 'search' | 'subagent'
+
+const acpToolKinds: Readonly<Record<string, ToolKind>> = {
+  read: 'read', edit: 'edit', delete: 'edit', move: 'edit', execute: 'cmd', search: 'search', fetch: 'browser',
+}
+
+function inferToolKind(label = ''): ToolKind | undefined {
+  const name = label.trim().toLowerCase()
+  if (/browser|playwright|web.?fetch/.test(name)) return 'browser'
+  if (/sub.?agent|delegate|spawn.?agent|^task$/.test(name)) return 'subagent'
+  if (/edit|write|patch|replace|create|filechange|delete|move.?file|写入|修改|编辑/.test(name)) return 'edit'
+  if (/terminal|bash|shell|command|exec|^run|运行命令/.test(name)) return 'cmd'
+  if (/grep|search|glob|find|^list|搜索|检索/.test(name)) return 'search'
+  if (/read|view|^cat\b|file|读取/.test(name)) return 'read'
+}
+
+export function classifyToolKind(tool: Pick<ToolCallBadge, 'name' | 'title' | 'detail' | 'toolKind' | 'subagentSessionId'>): ToolKind | 'other' {
   if (tool.subagentSessionId) return 'subagent'
-  if (/browser|playwright/.test(n)) return 'browser'
-  if (n.includes('subagent') || n.includes('agent') || n.includes('delegate') || n.includes('task')) return 'subagent'
-  if (n.includes('edit') || n.includes('write') || n.includes('patch') || n.includes('replace') || n.includes('create') || n.includes('filechange')) return 'edit'
-  if (n.includes('bash') || n.includes('shell') || n.includes('command') || n.includes('exec') || n.includes('run')) return 'cmd'
-  if (n.includes('grep') || n.includes('search') || n.includes('glob') || n.includes('find') || n.includes('list')) return 'search'
-  if (n.includes('read') || n.includes('view') || n.includes('cat') || n.includes('file')) return 'read'
-  return 'other'
+  const kind = tool.toolKind?.toLowerCase()
+  if (kind && Object.hasOwn(acpToolKinds, kind)) return acpToolKinds[kind]!
+  return inferToolKind(tool.name.split(/[:：]/, 1)[0])
+    ?? inferToolKind(tool.title?.split(/[:：]/, 1)[0])
+    ?? inferToolKind(tool.detail?.split(/[:：]/, 1)[0])
+    ?? 'other'
 }
 
 const toolOperations = {

@@ -294,6 +294,7 @@ export interface ToolCallBadge {
   id: string
   callId?: string
   name: string
+  toolKind?: string
   title?: string
   detail?: string
   status?: ToolCallStatus
@@ -471,6 +472,7 @@ export interface FleetWsEvent {
   requestId?: string
   text?: string
   name?: string
+  toolKind?: string
   detail?: string
   callId?: string
   title?: string

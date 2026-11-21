@@ -69,10 +69,12 @@ const label = computed(() => {
         :class="step.type === 'thought' ? 'step-thought' : `step-${step.tool.status ?? 'completed'}`"
       >
         <span class="step-marker" aria-hidden="true" />
-        <div v-if="step.type === 'thought'" class="work-log-thought">
-          <span class="thought-label"><OpusIcon name="sparkle" />思考过程</span>
+        <details v-if="step.type === 'thought'" class="work-log-thought" :open="reveal?.stepId === step.id">
+          <summary class="thought-label">
+            <OpusIcon name="sparkle" />思考过程<OpusIcon name="chevD" class="thought-chevron" />
+          </summary>
           <p>{{ step.text }}</p>
-        </div>
+        </details>
         <ToolCallCard
           v-else
           :tool="step.tool"
@@ -140,8 +142,14 @@ const label = computed(() => {
 .step-thought .step-marker, .step-running .step-marker { background: var(--accent); }
 .step-error .step-marker { background: var(--warn); }
 .work-log-thought { min-width: 0; padding: 4px 6px 7px; }
-.thought-label { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); font-weight: 540; }
+.thought-label {
+  display: inline-flex; align-items: center; gap: 6px; padding: 1px 2px;
+  color: var(--text-2); font-weight: 540; list-style: none; cursor: pointer;
+}
+.thought-label::-webkit-details-marker { display: none; }
 .thought-label .i { width: 13px; height: 13px; color: var(--accent); }
+.thought-label .thought-chevron { width: 10px; height: 10px; color: var(--text-3); }
+.work-log-thought[open] .thought-chevron { transform: rotate(180deg); }
 .work-log-thought p { margin: 4px 0 0; color: var(--text-2); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 @keyframes work-log-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: no-preference) {

@@ -32,6 +32,8 @@ from .base import (
     prepare_session_dir,
 )
 
+_QUIET_TURN_SECONDS = 120.0
+
 
 def _opencode_compaction(message: dict[str, Any]) -> dict[str, Any] | None:
     info = message.get("info")
@@ -800,6 +802,11 @@ class OpenCodeAdapter(AgentAdapter):
             raw = self._optional_json(await c.get(history_url, params={**location, "limit": 24}, timeout=6))
             return [row for row in raw if isinstance(row, dict) and isinstance(row.get("info"), dict)] if isinstance(raw, list) else None
 
+        async def session_state() -> str | None:
+            states = self._optional_json(await c.get(f"{self.serve_url}/session/status", params=location, timeout=6))
+            state = states.get(session_id) if isinstance(states, dict) else None
+            return state.get("type") if isinstance(state, dict) else None
+
         try:
             before = await history()
         except httpx.TransportError:
@@ -969,9 +976,7 @@ class OpenCodeAdapter(AgentAdapter):
             completed = bool(idle or last.get("error") or ((last.get("time") or {}).get("completed") and
                               finish not in ("tool-calls", "tool_calls", "unknown")))
             if not completed and finish not in ("tool-calls", "tool_calls", "unknown"):
-                states = self._optional_json(await c.get(f"{self.serve_url}/session/status", params=location, timeout=6))
-                state = states.get(session_id) if isinstance(states, dict) else None
-                completed = isinstance(state, dict) and state.get("type") == "idle"
+                completed = await session_state() == "idle"
             # Do not repeat incremental SSE deltas while the stream can still deliver them.
             if completed or not live_stream:
                 for row in replies:
@@ -1011,7 +1016,19 @@ class OpenCodeAdapter(AgentAdapter):
             last_history = ""
             pending = asyncio.create_task(anext(lines)) if lines else None
             try:
-                while time.monotonic() - last_progress < 120.0:
+                while True:
+                    if time.monotonic() - last_progress >= _QUIET_TURN_SECONDS:
+                        try:
+                            state = await session_state()
+                        except httpx.TransportError:
+                            state = None
+                        except httpx.HTTPStatusError as error:
+                            if error.response.status_code < 500:
+                                raise
+                            state = None
+                        if state not in ("busy", "retry"):
+                            break
+                        last_progress = time.monotonic()
                     delay = max(0.0, next_poll - time.monotonic())
                     if pending:
                         finished, _ = await asyncio.wait((pending,), timeout=delay)
@@ -1129,7 +1146,9 @@ class OpenCodeAdapter(AgentAdapter):
         tool_meta: dict[str, dict[str, Any]] = {}
         has_text_emitted = False
 
-        async with c.stream("GET", f"{self.serve_url}/api/event") as stream:
+        # This is a turn event stream, so a silent tool must not hit the request read timeout.
+        stream_timeout = httpx.Timeout(180.0, connect=4.0, read=None)
+        async with c.stream("GET", f"{self.serve_url}/api/event", timeout=stream_timeout) as stream:
             p_res = await c.post(f"{self.serve_url}/api/session/{session_id}/prompt", json={"prompt": prompt})
             p_res.raise_for_status()
             async for line in stream.aiter_lines():

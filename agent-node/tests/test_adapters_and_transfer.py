@@ -26,8 +26,12 @@ def test_codex_routes_early_and_concurrent_events_to_their_own_turn(tmp_path):
         adapter = CodexAdapter((tmp_path,))
         events = {"a": [], "b": []}
         accepted = {thread: asyncio.Event() for thread in events}
+        closed = asyncio.Event()
 
         class Process:
+            async def wait_closed(self):
+                await closed.wait()
+
             async def call(self, method, params):
                 assert method == "turn/start"
                 thread = params["threadId"]
@@ -63,6 +67,14 @@ def test_codex_routes_early_and_concurrent_events_to_their_own_turn(tmp_path):
                        for evt in captured)
             assert captured[1]["text"] == "early-" + thread
 
+        accepted["a"].clear()
+        interrupted = asyncio.create_task(send("a"))
+        await asyncio.wait_for(accepted["a"].wait(), 2)
+        closed.set()
+        with pytest.raises(RuntimeError, match="连接在本轮完成前关闭"):
+            await asyncio.wait_for(interrupted, 2)
+        assert not adapter._turns
+
     asyncio.run(run())
 
 
@@ -73,6 +85,9 @@ def test_codex_resumes_unloaded_thread_and_retries_prompt_once(tmp_path):
         events = []
 
         class Process:
+            async def wait_closed(self):
+                await asyncio.Future()
+
             async def call(self, method, params):
                 calls.append((method, params))
                 if method == "thread/read":
@@ -393,7 +408,7 @@ for line in sys.stdin:
         for update in [
             {'session_update': 'user_message_chunk', 'content': {'type': 'text', 'text': 'Older question'}},
             {'session_update': 'agent_thought_chunk', 'content': {'type': 'text', 'text': 'check'}},
-            {'session_update': 'tool_call', 'tool_call_id': 'old-tool', 'title': 'read_file'},
+            {'session_update': 'tool_call', 'tool_call_id': 'old-tool', 'title': 'read_file: notes.md', 'kind': 'read'},
             {'session_update': 'tool_call_update', 'tool_call_id': 'old-tool', 'status': 'completed', 'raw_output': 'ok'},
             {'session_update': 'agent_message_chunk', 'content': {'type': 'text', 'text': 'Older answer'}},
         ]:
@@ -402,11 +417,12 @@ for line in sys.stdin:
             }}))
     elif m == 'session/prompt':
         sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'sessionId': 'herm-1', 'update': {'sessionUpdate': 'agent_thought_chunk', 'content': {'text': 'plan step'}}}}) + '\\n')
-        sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'sessionId': 'herm-1', 'update': {'sessionUpdate': 'tool_call', 'title': 'read_file'}}}) + '\\n')
+        sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'sessionId': 'herm-1', 'update': {'sessionUpdate': 'tool_call', 'toolCallId': 'live-tool', 'title': 'read_file', 'kind': 'read'}}}) + '\\n')
         sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': 77, 'method': 'session/request_permission', 'params': {'sessionId': 'herm-1', 'toolCall': {'toolCallId': 'tc-77', 'title': 'Run shell'}, 'options': [{'optionId': 'opt-once', 'kind': 'allow_once'}, {'optionId': 'opt-always', 'kind': 'allow_always'}, {'optionId': 'opt-no', 'kind': 'reject_once'}]}}) + '\\n')
         sys.stdout.flush()
         reply = json.loads(sys.stdin.readline())
         opt = reply.get('result', {}).get('outcome', {}).get('optionId')
+        sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'sessionId': 'herm-1', 'update': {'sessionUpdate': 'tool_call_update', 'toolCallId': 'live-tool', 'status': 'completed'}}}) + '\\n')
         sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'sessionId': 'herm-1', 'update': {'sessionUpdate': 'agent_message_chunk', 'content': {'text': f'choice={opt}'}}}}) + '\\n')
         sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': mid, 'result': {'stopReason': 'end_turn', 'usage': {'inputTokens': 240, 'outputTokens': 55}}}) + '\\n')
     sys.stdout.flush()
@@ -497,7 +513,8 @@ def test_codex_and_hermes_jsonrpc_adapters(tmp_path):
             {"role": "assistant", "text": "Older answer", "thought": "check",
              "parts": [{"type": "thought", "text": "check"}, {"type": "tool", "callId": "old-tool"},
                        {"type": "text", "text": "Older answer"}],
-             "toolCalls": [{"callId": "old-tool", "name": "read_file", "status": "completed", "output": "ok"}]},
+             "toolCalls": [{"callId": "old-tool", "name": "read_file", "title": "read_file: notes.md",
+                            "toolKind": "read", "status": "completed", "output": "ok"}]},
         ]
         outside = hermes._session_summaries([{"sessionId": "outside", "title": "Personal chat", "cwd": str(tmp_path.parent)}])
         assert outside[0]["title"] == "Personal chat" and outside[0]["cwd"] == ""
@@ -515,9 +532,20 @@ def test_codex_and_hermes_jsonrpc_adapters(tmp_path):
             assert history[1]["toolCalls"][0]["status"] == "running"
             return "allow_session"
 
+        rpc_call = hermes._proc.call
+
+        async def check_prompt_timeout(method, params=None, **kwargs):
+            if method == "session/prompt":
+                assert "timeout" in kwargs and kwargs["timeout"] is None
+            return await rpc_call(method, params, **kwargs)
+
+        hermes._proc.call = check_prompt_timeout
         await hermes.send_prompt(session_id="herm-1", text="hi", request_id="r-hermes", emit=h_emit, request_approval=h_approve)
         assert any(e["type"] == "ThoughtDelta" and e["text"] == "plan step" for e in h_events)
         assert any(e["type"] == "ToolCall" and e["name"] == "read_file" for e in h_events)
+        live_updates = [e for e in h_events if e["type"] == "ToolCallUpdate" and e["callId"] == "live-tool"]
+        assert live_updates[0]["toolKind"] == "read" and live_updates[0]["title"] == "read_file"
+        assert live_updates[-1]["status"] == "completed" and "name" not in live_updates[-1]
         assert any(e["type"] == "TextDelta" and e["text"] == "choice=opt-always" for e in h_events)
         hermes_usage = next(e for e in h_events if e["type"] == "TokenUsage")
         assert hermes_usage["inputTokens"] == 240 and hermes_usage["outputTokens"] == 55
@@ -846,6 +874,54 @@ def test_hermes_gateway_history_preserves_structured_tools_and_order():
                                        "output": "passed", "status": "completed"}]
 
 
+def test_opencode_keeps_polling_a_silent_busy_turn(tmp_path, monkeypatch):
+    monkeypatch.setattr("agent_node.adapters.opencode._QUIET_TURN_SECONDS", 0.01)
+
+    async def run():
+        adapter = OpenCodeAdapter((tmp_path,), serve_url="http://opencode.local")
+        events = []
+        history_requests = 0
+        status_requests = 0
+        prompt_requests = 0
+
+        async def respond(request):
+            nonlocal history_requests, status_requests, prompt_requests
+            path = request.url.path
+            if path == "/event":
+                return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, text="")
+            if path == "/session/slow/prompt_async":
+                prompt_requests += 1
+                return httpx.Response(204)
+            if path == "/session/status":
+                status_requests += 1
+                return httpx.Response(200, json={"slow": {"type": "busy"}})
+            if path == "/permission":
+                return httpx.Response(200, json=[])
+            assert path == "/session/slow/message"
+            history_requests += 1
+            if history_requests == 2:
+                await asyncio.sleep(0.03)
+            if history_requests < 3:
+                return httpx.Response(200, json=[])
+            return httpx.Response(200, json=[
+                {"info": {"id": "user", "role": "user"}, "parts": [{"type": "text", "text": "slow prompt"}]},
+                {"info": {"id": "reply", "parentID": "user", "role": "assistant", "finish": "stop", "time": {"completed": 1}},
+                 "parts": [{"id": "text", "type": "text", "text": "finished"}]},
+            ])
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            await asyncio.wait_for(adapter._send_prompt_v1(
+                client, session_id="slow", request_id="request", directory=tmp_path, original_text="slow prompt",
+                payload={"parts": [{"type": "text", "text": "slow prompt"}]}, options=None,
+                emit=lambda event: asyncio.sleep(0, result=events.append(event)),
+                request_approval=lambda *_: asyncio.sleep(0, result="deny"),
+            ), 5)
+        assert prompt_requests == 1 and status_requests >= 1
+        assert [event["type"] for event in events] == ["Accepted", "TextDelta", "Completed"]
+
+    asyncio.run(run())
+
+
 def test_opencode_v2_protocol_adapter(tmp_path):
     async def _run():
         project = tmp_path / "project"
@@ -943,10 +1019,16 @@ def test_opencode_v2_protocol_adapter(tmp_path):
                 ]
             }
 
+        async def check_timeout(request):
+            if request.url.path == "/api/event":
+                assert request.extensions["timeout"]["read"] is None
+                assert request.extensions["timeout"]["connect"] > 0
+
         adapter = OpenCodeAdapter(roots, serve_url="http://opencode-v2.local")
         adapter._client = lambda: httpx.AsyncClient(  # type: ignore[method-assign]
             transport=httpx.ASGITransport(app=fake_v2),
             base_url="http://opencode-v2.local",
+            event_hooks={"request": [check_timeout]},
         )
         probe = await adapter.probe()
         assert probe.status == "ready" and probe.version == "serve-v2"
