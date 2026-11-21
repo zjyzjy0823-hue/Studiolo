@@ -108,6 +108,34 @@ npm run desktop:build
 
 打包产物位于 `src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/`。桌面数据目录（数据库、日志与密钥）说明见 [Desktop 使用说明](docs/desktop.md)。
 
+#### 本地构建 Android ARM64 签名 APK
+
+安装项目依赖、JDK 21、Android SDK 36、NDK 和 Rust 的 `aarch64-linux-android` target 后，在仓库根目录执行。将路径和别名替换为本机值，密码从本地文件读取。
+
+```bash
+(
+  set +x
+  set -e
+  export JAVA_HOME='/path/to/jdk-21'
+  export ANDROID_HOME='/path/to/android-sdk'
+  export NDK_HOME="$ANDROID_HOME/ndk/<ndk-version>"
+  export STUDIOLO_ANDROID_KEYSTORE_PATH='/absolute/path/to/release.jks'
+  export STUDIOLO_ANDROID_KEY_ALIAS='<key-alias>'
+  STUDIOLO_ANDROID_KEYSTORE_PASSWORD="$(cat /path/to/keystore-password-file)"
+  export STUDIOLO_ANDROID_KEYSTORE_PASSWORD
+  # 私钥使用独立密码时，取消下面两行的注释。
+  # STUDIOLO_ANDROID_KEY_PASSWORD="$(cat /path/to/key-password-file)"
+  # export STUDIOLO_ANDROID_KEY_PASSWORD
+  export CARGO_PROFILE_RELEASE_OPT_LEVEL=z CARGO_PROFILE_RELEASE_LTO=true
+  export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 CARGO_PROFILE_RELEASE_PANIC=abort CARGO_PROFILE_RELEASE_STRIP=true
+  export GRADLE_OPTS="${GRADLE_OPTS:+$GRADLE_OPTS }-Dorg.gradle.configuration-cache=false"
+  npm run android:prepare
+  npx tauri android build --apk --target aarch64
+)
+```
+
+`STUDIOLO_ANDROID_KEY_PASSWORD` 缺省时使用 keystore 密码。Tauri Android 默认构建 release，APK 位于 `src-tauri/gen/android/app/build/outputs/apk/` 下的 `release` 子目录。
+
 ---
 
 ### 四、公网自托管与多机部署

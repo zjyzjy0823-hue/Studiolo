@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -10,6 +10,28 @@ const android = join(tauri, 'gen/android/app/src/main')
 const cli = join(root, 'node_modules/@tauri-apps/cli/tauri.js')
 const init = spawnSync(process.execPath, [cli, 'android', 'init', '--ci', '--skip-targets-install'], { cwd: root, stdio: 'inherit' })
 if (init.status !== 0) throw init.error ?? new Error('Tauri Android initialization failed')
+
+const buildTaskDir = join(tauri, 'gen/android/buildSrc/src/main/java')
+const buildTaskEntries = await readdir(buildTaskDir, { recursive: true, withFileTypes: true }).catch(error => {
+  if (error.code === 'ENOENT') return []
+  throw error
+})
+const buildTask = buildTaskEntries.find(entry => entry.name === 'BuildTask.kt' && entry.isFile())
+if (!buildTask) throw new Error(`BuildTask.kt not found under ${buildTaskDir}. The Tauri Android template may have changed.`)
+
+const buildTaskPath = join(buildTask.parentPath, buildTask.name)
+const buildTaskSource = await readFile(buildTaskPath, 'utf8')
+const kotlinEscapes = { '$': '\\$', '\\f': '\\u000c' }
+const kotlinCli = JSON.stringify(cli).replace(/\\.|\$/g, token => kotlinEscapes[token] ?? token)
+const cliArgs = /^([ \t]*val args = listOf\()("(?:[^"\\\r\n]|\\.)*")(, "android", "android-studio-script"\);?[ \t]*)$/m
+const currentCli = buildTaskSource.match(cliArgs)?.[2]
+// Node resolves the first argument as a script path.
+if (currentCli === '"tauri"') {
+  const patched = buildTaskSource.replace(cliArgs, (_, prefix, _cli, suffix) => `${prefix}${kotlinCli}${suffix}`)
+  await writeFile(buildTaskPath, patched)
+} else if (currentCli !== kotlinCli) {
+  throw new Error(`Unexpected Tauri Android CLI args template in ${buildTaskPath}`)
+}
 
 const copy = async (file, destination) => {
   await mkdir(dirname(destination), { recursive: true })
@@ -134,5 +156,29 @@ for (const setting of ['compileSdk', 'targetSdk']) {
   const declaration = new RegExp(`^([ \\t]*${setting}[ \\t]*=[ \\t]*)\\d+[ \\t]*$`, 'm')
   if (!declaration.test(gradle)) throw new Error(`Unexpected Tauri Android SDK declaration for ${setting}`)
   gradle = gradle.replace(declaration, (_, prefix) => `${prefix}36`)
+}
+
+gradle = gradle.replace(/^    \/\/ Begin Studiolo release signing\r?\n[\s\S]*?^    \/\/ End Studiolo release signing\r?\n/m, '')
+const { STUDIOLO_ANDROID_KEYSTORE_PATH, STUDIOLO_ANDROID_KEYSTORE_PASSWORD, STUDIOLO_ANDROID_KEY_ALIAS } = process.env
+if (STUDIOLO_ANDROID_KEYSTORE_PATH && STUDIOLO_ANDROID_KEYSTORE_PASSWORD && STUDIOLO_ANDROID_KEY_ALIAS) {
+  const androidBlock = /^android \{\r?\n/m
+  if (!androidBlock.test(gradle)) throw new Error('Unexpected Tauri Android Gradle template')
+  gradle = gradle.replace(androidBlock, `$&    // Begin Studiolo release signing
+    signingConfigs {
+        create("release") {
+            storeFile = file(System.getenv("STUDIOLO_ANDROID_KEYSTORE_PATH")?.takeIf { it.isNotEmpty() }
+                ?: error("Missing STUDIOLO_ANDROID_KEYSTORE_PATH"))
+            storePassword = System.getenv("STUDIOLO_ANDROID_KEYSTORE_PASSWORD")?.takeIf { it.isNotEmpty() }
+                ?: error("Missing STUDIOLO_ANDROID_KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("STUDIOLO_ANDROID_KEY_ALIAS")?.takeIf { it.isNotEmpty() }
+                ?: error("Missing STUDIOLO_ANDROID_KEY_ALIAS")
+            keyPassword = System.getenv("STUDIOLO_ANDROID_KEY_PASSWORD")?.takeIf { it.isNotEmpty() } ?: storePassword
+        }
+    }
+    buildTypes.named("release") {
+        signingConfig = signingConfigs.getByName("release")
+    }
+    // End Studiolo release signing
+`)
 }
 await writeFile(gradlePath, gradle)

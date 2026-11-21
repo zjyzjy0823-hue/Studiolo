@@ -60,8 +60,53 @@ jobs:
       - run: npm ci
       - run: npm run android:prepare
       - run: npx tauri android build --apk --target aarch64 --debug
+        env:
+          CARGO_PROFILE_DEV_STRIP: debuginfo
       - uses: actions/upload-artifact@v4
         with:
           name: studiolo-android-arm64-debug
           path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+      - name: Build signed Android release APK
+        id: release-apk
+        if: github.event_name != 'pull_request'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STUDIOLO_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          STUDIOLO_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          STUDIOLO_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          GRADLE_OPTS: -Dorg.gradle.configuration-cache=false
+        shell: bash
+        run: |
+          set +x
+          if [[ -z "${ANDROID_KEYSTORE_BASE64:-}" ]]; then
+            echo "Skipping signed Android release APK build because ANDROID_KEYSTORE_BASE64 is empty."
+            echo 'built=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          : "${STUDIOLO_ANDROID_KEYSTORE_PASSWORD:?Missing ANDROID_KEYSTORE_PASSWORD}"
+          : "${STUDIOLO_ANDROID_KEY_ALIAS:?Missing ANDROID_KEY_ALIAS}"
+          export STUDIOLO_ANDROID_KEYSTORE_PATH="$RUNNER_TEMP/studiolo-release.jks"
+          export STUDIOLO_ANDROID_KEY_PASSWORD="${STUDIOLO_ANDROID_KEY_PASSWORD:-$STUDIOLO_ANDROID_KEYSTORE_PASSWORD}"
+          trap 'rm -f "$STUDIOLO_ANDROID_KEYSTORE_PATH"' EXIT
+          (umask 077; printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$STUDIOLO_ANDROID_KEYSTORE_PATH")
+          unset ANDROID_KEYSTORE_BASE64
+          export CARGO_PROFILE_RELEASE_OPT_LEVEL=z
+          export CARGO_PROFILE_RELEASE_LTO=true
+          export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+          export CARGO_PROFILE_RELEASE_PANIC=abort
+          export CARGO_PROFILE_RELEASE_STRIP=true
+          npm run android:prepare
+          npx tauri android build --apk --target aarch64
+          apk=$(find src-tauri/gen/android/app/build/outputs/apk -type f -regex '.*/release/[^/]*\.apk' -print -quit)
+          if [[ -z "$apk" ]]; then
+            echo "No release APK was produced." >&2
+            exit 1
+          fi
+          echo 'built=true' >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: steps.release-apk.outputs.built == 'true'
+        with:
+          name: studiolo-android-arm64-release
+          path: src-tauri/gen/android/app/build/outputs/apk/**/release/*.apk
           if-no-files-found: error
