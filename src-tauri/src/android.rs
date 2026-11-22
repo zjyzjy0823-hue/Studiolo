@@ -177,6 +177,68 @@ pub(crate) async fn android_save_attachment(
     state.invoke("saveDownload", json!({ "name": name, "base64": base64 })).await
 }
 
+pub struct AndroidMedia(PluginHandle<Wry>);
+
+pub fn media_plugin() -> TauriPlugin<Wry> {
+    Builder::new("studiolo-android-media")
+        .setup(|app, api| {
+            let handle = api.register_android_plugin("com.isidel.studiolo", "AndroidMedia")?;
+            app.manage(AndroidMedia(handle));
+            Ok(())
+        })
+        .build()
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct PickedImage {
+    pub name: String,
+    pub mime: String,
+    pub base64: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl AndroidMedia {
+    async fn invoke(&self, command: &str, payload: Value) -> CommandResult<Vec<PickedImage>> {
+        #[derive(Deserialize)]
+        struct Response {
+            items: Vec<PickedImage>,
+        }
+
+        self.0
+            .run_mobile_plugin_async::<Response>(command, payload)
+            .await
+            .map(|response| response.items)
+            .map_err(|error| match error {
+                PluginInvokeError::InvokeRejected(response) => {
+                    response.code.unwrap_or_else(|| "media_failed".into())
+                }
+                _ => "media_failed".into(),
+            })
+    }
+}
+
+#[tauri::command]
+pub async fn android_capture_photo(state: State<'_, AndroidMedia>) -> CommandResult<PickedImage> {
+    let mut items = state.invoke("capturePhoto", json!({})).await?;
+    if items.len() != 1 {
+        return Err("media_failed".into());
+    }
+    Ok(items.remove(0))
+}
+
+#[tauri::command]
+pub async fn android_pick_images(
+    state: State<'_, AndroidMedia>,
+    limit: Option<u32>,
+) -> CommandResult<Vec<PickedImage>> {
+    let limit = limit.unwrap_or(10).min(20);
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    state.invoke("pickImages", json!({ "limit": limit })).await
+}
+
 impl AndroidNotifications {
     async fn invoke(&self, command: &str, payload: Value) -> CommandResult<bool> {
         #[derive(Deserialize)]

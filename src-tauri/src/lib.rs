@@ -301,6 +301,7 @@ pub fn run() {
         .plugin(android::plugin())
         .plugin(android::notifications_plugin())
         .plugin(android::downloads_plugin())
+        .plugin(android::media_plugin())
         .invoke_handler(tauri::generate_handler![
         desktop_platform, backend_status, open_external_url,
         fleet::fleet_connect, fleet::fleet_disconnect, fleet::fleet_send, fleet::fleet_notifications,
@@ -316,6 +317,7 @@ pub fn run() {
         android::android_notifications_enabled, android::android_set_notifications_enabled, android::android_show_fleet_notification,
         android::android_show_fleet_approval, android::android_listen_fleet_approval,
         android::android_read_device_space, android::android_save_attachment,
+        android::android_capture_photo, android::android_pick_images,
     ]);
     #[cfg(not(target_os = "android"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
