@@ -36,6 +36,7 @@ import type {
   PastedTextBlock,
   ToolCallBadge,
 } from '../../types/fleet'
+import { LoaderCircle } from 'lucide-vue-next'
 import OpusIcon from '../ui/OpusIcon.vue'
 import ChangedFilesSummaryBar from './ChangedFilesSummaryBar.vue'
 import FormQuestionCard from './FormQuestionCard.vue'
@@ -2726,7 +2727,9 @@ async function retryTurn(msg: ChatMessage) {
           ref="modelTriggerRef"
           type="button"
           class="m-status-pill m-status-pill--model"
-          :aria-label="`选择模型：${modelLabel}`"
+          :aria-label="effortSwitching ? modelLabel + '，思考强度切换中' : '选择模型：' + modelLabel"
+          :aria-busy="effortSwitching"
+          :disabled="effortSwitching"
           :aria-expanded="settingsOpen && panel === 'model'"
           @pointerdown="noteTriggerPointerDown('model')"
           @click="showPanel('model', $event)"
@@ -2737,7 +2740,11 @@ async function retryTurn(msg: ChatMessage) {
             class="trigger-provider m-pill-provider"
             :title="`provider: ${model.provider}`"
           >{{ model.provider }}</span>
-          <span v-if="triggerEffortLabel" class="m-pill-sub">{{ triggerEffortLabel }}</span>
+          <span v-if="effortSwitching" class="m-pill-sub trigger-effort--switching" role="status">
+            <LoaderCircle :size="12" aria-hidden="true" />
+            切换中
+          </span>
+          <span v-else-if="triggerEffortLabel" class="m-pill-sub">{{ triggerEffortLabel }}</span>
           <OpusIcon name="chevD" class="m-pill-chev" />
         </button>
         <button
@@ -2945,10 +2952,7 @@ async function retryTurn(msg: ChatMessage) {
                 :title="`provider: ${model.provider}`"
               >{{ model.provider }}</span>
               <span v-if="effortSwitching" class="trigger-effort trigger-effort--switching" role="status">
-                <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                  <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" opacity=".25" />
-                  <path d="M8 2a6 6 0 0 1 6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
-                </svg>
+                <LoaderCircle :size="12" aria-hidden="true" />
                 切换中
               </span>
               <span v-else-if="triggerEffortLabel" class="trigger-effort">{{ triggerEffortLabel }}</span>
