@@ -114,17 +114,16 @@ export function extractHostMediaDirectives(text: string): ExtractedHostMedia[] {
   const items: ExtractedHostMedia[] = []
   let kept = ''
   let cursor = 0
-  MEDIA_TAG_RE.lastIndex = 0
 
-  let m: RegExpExecArray | null
-  while ((m = MEDIA_TAG_RE.exec(text)) !== null) {
-    kept += text.slice(cursor, m.index)
-    cursor = m.index + m[0].length
-    const rawPath = (m[1] || m[2] || m[3] || m[4] || '').trim()
+  // `matchAll` keeps its own cursor when stripping directives from the prefix below.
+  for (const match of text.matchAll(MEDIA_TAG_RE)) {
+    kept += text.slice(cursor, match.index)
+    cursor = match.index + match[0].length
+    const rawPath = (match[1] || match[2] || match[3] || match[4] || '').trim()
     if (!rawPath) continue
     const offset = Math.min(stripHostMediaDirectives(kept).length, strippedTotal)
     items.push({
-      match: m[0],
+      match: match[0],
       path: rawPath,
       offset,
     })
@@ -137,7 +136,6 @@ export function extractHostMediaDirectives(text: string): ExtractedHostMedia[] {
  */
 export function stripHostMediaDirectives(text: string): string {
   if (!/(?:MEDIA|@file|@image):/i.test(text)) return text
-  MEDIA_TAG_RE.lastIndex = 0
   return text
     .replace(MEDIA_TAG_RE, '')
     .replace(/[ \t]+\n/g, '\n')
