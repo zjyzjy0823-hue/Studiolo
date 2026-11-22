@@ -210,6 +210,8 @@ class HermesAdapter(AgentAdapter):
 
     async def probe(self) -> AdapterProbe:
         caps = ("chat", "history", "approval", "worktree", "models", "cron", "files", "diff", "checkpoints", "todos", "context-usage")
+        if self.mode != "gateway":
+            caps += ("session-model",)
         if self.mode == "gateway" and self.serve_url:
             try:
                 headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
@@ -281,7 +283,7 @@ class HermesAdapter(AgentAdapter):
         await proc.call("session/new", {"cwd": str(cwd), "mcpServers": []}, on_result=remember)
         return sid
 
-    async def _load_acp_session(self, proc: StdioJsonRpcProcess, sid: str) -> None:
+    async def _load_acp_session(self, proc: StdioJsonRpcProcess, sid: str) -> str | None:
         if sid not in self._session_cwds:
             await self.list_sessions(limit=100)
         if sid not in self._session_cwds:
@@ -294,9 +296,15 @@ class HermesAdapter(AgentAdapter):
         updated = asyncio.Event()
         self._history_replays[sid] = messages
         self._history_updated[sid] = updated
+        current_model = None
+
+        def remember(response: dict[str, Any] | None) -> None:
+            nonlocal current_model
+            current_model = self._remember_models(response, sid)
+
         try:
             await proc.call("session/load", {"sessionId": sid, "cwd": str(cwd), "mcpServers": []},
-                            on_result=lambda response: self._remember_models(response, sid))
+                            on_result=remember)
             # Replay notifications may continue arriving after the RPC response.
             try:
                 if not messages:
@@ -312,6 +320,7 @@ class HermesAdapter(AgentAdapter):
             self._history_replays.pop(sid, None)
             self._history_updated.pop(sid, None)
         self._loaded_sessions.add(sid)
+        return current_model
 
     def _save_history(self, sid: str, messages: deque[dict[str, Any]]) -> None:
         self._history[sid] = messages
@@ -345,7 +354,12 @@ class HermesAdapter(AgentAdapter):
             return {"currentEffort": self._effort_current[session_id]}
         return {}
 
-    def _remember_models(self, response: dict[str, Any] | None, session_id: str) -> None:
+    def session_model_fields(self, session_id: str) -> dict[str, Any]:
+        if session_id in self._model_by_session:
+            return {"currentModel": self._model_by_session[session_id]}
+        return {}
+
+    def _remember_models(self, response: dict[str, Any] | None, session_id: str) -> str | None:
         """缓存 ACP 会话响应里的 SessionModelState（availableModels / currentModelId）。
 
         思考档位不在 ModelInfo 里：ACP 把可选项放在会话响应的 ``configOptions`` 中
@@ -353,7 +367,14 @@ class HermesAdapter(AgentAdapter):
         用于所有模型——和 Zed 等编辑器看到的一致。
         """
         if not isinstance(response, dict):
-            return
+            return None
+        state = response.get("models", response)
+        if not isinstance(state, dict):
+            state = {}
+        current = state.get("currentModelId", state.get("current_model_id"))
+        current = current if isinstance(current, str) else None
+        if current is not None:
+            self._model_by_session[session_id] = current
         effort_levels: list[str] = []
         option = self._remember_effort(response, session_id)
         for choice in option.get("options") or []:
@@ -362,14 +383,8 @@ class HermesAdapter(AgentAdapter):
                 if value and value != "default":
                     effort_levels.append(value)
         if not effort_levels:
-            effort_levels = self._effort_levels_from_meta(response.get("models") or {})
+            effort_levels = self._effort_levels_from_meta(state)
         self._effort_levels = effort_levels
-        state = response.get("models") or {}
-        if not isinstance(state, dict):
-            return
-        current = state.get("currentModelId") or state.get("current_model_id")
-        if current:
-            self._model_by_session[session_id] = str(current)
         rows = state.get("availableModels") or state.get("available_models") or []
         models: list[dict[str, Any]] = []
         for row in rows:
@@ -392,6 +407,7 @@ class HermesAdapter(AgentAdapter):
             })
         if models:
             self._picker_models = models
+        return current
 
     @staticmethod
     def _effort_levels_from_meta(state: dict[str, Any]) -> list[str]:
@@ -468,7 +484,7 @@ class HermesAdapter(AgentAdapter):
             self._loaded_sessions.add(sid)
             self._save_history(sid, deque(maxlen=_HISTORY_LIMIT))
         return {"sessionId": sid, "provider": self.provider, "cwd": str(eff_cwd), "worktreePath": wt_path,
-                "title": f"Hermes ({eff_cwd.name})", **self.session_effort_fields(sid)}
+                "title": f"Hermes ({eff_cwd.name})", **self.session_effort_fields(sid), **self.session_model_fields(sid)}
 
     async def get_history(self, *, session_id: str, limit: int = 50) -> list[dict[str, Any]]:
         limit = max(1, min(limit, _HISTORY_LIMIT))
@@ -491,6 +507,40 @@ class HermesAdapter(AgentAdapter):
             if session_id not in self._turns:
                 await self._load_acp_session(proc, session_id)
         return deepcopy(list(self._history.get(session_id, ()))[-limit:])
+
+    async def _set_acp_model(self, proc: StdioJsonRpcProcess, session_id: str, model_id: str) -> str | None:
+        if self._model_by_session.get(session_id) == model_id:
+            return model_id
+
+        current = None
+
+        def remember(response: dict[str, Any] | None) -> None:
+            nonlocal current
+            self._context_usage.pop(session_id, None)
+            self._effort_by_session.pop(session_id, None)
+            current = self._remember_models(response, session_id)
+            if current is None:
+                self._model_by_session.pop(session_id, None)
+
+        await proc.call("session/set_model", {"sessionId": session_id, "modelId": model_id}, on_result=remember)
+        if current is None:
+            # Some Hermes versions acknowledge the switch with an empty result.
+            current = await self._load_acp_session(proc, session_id)
+        return current
+
+    async def set_session_model(self, *, session_id: str, model_id: str) -> dict[str, Any] | None:
+        if self.mode == "gateway":
+            return None
+        proc = await self._ensure_acp()
+        async with self._history_lock:
+            if session_id in self._turns:
+                raise ValueError("当前会话已有任务运行中")
+            if session_id not in self._loaded_sessions:
+                await self._load_acp_session(proc, session_id)
+            current = await self._set_acp_model(proc, session_id, model_id)
+            if current is None:
+                raise ValueError("Hermes 未返回当前会话模型")
+            return {"currentModel": current}
 
     async def _gateway_context_usage(self, session_id: str) -> dict[str, Any] | None:
         if not self.serve_url:
@@ -576,12 +626,8 @@ class HermesAdapter(AgentAdapter):
         try:
             prompt_text = merge_prompt_with_attachments(text, attachments)
             requested_model = str((options or {}).get("model") or "")
-            if requested_model and requested_model != self._model_by_session.get(session_id) and self.mode != "gateway":
-                # ACP 的模型切换是会话级的（session/set_model），必须在空闲且发送 prompt 之前完成。
-                self._context_usage.pop(session_id, None)
-                await proc.call("session/set_model", {"sessionId": session_id, "modelId": requested_model})
-                self._model_by_session[session_id] = requested_model
-                self._effort_by_session.pop(session_id, None)  # 换模型会重建 agent，档位需按新路由重设
+            if requested_model and self.mode != "gateway":
+                await self._set_acp_model(proc, session_id, requested_model)
             requested_effort = str((options or {}).get("effort") or "").strip().lower()
             if requested_effort and requested_effort != self._effort_by_session.get(session_id) and self.mode != "gateway":
                 # 思考档位同样走会话级 config option（Hermes ACP 侧已经实现 reasoning_effort）。
@@ -598,7 +644,7 @@ class HermesAdapter(AgentAdapter):
             self._save_history(session_id, messages)
             messages.append({"role": "user", "text": text, "runId": request_id})
             await emit({"type": "Accepted", "sessionId": session_id, "runId": request_id, "requestId": request_id,
-                        "provider": self.provider, **self.session_effort_fields(session_id)})
+                        "provider": self.provider, **self.session_effort_fields(session_id), **self.session_model_fields(session_id)})
             # ACP resolves the prompt only after the whole turn, including tools and user approvals.
             prompt_res = await proc.call(
                 "session/prompt",
@@ -699,7 +745,8 @@ class HermesAdapter(AgentAdapter):
             self._remember_effort(upd, sid)
             current = self.session_effort_fields(sid)
             if current != previous and self.on_effort_update:
-                await self.on_effort_update({"type": "ContextUsage", "provider": self.provider, "sessionId": sid, **current})
+                await self.on_effort_update({"type": "ContextUsage", "provider": self.provider, "sessionId": sid,
+                                             **current, **self.session_model_fields(sid)})
             return
         if kind == "usage_update":
             context = _hermes_context(upd, acp=True)
@@ -711,7 +758,8 @@ class HermesAdapter(AgentAdapter):
                 if waiter := self._context_waiters.get(sid):
                     waiter.set()
                 if turn:
-                    await turn[1]({"type": "ContextUsage", "sessionId": sid, "runId": turn[0], "contextUsage": context})
+                    await turn[1]({"type": "ContextUsage", "sessionId": sid, "runId": turn[0], "contextUsage": context,
+                                   **self.session_model_fields(sid)})
             return
         if replay is None and turn is None:
             return

@@ -283,6 +283,7 @@ export const useFleetStore = defineStore('fleet', () => {
   const sideChatSessionKeyByParent = ref<Record<string, string>>({})
   const projectPermissionsByNode = ref<Record<string, ProjectPermission[]>>({})
   const projectPermissionWrites = new Map<string, (error?: Error) => void>()
+  const pendingModelWrites = new Map<string, { key: string; finish: (result: string | Error) => void }>()
   const android = isAndroidLocal()
   const notificationsEnabled = ref(
     !android && typeof window !== 'undefined' && typeof Notification !== 'undefined' && Notification.permission === 'granted',
@@ -485,6 +486,7 @@ export const useFleetStore = defineStore('fleet', () => {
     forkSeedBySession.value = {}
     sideChatSessionKeyByParent.value = {}
     for (const finish of projectPermissionWrites.values()) finish(new Error('节点连接已变更'))
+    for (const { finish } of pendingModelWrites.values()) finish(new Error('节点连接已变更'))
     projectPermissionsByNode.value = {}
     unreadNotifyTitle.value = ''
     tokenUsageStateBySession.value = {}
@@ -768,6 +770,7 @@ export const useFleetStore = defineStore('fleet', () => {
       contextCompactions.value = {}
       transmittingOutbox.clear()
       for (const finish of projectPermissionWrites.values()) finish(new Error('节点连接已断开'))
+      for (const { finish } of pendingModelWrites.values()) finish(new Error('节点连接已断开'))
       for (const target of pendingSessionLists.values()) sessionListStates.value[target] = {}
       pendingSessionLists.clear()
       if (intentionalClose || ev.code === 4401) {
@@ -911,10 +914,23 @@ export const useFleetStore = defineStore('fleet', () => {
     requestProjectPermissions(node.id)
   }
 
-  function rememberSessionEffort(key: string, effort: FleetWsEvent['currentEffort']) {
+  function rememberSessionRuntime(key: string, frame: FleetWsEvent) {
     const session = sessionsByKey.value[key]
-    if (session && (typeof effort === 'string' || effort === null) && session.currentEffort !== effort) {
-      sessionsByKey.value[key] = { ...session, currentEffort: effort }
+    if (!session) return
+    const { currentModel, currentEffort } = frame
+    const modelChanged = typeof currentModel === 'string' && session.currentModel !== currentModel
+    const effortChanged = (typeof currentEffort === 'string' || currentEffort === null) && session.currentEffort !== currentEffort
+    if (modelChanged && currentModel !== (session.currentModel ?? runSettings.value[key]?.model)) {
+      delete contextUsageBySession.value[key]
+      delete contextReads.value[key]
+      delete contextWaitingForModel.value[key]
+    }
+    if (modelChanged || effortChanged) {
+      sessionsByKey.value[key] = {
+        ...session,
+        ...(modelChanged ? { currentModel } : {}),
+        ...(effortChanged ? { currentEffort } : {}),
+      }
     }
   }
 
@@ -990,6 +1006,11 @@ export const useFleetStore = defineStore('fleet', () => {
     }
 
     if (frame.requestId && ['Failed', 'NodeUnavailable', 'Error'].includes(etype)) {
+      const modelWrite = pendingModelWrites.get(frame.requestId)
+      if (modelWrite) {
+        modelWrite.finish(new Error(frame.message || '切换模型失败'))
+        return
+      }
       const projectWrite = projectPermissionWrites.get(frame.requestId)
       if (projectWrite) {
         projectWrite(new Error(frame.message || '无法保存项目默认权限'))
@@ -1203,6 +1224,7 @@ export const useFleetStore = defineStore('fleet', () => {
           projectName: frame.projectName,
           projectDirectory: frame.projectDirectory,
           branch: frame.branch,
+          currentModel: frame.currentModel ?? existing?.currentModel,
           currentEffort: frame.currentEffort,
           updatedAt: existing?.updatedAt ?? Date.now(),
         },
@@ -1237,7 +1259,7 @@ export const useFleetStore = defineStore('fleet', () => {
 
     if (etype === 'SessionHistory' && nodeId && frame.sessionId && Array.isArray(frame.messages)) {
       const k = sessionKey(nodeId, provider, frame.sessionId)
-      rememberSessionEffort(k, frame.currentEffort)
+      rememberSessionRuntime(k, frame)
       if (pendingHistoryPages.value[k] === frame.requestId) delete pendingHistoryPages.value[k]
       if (frame.cursorExpired) {
         delete historyCursorBySession.value[k]
@@ -1382,7 +1404,15 @@ export const useFleetStore = defineStore('fleet', () => {
       lastSeqBySession.value = { ...lastSeqBySession.value, [sKey]: frame.seq }
     }
 
-    if (etype !== 'SessionStreamReplay') rememberSessionEffort(sKey, frame.currentEffort)
+    if (etype !== 'SessionStreamReplay') rememberSessionRuntime(sKey, frame)
+
+    if (etype === 'ContextUsage' && frame.requestId) {
+      const modelWrite = pendingModelWrites.get(frame.requestId)
+      if (modelWrite?.key === sKey) {
+        modelWrite.finish(typeof frame.currentModel === 'string' ? frame.currentModel : new Error('节点未确认当前模型'))
+        return
+      }
+    }
 
     if (etype === 'SessionStreamReplay' && sid && Array.isArray(frame.events)) {
       pendingStreamResync.delete(sKey)
@@ -1392,7 +1422,7 @@ export const useFleetStore = defineStore('fleet', () => {
         for (const approval of frame.pendingApprovals) handleWsEvent({ ...approval, nodeId, provider: effProvider, sessionId: sid })
       }
       if (frame.snapshotRequired) {
-        rememberSessionEffort(sKey, frame.currentEffort)
+        rememberSessionRuntime(sKey, frame)
         const at = Date.now()
         appendSystemEvent(sKey, nodeId, effProvider, `sys-reconnect-${frame.requestId ?? createRequestId()}`, {
           kind: 'reconnected', at, detail: { summary: '实时记录无法接续，已请求节点返回会话快照。' },
@@ -1432,7 +1462,7 @@ export const useFleetStore = defineStore('fleet', () => {
           handleWsEvent({ ...sub, nodeId, provider: effProvider, sessionId: sid })
         }
       }
-      rememberSessionEffort(sKey, frame.currentEffort)
+      rememberSessionRuntime(sKey, frame)
       if (typeof frame.lastSeq === 'number') {
         const sameStream = streamIdBySession.get(sKey) === frame.streamId
         if (frame.streamId) streamIdBySession.set(sKey, frame.streamId)
@@ -1545,6 +1575,7 @@ export const useFleetStore = defineStore('fleet', () => {
         && (!submittedPrompt || (submittedPrompt.model ?? '') === (runSettings.value[sKey]?.model ?? ''))) {
         contextWait.runId = rid
       }
+      if (submittedPrompt && typeof frame.currentModel === 'string') submittedPrompt.model = frame.currentModel
       delete contextReads.value[sKey]
       updatePromptDelivery(sKey, requestId, 'sent')
       const delivered = outbox.value.find(item => item.id === requestId && item.sessionKey === sKey)
@@ -2002,7 +2033,7 @@ export const useFleetStore = defineStore('fleet', () => {
         (frame.runId ? pendingRunPrompts.get(`${sKey}::${frame.runId}`) : undefined) ??
         (frame.requestId ? pendingRunPrompts.get(`${sKey}::${frame.requestId}`) : undefined)
       const durationMs = promptMeta?.startedAt ? Math.max(0, Date.now() - promptMeta.startedAt) : undefined
-      const modelIdEff = promptMeta?.model || runSettings.value[sKey]?.model
+      const modelIdEff = promptMeta?.model ?? sessionsByKey.value[sKey]?.currentModel ?? runSettings.value[sKey]?.model
       const modelLabel = modelIdEff
         ? (catalogs.value[`${nodeId}::${effProvider}`]?.models.find(m => m.id === modelIdEff)?.label || modelIdEff)
         : undefined
@@ -2215,6 +2246,11 @@ export const useFleetStore = defineStore('fleet', () => {
     }
   }
 
+  function sessionPromptOptions(key: string) {
+    const options = runSettings.value[key]
+    return sessionsByKey.value[key]?.currentModel === undefined ? options : { ...options, model: undefined }
+  }
+
   function setModelPreference(
     nodeId: string | undefined,
     provider: AdapterProvider,
@@ -2229,7 +2265,8 @@ export const useFleetStore = defineStore('fleet', () => {
     if (!keysToUpdate.length) return
     const next = { ...runSettings.value }
     for (const k of keysToUpdate) {
-      if (sessionsByKey.value[k] && (next[k]?.model ?? '') !== cleanModel) {
+      if (sessionsByKey.value[k] && sessionsByKey.value[k].currentModel === undefined
+        && (next[k]?.model ?? '') !== cleanModel) {
         delete contextUsageBySession.value[k]
         delete contextReads.value[k]
         contextWaitingForModel.value[k] = {}
@@ -2241,6 +2278,29 @@ export const useFleetStore = defineStore('fleet', () => {
       }
     }
     runSettings.value = next
+  }
+
+  async function setSessionModel(key: string, modelId: string): Promise<string> {
+    const session = sessionsByKey.value[key]
+    if (!session) throw new Error('目标会话不存在')
+    if ([...pendingModelWrites.values()].some(write => write.key === key)) {
+      throw new Error('正在等待节点确认模型，请稍候')
+    }
+    const { nodeId, provider, sessionId } = session
+    const requestId = createRequestId()
+    return new Promise((resolve, reject) => {
+      const finish = (result: string | Error) => {
+        clearTimeout(timer)
+        pendingModelWrites.delete(requestId)
+        if (result instanceof Error) reject(result)
+        else resolve(result)
+      }
+      const timer = setTimeout(() => finish(new Error('等待节点确认模型超时')), 120_000)
+      pendingModelWrites.set(requestId, { key, finish })
+      if (!sendWsCommand({ type: 'session.model.set', nodeId, provider, sessionId, modelId, requestId }, false)) {
+        finish(new Error('无法连接 Agent Node'))
+      }
+    })
   }
 
   function requestSessionsList(nodeId?: string, provider?: AdapterProvider) {
@@ -2811,7 +2871,7 @@ export const useFleetStore = defineStore('fleet', () => {
     const nextInt = { ...interruptedBySession.value }
     delete nextInt[sKey]
     interruptedBySession.value = nextInt
-    await sendPromptToSession(sKey, '请从刚才中断的地方继续完成剩余步骤。', [], runSettings.value[sKey])
+    await sendPromptToSession(sKey, '请从刚才中断的地方继续完成剩余步骤。', [], sessionPromptOptions(sKey))
   }
 
   function cancelActiveRun() {
@@ -3177,10 +3237,11 @@ export const useFleetStore = defineStore('fleet', () => {
     const unresolved = list.filter(a => !a.resolved && a.comment.trim())
     const prompt = buildDiffAnnotationsPrompt(unresolved)
     if (!prompt) return 0
+    const options = sessionPromptOptions(sKey)
     if (runningBySession.value[sKey]) {
-      enqueuePrompt(sKey, prompt, [], runSettings.value[sKey])
+      enqueuePrompt(sKey, prompt, [], options)
     } else {
-      await sendPromptToSession(sKey, prompt, [], runSettings.value[sKey])
+      await sendPromptToSession(sKey, prompt, [], options)
     }
     return unresolved.length
   }
@@ -3221,7 +3282,7 @@ export const useFleetStore = defineStore('fleet', () => {
     const cleanQ = (question || '').trim()
     if (existingKey && sessionsByKey.value[existingKey]) {
       if (cleanQ) {
-        const sideOptions = runSettings.value[existingKey]
+        const sideOptions = sessionPromptOptions(existingKey)
         if (runningBySession.value[existingKey]) {
           enqueuePrompt(existingKey, cleanQ, [], sideOptions)
         } else {
@@ -3466,7 +3527,7 @@ export const useFleetStore = defineStore('fleet', () => {
     if (!clean) return
     const nextList = branchFromUserMessage(list, userMsgIndex, clean)
     messagesBySession.value = { ...messagesBySession.value, [sKey]: nextList }
-    await sendPromptToSession(sKey, clean, [], options ?? runSettings.value[sKey], false)
+    await sendPromptToSession(sKey, clean, [], options ?? sessionPromptOptions(sKey), false)
   }
 
   async function regenerateAssistantMessage(
@@ -3493,7 +3554,7 @@ export const useFleetStore = defineStore('fleet', () => {
     const nextList = branchFromUserMessage(list, userIdx, userPrompt)
     messagesBySession.value = { ...messagesBySession.value, [sKey]: nextList }
     const wirePrompt = `[重新生成上一轮回答] 请忽略上一版回复，重新完整处理以下请求：\n${userPrompt}`
-    await sendPromptToSession(sKey, wirePrompt, [], options ?? runSettings.value[sKey], false)
+    await sendPromptToSession(sKey, wirePrompt, [], options ?? sessionPromptOptions(sKey), false)
   }
 
   function switchBranch(sKey: string, anchorIndex: number, targetBranchIndex: number) {
@@ -3964,7 +4025,9 @@ export const useFleetStore = defineStore('fleet', () => {
     contextCompactions,
     requestContextUsage,
     applyDefaultModelPref,
+    sessionPromptOptions,
     setModelPreference,
+    setSessionModel,
     requestSessionsList,
     openSession,
     activateSession,

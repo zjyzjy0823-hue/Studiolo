@@ -759,6 +759,20 @@ class AgentNodeDaemon:
                         **opened,
                     }
                 )
+            elif cmd == "session.model.set":
+                sid = frame.get("sessionId")
+                model_id = frame.get("modelId")
+                if not isinstance(sid, str) or not sid.strip() or not isinstance(model_id, str) or not model_id.strip():
+                    raise ValueError("缺少会话 ID 或模型 ID")
+                key = (provider, sid)
+                if key in self._active_runs or key in self._compacting_sessions:
+                    raise ValueError("当前会话忙碌，请稍后切换模型")
+                fields = await adapter.set_session_model(session_id=sid, model_id=model_id)
+                if fields is None:
+                    raise ValueError("当前适配器不支持直接切换会话模型")
+                # The confirmed model applies to every client viewing this session.
+                await self._send_ws(ws, {"type": "ContextUsage", "provider": provider, "sessionId": sid,
+                                         "requestId": req_id, **fields})
             elif cmd == "session.subscribe":
                 sid = str(frame.get("sessionId") or "")
                 key = (provider, sid)
@@ -788,6 +802,7 @@ class AgentNodeDaemon:
                                              if (event["provider"], event["sessionId"]) == key],
                         "events": buffered,
                         **(adapter.session_effort_fields(sid) if isinstance(adapter, HermesAdapter) else {}),
+                        **(adapter.session_model_fields(sid) if isinstance(adapter, HermesAdapter) else {}),
                     }
                 )
             elif cmd == "form.reply":
@@ -835,6 +850,7 @@ class AgentNodeDaemon:
                     msgs = await adapter.get_history(session_id=sid, limit=limit)
                 else:
                     source = await adapter.get_history(session_id=sid, limit=500 if before else min(500, limit + 1))
+                    model_fields = adapter.session_model_fields(sid) if isinstance(adapter, HermesAdapter) else {}
                     effort = adapter.session_effort_fields(sid) if isinstance(adapter, HermesAdapter) else {}
                     end = len(source)
                     if before:
@@ -842,16 +858,17 @@ class AgentNodeDaemon:
                                     if _history_cursor(source[i], source[i - 1]) == before), -1)
                         if end < 0:
                             await send_back({"type": "SessionHistory", "provider": provider, "sessionId": sid,
-                                             "messages": [], "cursorExpired": True})
+                                             "messages": [], "cursorExpired": True, **model_fields})
                             return
                     start = max(0, end - limit)
                     msgs = source[start:end]
                     cursor = _history_cursor(source[start], source[start - 1]) if start > 0 and msgs else None
                     await send_back({"type": "SessionHistory", "provider": provider, "sessionId": sid,
-                                     "messages": msgs, "historyCursor": cursor, "beforeCursor": before, **effort})
+                                     "messages": msgs, "historyCursor": cursor, "beforeCursor": before, **effort, **model_fields})
                     return
                 await send_back({"type": "SessionHistory", "provider": provider, "sessionId": sid, "messages": msgs,
-                                 **(adapter.session_effort_fields(sid) if isinstance(adapter, HermesAdapter) else {})})
+                                 **(adapter.session_effort_fields(sid) if isinstance(adapter, HermesAdapter) else {}),
+                                 **(adapter.session_model_fields(sid) if isinstance(adapter, HermesAdapter) else {})})
             elif cmd == "session.context.read":
                 sid = str(frame.get("sessionId") or "")
                 try:
@@ -1343,6 +1360,7 @@ class AgentNodeDaemon:
                     "code": "path_forbidden",
                     "provider": provider,
                     **({"sessionId": frame.get("sessionId")} if frame.get("sessionId") else {}),
+                    **({"requestId": frame.get("requestId")} if frame.get("requestId") else {}),
                     "message": str(err),
                 }
             )
@@ -1351,7 +1369,16 @@ class AgentNodeDaemon:
             # 所以把完整堆栈写进节点日志，排查时不用再猜。
             _LOG.exception("command %s failed (provider=%s)", frame.get("type"), provider)
             detail = str(err) or type(err).__name__
-            await send_back({"type": "Failed", "code": "node_execution_error", "provider": provider, "sessionId": frame.get("sessionId"), "message": detail})
+            await send_back(
+                {
+                    "type": "Failed",
+                    "code": "node_execution_error",
+                    "provider": provider,
+                    "sessionId": frame.get("sessionId"),
+                    **({"requestId": frame.get("requestId")} if frame.get("requestId") else {}),
+                    "message": detail,
+                }
+            )
 
     async def run_once(self) -> None:
         hello = await self.build_hello()

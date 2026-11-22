@@ -38,6 +38,7 @@ ALLOWED_CLIENT_COMMANDS = frozenset({
     "terminal.close",
     "session.open",
     "session.history",
+    "session.model.set",
     "session.context.read",
     "session.diff",
     "session.compact",

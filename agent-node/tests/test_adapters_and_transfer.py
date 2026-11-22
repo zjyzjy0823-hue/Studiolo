@@ -382,6 +382,7 @@ for line in sys.stdin:
 
 HERMES_ACP_SCRIPT = """
 import sys, json, os, time
+current_model = 'initial'
 for line in sys.stdin:
     if not line.strip():
         continue
@@ -391,7 +392,16 @@ for line in sys.stdin:
     if m == 'initialize':
         sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': mid, 'result': {'protocolVersion': 1}}) + '\\n')
     elif m == 'session/new':
-        sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': mid, 'result': {'sessionId': 'herm-1'}}) + '\\n')
+        result = {'sessionId': 'herm-1', 'models': {'currentModelId': current_model}}
+        print(json.dumps({'jsonrpc': '2.0', 'id': mid, 'result': result}))
+    elif m == 'session/set_model':
+        model_id = msg['params']['modelId']
+        if model_id == 'invalid':
+            print(json.dumps({'jsonrpc': '2.0', 'id': mid, 'error': {'code': -32602, 'message': 'Invalid model'}}))
+        else:
+            current_model = {'alias': 'resolved', 'empty-result': 'read-back'}[model_id]
+            result = {} if model_id == 'empty-result' else {'models': {'currentModelId': current_model}}
+            print(json.dumps({'jsonrpc': '2.0', 'id': mid, 'result': result}))
     elif m == 'session/list':
         cursor = msg['params'].get('cursor')
         sid = 'herm-older' if cursor == 'herm-1' else 'herm-1'
@@ -403,7 +413,10 @@ for line in sys.stdin:
     elif m == 'session/load':
         sid = msg['params']['sessionId']
         assert msg['params']['cwd'] == os.getcwd()
-        print(json.dumps({'jsonrpc': '2.0', 'id': mid, 'result': {}}), flush=True)
+        result = {'models': {'currentModelId': current_model}} if sid == 'herm-1' else {}
+        print(json.dumps({'jsonrpc': '2.0', 'id': mid, 'result': result}), flush=True)
+        if sid == 'herm-1':
+            continue
         time.sleep(0.02)
         for update in [
             {'session_update': 'user_message_chunk', 'content': {'type': 'text', 'text': 'Older question'}},
@@ -506,6 +519,7 @@ def test_codex_and_hermes_jsonrpc_adapters(tmp_path):
         )
         h_opened = await hermes.open_session(cwd=str(tmp_path))
         assert h_opened["sessionId"] == "herm-1"
+        assert h_opened["currentModel"] == "initial"
         listed = await hermes.list_sessions(limit=2)
         assert [entry["sessionId"] for entry in listed] == ["herm-1", "herm-older"]
         assert listed[1]["provider"] == "hermes" and listed[1]["cwd"] == str(tmp_path)
@@ -518,6 +532,7 @@ def test_codex_and_hermes_jsonrpc_adapters(tmp_path):
              "toolCalls": [{"callId": "old-tool", "name": "read_file", "title": "read_file: notes.md",
                             "toolKind": "read", "status": "completed", "output": "ok"}]},
         ]
+        assert hermes.session_model_fields("herm-older") == {}
         outside = hermes._session_summaries([{"sessionId": "outside", "title": "Personal chat", "cwd": str(tmp_path.parent)}])
         assert outside[0]["title"] == "Personal chat" and outside[0]["cwd"] == ""
         with pytest.raises(PathOutsideAllowedRootsError):
@@ -532,17 +547,32 @@ def test_codex_and_hermes_jsonrpc_adapters(tmp_path):
             assert history[0] == {"role": "user", "text": "hi", "runId": "r-hermes"}
             assert history[1]["thought"] == "plan step"
             assert history[1]["toolCalls"][0]["status"] == "running"
+            with pytest.raises(ValueError, match="任务运行中"):
+                await hermes.set_session_model(session_id=sid, model_id="alias")
             return "allow_session"
 
         rpc_call = hermes._proc.call
+        model_writes = []
 
-        async def check_prompt_timeout(method, params=None, **kwargs):
+        async def inspect_rpc(method, params=None, **kwargs):
             if method == "session/prompt":
                 assert "timeout" in kwargs and kwargs["timeout"] is None
+            if method == "session/set_model":
+                model_writes.append(params["modelId"])
             return await rpc_call(method, params, **kwargs)
 
-        hermes._proc.call = check_prompt_timeout
-        await hermes.send_prompt(session_id="herm-1", text="hi", request_id="r-hermes", emit=h_emit, request_approval=h_approve)
+        hermes._proc.call = inspect_rpc
+        assert await hermes.set_session_model(session_id="herm-1", model_id="alias") == {"currentModel": "resolved"}
+        with pytest.raises(JsonRpcError, match="Invalid model"):
+            await hermes.set_session_model(session_id="herm-1", model_id="invalid")
+        assert hermes.session_model_fields("herm-1") == {"currentModel": "resolved"}
+        assert await hermes.set_session_model(session_id="herm-1", model_id="empty-result") == {"currentModel": "read-back"}
+        reopened = await hermes.open_session(cwd=str(tmp_path), session_id="herm-1")
+        assert reopened["currentModel"] == "read-back"
+        await hermes.send_prompt(session_id="herm-1", text="hi", request_id="r-hermes", emit=h_emit,
+                                 request_approval=h_approve, options={"model": "read-back"})
+        assert model_writes == ["alias", "invalid", "empty-result"]
+        assert next(e for e in h_events if e["type"] == "Accepted")["currentModel"] == "read-back"
         assert any(e["type"] == "ThoughtDelta" and e["text"] == "plan step" for e in h_events)
         assert any(e["type"] == "ToolCall" and e["name"] == "read_file" for e in h_events)
         live_updates = [e for e in h_events if e["type"] == "ToolCallUpdate" and e["callId"] == "live-tool"]

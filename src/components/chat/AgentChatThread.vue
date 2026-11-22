@@ -102,6 +102,7 @@ type ComposerPanel = 'model' | 'permissions' | 'attach' | 'context'
 const panel = ref<ComposerPanel>('model')
 const adapter = computed(() => effectiveNode.value?.adapters.find(a => a.provider === effectiveProvider.value))
 const caps = computed(() => adapter.value?.capabilities ?? [])
+const canSetSessionModel = computed(() => Boolean(effectiveSession.value && caps.value.includes('session-model')))
 const target = computed(() => `${effectiveNode.value?.id}::${effectiveProvider.value}`)
 const catalog = computed(() => fleet.catalogs[target.value])
 const mcpList = computed(() => fleet.mcpByTarget[target.value] ?? [])
@@ -211,7 +212,10 @@ const buffer = computed(() => {
 const draft = computed({ get: () => buffer.value.text, set: text => { buffer.value.text = text } })
 const queuedFiles = computed({ get: () => buffer.value.files, set: files => { buffer.value.files = files } })
 const options = computed(() => fleet.runSettings[settingsKey.value] ?? {})
-const model = computed(() => catalog.value?.models.find(m => m.id === options.value.model))
+const currentModel = computed(() => effectiveSession.value?.currentModel ?? options.value.model)
+const model = computed(() => catalog.value?.models.find(m => m.id === currentModel.value))
+const modelLabel = computed(() => model.value?.label || currentModel.value || '默认模型')
+const promptOptions = computed(() => fleet.sessionPromptOptions(settingsKey.value))
 const sessionUsage = computed(() => (effectiveKey.value ? fleet.tokenUsageBySession[effectiveKey.value] ?? null : null))
 const usageSourceLabel = computed(() => {
   const src = sessionUsage.value?.source
@@ -329,12 +333,12 @@ const triggerEffortLabel = computed(() => {
 
 function rowEffortText(entry: FleetModel): string {
   if (entry.unavailable) return ''
-  if (options.value.model === entry.id) {
+  if (currentModel.value === entry.id) {
     if (currentEffort.value === null) return '默认'
     if (currentEffort.value) return effortLabels[currentEffort.value] ?? currentEffort.value
   }
   if (entry.defaultEffort) return effortLabels[entry.defaultEffort] ?? entry.defaultEffort
-  if (options.value.model === entry.id && entry.efforts.length) return '默认'
+  if (currentModel.value === entry.id && entry.efforts.length) return '默认'
   return ''
 }
 
@@ -594,12 +598,31 @@ function openProjectPermissions() {
   emit('openProjectSettings', effectiveNode.value.id, projectDirectory.value)
 }
 
-function chooseModel(modelId: string) {
+async function applyModelChoice(modelId: string, effort?: string) {
+  const key = settingsKey.value
+  const nodeId = effectiveNode.value?.id
+  const provider = effectiveProvider.value
+  try {
+    if (modelId && canSetSessionModel.value && effectiveSession.value?.currentModel !== modelId) {
+      modelId = await fleet.setSessionModel(key, modelId)
+      if (!fleet.sessionsByKey[key]) return false
+    }
+    fleet.setModelPreference(nodeId, provider, modelId, effort, key)
+    return true
+  } catch (err) {
+    emit('action', err instanceof Error ? err.message : '切换模型失败')
+    return false
+  }
+}
+
+async function chooseModel(modelId: string) {
   const nextEntry = catalog.value?.models.find(m => m.id === modelId)
   if (nextEntry?.unavailable) return
-  const keepingSame = (options.value.model ?? '') === modelId
+  const selectedModel = modelId && canSetSessionModel.value ? effectiveSession.value?.currentModel : options.value.model
+  const keepingSame = (selectedModel ?? '') === modelId
   if (!keepingSame) {
-    fleet.setModelPreference(effectiveNode.value?.id, effectiveProvider.value, modelId, undefined, settingsKey.value)
+    const key = settingsKey.value
+    if (!await applyModelChoice(modelId) || settingsKey.value !== key) return
   }
   if (nextEntry?.efforts.length && shouldUseInlineSubmenu()) {
     if (inlineEffortModelId.value === modelId && keepingSame) {
@@ -612,11 +635,11 @@ function chooseModel(modelId: string) {
   closeSettings()
 }
 
-function chooseModelEffort(modelId: string, effort: string) {
+async function chooseModelEffort(modelId: string, effort: string) {
   const entry = catalog.value?.models.find(m => m.id === modelId)
   if (entry?.unavailable) return
-  fleet.setModelPreference(effectiveNode.value?.id, effectiveProvider.value, modelId, effort || undefined, settingsKey.value)
-  closeSettings()
+  const key = settingsKey.value
+  if (await applyModelChoice(modelId, effort || undefined) && settingsKey.value === key) closeSettings()
 }
 
 function refreshModels() {
@@ -1017,7 +1040,7 @@ const currentWorktreeName = computed(() => {
 })
 const fallbackModels = computed(() => {
   const list = catalog.value?.models ?? []
-  const curId = options.value.model || ''
+  const curId = currentModel.value || ''
   return list.filter(m => !m.unavailable && m.id && m.id !== curId).slice(0, 3)
 })
 
@@ -1044,14 +1067,9 @@ function armOrCancelOnEsc() {
 
 async function switchModelAndRetry(modelId: string, msgIndex: number) {
   const targetModel = catalog.value?.models.find(m => m.id === modelId)
-  fleet.setModelPreference(
-    effectiveNode.value?.id,
-    effectiveProvider.value,
-    modelId,
-    targetModel?.defaultEffort,
-    settingsKey.value,
-  )
-  emit('action', `已切换至 ${targetModel?.label || modelId} 并重试`)
+  const key = settingsKey.value
+  if (!await applyModelChoice(modelId, targetModel?.defaultEffort) || settingsKey.value !== key) return
+  emit('action', `已切换至 ${modelLabel.value} 并重试`)
   await handleRegenerate(msgIndex)
 }
 
@@ -1263,7 +1281,7 @@ async function handleRegenerate(msgIndex: number) {
   if (effectiveKey.value && fleet.sessionsByKey[effectiveKey.value]) {
     sending.value = true
     try {
-      await fleet.regenerateAssistantMessage(effectiveKey.value, msgIndex, { ...options.value })
+      await fleet.regenerateAssistantMessage(effectiveKey.value, msgIndex, promptOptions.value)
     } catch (err) {
       emit('action', err instanceof Error ? err.message : '重新生成失败')
     } finally {
@@ -1822,7 +1840,7 @@ async function handleSubmit() {
     emit('action', '当前 Agent 不支持该权限，请调整会话权限后再发送')
     return
   }
-  const runOpts = { ...options.value }
+  const runOpts = { ...promptOptions.value }
 
   const clearSubmittedExtras = () => {
     if (submitted.text === originalText) submitted.text = ''
@@ -2092,9 +2110,9 @@ async function retryTurn(msg: ChatMessage) {
   sending.value = true
   try {
     if (effectiveKey.value && fleet.sessionsByKey[effectiveKey.value]) {
-      await fleet.sendPromptToSpecificSession(effectiveKey.value, promptText, [], { ...options.value })
+      await fleet.sendPromptToSpecificSession(effectiveKey.value, promptText, [], promptOptions.value)
     } else {
-      await fleet.sendPrompt(promptText, [], { ...options.value })
+      await fleet.sendPrompt(promptText, [], promptOptions.value)
     }
   } catch (err) {
     emit('action', err instanceof Error ? err.message : '重新发送失败')
@@ -2692,12 +2710,12 @@ async function retryTurn(msg: ChatMessage) {
           ref="modelTriggerRef"
           type="button"
           class="m-status-pill m-status-pill--model"
-          :aria-label="`选择模型：${model?.label || options.model || '默认模型'}`"
+          :aria-label="`选择模型：${modelLabel}`"
           :aria-expanded="settingsOpen && panel === 'model'"
           @pointerdown="noteTriggerPointerDown('model')"
           @click="showPanel('model', $event)"
         >
-          <span class="m-pill-text">{{ model?.label || options.model || '默认模型' }}</span>
+          <span class="m-pill-text">{{ modelLabel }}</span>
           <span
             v-if="model?.provider && !model.label.startsWith(model.provider)"
             class="trigger-provider m-pill-provider"
@@ -2895,14 +2913,14 @@ async function retryTurn(msg: ChatMessage) {
               ref="modelTriggerRef"
               class="model-trigger"
               type="button"
-              :aria-label="`选择模型：${model?.label || '默认模型'}${triggerEffortLabel ? ' ' + triggerEffortLabel : ''}`"
+              :aria-label="`选择模型：${modelLabel}${triggerEffortLabel ? ' ' + triggerEffortLabel : ''}`"
               aria-haspopup="dialog"
               :aria-controls="settingsId"
               :aria-expanded="settingsOpen && panel === 'model'"
               @pointerdown="noteTriggerPointerDown('model')"
               @click="showPanel('model', $event)"
             >
-              <span class="trigger-label">{{ model?.label || options.model || '默认模型' }}</span>
+              <span class="trigger-label">{{ modelLabel }}</span>
               <span
                 v-if="model?.provider && !model.label.startsWith(model.provider)"
                 class="trigger-provider"
@@ -3392,13 +3410,13 @@ async function retryTurn(msg: ChatMessage) {
             <button
               type="button"
               class="picker-option"
-              :aria-pressed="!options.model"
+              :aria-pressed="!currentModel"
               @pointerenter="closeSubmenu"
               @click="chooseModel('')"
             >
               <span class="option-title">节点默认模型</span>
               <span class="picker-badge">默认</span>
-              <OpusIcon v-if="!options.model" name="check" class="option-tail is-check" />
+              <OpusIcon v-if="!currentModel" name="check" class="option-tail is-check" />
             </button>
             <div v-for="entry in catalog?.models" :key="entry.id" class="picker-item">
               <button
@@ -3411,7 +3429,7 @@ async function retryTurn(msg: ChatMessage) {
                 :disabled="entry.unavailable"
                 :title="entry.note || entry.label"
                 :data-model-id="entry.id"
-                :aria-pressed="options.model === entry.id"
+                :aria-pressed="currentModel === entry.id"
                 @pointerenter="onModelRowPointerEnter(entry, $event)"
                 @pointerleave="scheduleSubClose"
                 @keydown="handleModelRowKeydown(entry, $event)"
@@ -3431,13 +3449,13 @@ async function retryTurn(msg: ChatMessage) {
                 </span>
                 <template v-else-if="entry.efforts.length">
                   <OpusIcon
-                    v-if="options.model === entry.id && hoveredModelId !== entry.id && inlineEffortModelId !== entry.id"
+                    v-if="currentModel === entry.id && hoveredModelId !== entry.id && inlineEffortModelId !== entry.id"
                     name="check"
                     class="option-tail is-check"
                   />
                   <OpusIcon v-else name="chevR" class="option-tail" />
                 </template>
-                <OpusIcon v-else-if="options.model === entry.id" name="check" class="option-tail is-check" />
+                <OpusIcon v-else-if="currentModel === entry.id" name="check" class="option-tail is-check" />
               </button>
               <div
                 v-if="inlineEffortModelId === entry.id && entry.efforts.length && !entry.unavailable"
@@ -3448,22 +3466,22 @@ async function retryTurn(msg: ChatMessage) {
                 <button
                   type="button"
                   class="picker-option"
-                  :aria-pressed="options.model === entry.id && !currentEffort"
+                  :aria-pressed="currentModel === entry.id && !currentEffort"
                   @click="chooseModelEffort(entry.id, '')"
                 >
                   <span class="option-title">默认</span>
-                  <OpusIcon v-if="options.model === entry.id && !currentEffort" name="check" class="option-tail is-check" />
+                  <OpusIcon v-if="currentModel === entry.id && !currentEffort" name="check" class="option-tail is-check" />
                 </button>
                 <button
                   v-for="effort in entry.efforts"
                   :key="effort"
                   type="button"
                   class="picker-option"
-                  :aria-pressed="options.model === entry.id && currentEffort === effort"
+                  :aria-pressed="currentModel === entry.id && currentEffort === effort"
                   @click="chooseModelEffort(entry.id, effort)"
                 >
                   <span class="option-title">{{ effortLabels[effort] ?? effort }}</span>
-                  <OpusIcon v-if="options.model === entry.id && currentEffort === effort" name="check" class="option-tail is-check" />
+                  <OpusIcon v-if="currentModel === entry.id && currentEffort === effort" name="check" class="option-tail is-check" />
                 </button>
               </div>
             </div>
@@ -3514,22 +3532,22 @@ async function retryTurn(msg: ChatMessage) {
             <button
               type="button"
               class="picker-option"
-              :aria-pressed="options.model === subModel.id && !currentEffort"
+              :aria-pressed="currentModel === subModel.id && !currentEffort"
               @click="chooseModelEffort(subModel.id, '')"
             >
               <span class="option-title">默认</span>
-              <OpusIcon v-if="options.model === subModel.id && !currentEffort" name="check" class="option-tail is-check" />
+              <OpusIcon v-if="currentModel === subModel.id && !currentEffort" name="check" class="option-tail is-check" />
             </button>
             <button
               v-for="effort in subModel.efforts"
               :key="effort"
               type="button"
               class="picker-option"
-              :aria-pressed="options.model === subModel.id && currentEffort === effort"
+              :aria-pressed="currentModel === subModel.id && currentEffort === effort"
               @click="chooseModelEffort(subModel.id, effort)"
             >
               <span class="option-title">{{ effortLabels[effort] ?? effort }}</span>
-              <OpusIcon v-if="options.model === subModel.id && currentEffort === effort" name="check" class="option-tail is-check" />
+              <OpusIcon v-if="currentModel === subModel.id && currentEffort === effort" name="check" class="option-tail is-check" />
             </button>
           </div>
         </template>

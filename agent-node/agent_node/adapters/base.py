@@ -336,6 +336,10 @@ class AgentAdapter(ABC):
     async def get_history(self, *, session_id: str, limit: int = 50) -> list[dict[str, Any]]:
         """从上游拉取指定会话最近有界历史。"""
 
+    async def set_session_model(self, *, session_id: str, model_id: str) -> dict[str, Any] | None:
+        """切换会话模型并返回回读状态，None 表示不支持。"""
+        return None
+
     @abstractmethod
     async def send_prompt(
         self,
