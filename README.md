@@ -91,6 +91,10 @@ python -m agent_node --config config.json
 
 守护进程上线后会自动探测该机器已安装的智能体与能力并同步到前端列表，进入 `/chat` 即可开始协同对话。
 
+Hermes 附件预览和下载由节点的 `hermesMedia` 配置启用。将 `baseUrl` 设为本机 Hermes Dashboard 的回环地址，并将 `tokenFile` 指向 Dashboard 的部署令牌文件。附件必须出现在原 Hermes 会话的助手回复中，且解析后的文件必须同时位于该会话的工作目录和节点的 `allowedRoots` 内。改动节点配置后，重启节点以重新协商能力。
+
+Core 默认允许每个附件最多 32 MiB，中转超时为 35 秒，票据有效期为 60 秒。可用 `STUDIOLO_HERMES_MEDIA_MAX_BYTES`、`STUDIOLO_HERMES_MEDIA_TIMEOUT_SECONDS` 和 `STUDIOLO_HERMES_MEDIA_TICKET_SECONDS` 调整。中转和票据使用现有 Fleet 连接所属的 Core 进程。
+
 ---
 
 ### 三、桌面端开发与安装包构建（Windows / macOS）

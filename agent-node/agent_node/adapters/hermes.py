@@ -331,6 +331,9 @@ class HermesAdapter(AgentAdapter):
                 break
             del self._history[oldest]
 
+    def live_attachment_history(self, session_id: str) -> list[dict[str, Any]]:
+        return [row for row in self._history.get(session_id, ()) if row.get("runId")]
+
     async def _get_models_from_session(self, proc: StdioJsonRpcProcess, sid: str) -> None:
         async with self._history_lock:
             if self._picker_models is None and sid not in self._turns:

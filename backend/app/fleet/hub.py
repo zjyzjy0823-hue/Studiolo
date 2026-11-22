@@ -115,6 +115,7 @@ ALLOWED_NODE_EVENTS = frozenset({
     "NodeHeartbeat",
     "CronRpcResult",
     "SubscriptionQuotaResult",
+    "HermesMediaResult",
 })
 
 
@@ -255,18 +256,17 @@ class FleetRelayHub:
 
         outbound = {**frame, "_rpcId": rpc_id}
         try:
-            await node.websocket.send_json(outbound)
-        except Exception:
-            async with self._lock:
-                self._pending_rpcs.pop(rpc_id, None)
-            await self.unregister_node(workspace_id, node_id, node.websocket)
-            return {"ok": False, "code": "node_disconnected", "error": "Target device node disconnected"}
-
-        try:
-            return await asyncio.wait_for(fut, timeout=timeout)
-        except asyncio.TimeoutError:
+            async with asyncio.timeout(timeout):
+                try:
+                    await node.websocket.send_json(outbound)
+                except Exception:
+                    await self.unregister_node(workspace_id, node_id, node.websocket)
+                    return {"ok": False, "code": "node_disconnected", "error": "Target device node disconnected"}
+                return await fut
+        except TimeoutError:
             return {"ok": False, "code": "rpc_timeout", "error": "Remote node did not respond in time"}
         finally:
+            fut.cancel()
             async with self._lock:
                 self._pending_rpcs.pop(rpc_id, None)
 

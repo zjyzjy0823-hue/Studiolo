@@ -23,7 +23,7 @@ from ..models import AgentNode, User, utcnow
 from ..security import authenticate_node_token, authenticate_user_jwt, bearer, current_user
 from ..utils.time import iso_utc
 from ..workspaces import get_personal_workspace
-from . import blobs, usage
+from . import blobs, media, usage
 from .hub import ALLOWED_NODE_EVENTS, ConnectedNode, fleet_hub
 from .schemas import (
     AdapterInfo,
@@ -243,6 +243,76 @@ async def delete_node(node_id: str, user: User = Depends(current_user), db: Sess
     db.delete(node)
     db.commit()
     return Response(status_code=204)
+
+
+@router.post("/media/resolve")
+async def resolve_hermes_media(
+    payload: media.MediaResolveInput, request: Request, response: Response,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+):
+    workspace = get_personal_workspace(db, user)
+    node = _owned_node(db, workspace.id, payload.nodeId)
+    if node.user_id != user.id:
+        raise HTTPException(404, "Node not found")
+    scope = (workspace.id, user.id, node.id)
+    if node.revoked_at is not None:
+        raise media.media_error("node_offline")
+    db.close()
+    connected = await fleet_hub.get_online_node(scope[0], scope[2])
+    if connected is None:
+        raise media.media_error("node_offline")
+    if not any(
+        adapter.get("provider") == "hermes" and media.CAPABILITY in adapter.get("capabilities", [])
+        for adapter in connected.adapters
+    ):
+        raise media.media_error("media_unsupported")
+
+    relay: media.MediaRelay = request.app.state.hermes_media
+    transfer_id = relay.reserve(scope, payload)
+    try:
+        result = await fleet_hub.call_node_rpc(scope[0], scope[2], {
+            "type": "hermes.media.relay",
+            **payload.model_dump(),
+            "nodeId": scope[2],
+            "transferId": transfer_id,
+            "maxBytes": relay.max_bytes,
+        }, timeout=relay.timeout_seconds)
+        # Fleet chat is scoped to the user's personal workspace. The authenticated
+        # owning node is authoritative for native session and attachment membership.
+        if result.get("ok") is not True or result.get("type") != "HermesMediaResult":
+            code = result.get("code")
+            raise media.media_error(code if isinstance(code, str) and code in media.MEDIA_ERRORS else "media_relay_failed")
+        ticket = relay.issue(transfer_id, result)
+        response.headers["Cache-Control"] = "no-store"
+        return {"ticket": ticket, "expiresIn": relay.ticket_seconds, "sizeBytes": result["sizeBytes"]}
+    finally:
+        relay.discard(transfer_id)
+
+
+@router.put("/media/relay/{transfer_id}", status_code=204)
+async def accept_hermes_media_bytes(
+    transfer_id: str, request: Request,
+    actor: tuple[str, str, int, str] = Depends(_fleet_actor), db: Session = Depends(get_db),
+):
+    db.close()
+    relay: media.MediaRelay = request.app.state.hermes_media
+    await relay.accept_bytes(transfer_id, actor, request)
+    return Response(status_code=204)
+
+
+@router.post("/media/redeem")
+async def redeem_hermes_media(
+    payload: media.MediaTicketInput, request: Request,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+):
+    workspace = get_personal_workspace(db, user)
+    relay: media.MediaRelay = request.app.state.hermes_media
+    transfer = relay.get_ticket(payload.ticket, workspace.id, user.id)
+    node = _owned_node(db, workspace.id, transfer.scope[2])
+    if node.user_id != user.id or node.revoked_at is not None:
+        raise media.media_error("media_forbidden")
+    db.close()
+    return relay.redeem(payload.ticket, transfer)
 
 
 # ---------------- 加密分块文件总线（/chat 附件与后续 Shared Space 共用） ----------------
@@ -482,7 +552,7 @@ async def fleet_node_ws(websocket: WebSocket):
                     db.commit()
                 continue
 
-            if evt_type in ("CronRpcResult", "SubscriptionQuotaResult"):
+            if evt_type in ("CronRpcResult", "SubscriptionQuotaResult", "HermesMediaResult"):
                 rpc_id = str(frame.get("_rpcId") or "").strip()
                 if rpc_id:
                     await fleet_hub.resolve_node_rpc(workspace_id, node_id, rpc_id, frame)

@@ -8,13 +8,14 @@ import { computed, nextTick, ref, shallowReactive, watch } from 'vue'
 import { apiRequest, ApiError } from '../api/client'
 import { androidInvoke, isAndroidLocal } from '../desktop/androidLocal'
 import { desktopPlatform } from '../desktop/platform'
-import { downloadAndDecryptBlob, encryptAndUploadFile } from '../services/blobTransfer'
+import { decodeBase64Url, downloadAndDecryptBlob, encryptAndUploadFile } from '../services/blobTransfer'
 import { normalizeCoreOrigin } from '../services/fleetUrl'
 import { FleetLocalStore, type FleetOutboxItem } from '../services/fleetLocal'
 import {
   buildFleetWsUrl,
   createFleetNode,
   deleteFleetNode,
+  fetchHermesMedia,
   getApiBaseUrl,
   listFleetNodes,
   revokeFleetNode,
@@ -82,6 +83,7 @@ import {
   type TokenUsageInput,
 } from '../services/tokenUsage'
 import { resolveSavedModelPref, saveAgentModelPref } from '../services/modelPrefs'
+import { saveBlobToDevice } from '../services/saveDownload'
 import { useAuthStore } from './auth'
 
 const MAX_MESSAGES_PER_SESSION = 500
@@ -261,7 +263,7 @@ export const useFleetStore = defineStore('fleet', () => {
   const filePreviewBySession = ref<Record<string, FilePreviewState>>({})
   const fileTextCacheBySession = ref<Record<string, Record<string, string[]>>>({})
   const silentFileReadRequests = new Set<string>()
-  const pendingDownloadRequests = new Map<string, string>()
+  const pendingDownloadRequests = new Map<string, { fileName: string; onSaved?: () => void }>()
   const pendingFormsById = ref<Record<string, MessageFormRequest>>({})
   const treeCacheByTarget = ref<Record<string, WorkspaceTreeEntry[]>>({})
   const trustPatternsByNode = ref<Record<string, string[]>>({})
@@ -1585,27 +1587,24 @@ export const useFleetStore = defineStore('fleet', () => {
           },
         }
       }
-      if (frame.requestId && pendingDownloadRequests.has(frame.requestId)) {
-        const dlName = pendingDownloadRequests.get(frame.requestId) || frame.path.replace(/\\/g, '/').split('/').pop() || 'download'
+      const download = frame.requestId ? pendingDownloadRequests.get(frame.requestId) : undefined
+      if (frame.requestId && download) {
         pendingDownloadRequests.delete(frame.requestId)
         silentFileReadRequests.delete(frame.requestId)
-        if (typeof document !== 'undefined') {
-          let href = ''
-          let revoke = false
-          if (frame.base64Data) {
-            href = `data:${frame.mime || 'application/octet-stream'};base64,${frame.base64Data}`
-          } else {
-            const blob = new Blob([frame.content || ''], { type: `${frame.mime || 'text/plain'};charset=utf-8` })
-            href = URL.createObjectURL(blob)
-            revoke = true
-          }
-          const a = document.createElement('a')
-          a.href = href
-          a.download = dlName
-          document.body.appendChild(a)
-          a.click()
-          document.body.removeChild(a)
-          if (revoke) setTimeout(() => URL.revokeObjectURL(href), 1000)
+        if (frame.truncated || (frame.isBinary && !frame.base64Data) || frame.sizeBytes === 0
+          || (!frame.base64Data && !frame.content)) {
+          lastError.value = '无法下载文件：节点未返回完整文件'
+          return
+        }
+        try {
+          const blob = frame.base64Data
+            ? new Blob([decodeBase64Url(frame.base64Data)], { type: frame.mime || 'application/octet-stream' })
+            : new Blob([frame.content || ''], { type: `${frame.mime || 'text/plain'};charset=utf-8` })
+          void saveBlobToDevice(blob, download.fileName).then(() => download.onSaved?.()).catch(error => {
+            lastError.value = error instanceof Error ? error.message : '下载失败'
+          })
+        } catch {
+          lastError.value = '无法下载文件：节点返回的文件数据无效'
         }
         return
       }
@@ -3132,18 +3131,28 @@ export const useFleetStore = defineStore('fleet', () => {
       apiBaseUrl: route.origin,
     })
     checkFleetRoute(route)
-    const url = URL.createObjectURL(blob)
-    try {
-      const a = document.createElement('a')
-      a.href = url
-      a.download = fileName
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-    } finally {
-      URL.revokeObjectURL(url)
-    }
+    await saveBlobToDevice(blob, fileName)
     return transport
+  }
+
+  async function readHermesAttachment(
+    key: string,
+    reference: string,
+    purpose: 'preview' | 'download',
+    signal?: AbortSignal,
+  ) {
+    const session = sessionsByKey.value[key]
+    if (!session || session.provider !== 'hermes') throw new Error('找不到附件所属的 Hermes 会话')
+    const node = nodes.value.find(item => item.id === session.nodeId)
+    if (node?.status === 'online' && !node.adapters.some(adapter =>
+      adapter.provider === 'hermes' && adapter.capabilities.includes('hermes-media-v1'),
+    )) throw new Error('当前节点未提供预览或下载服务')
+    const route = requireFleetRoute()
+    const blob = await fetchHermesMedia(route.token, route.origin, {
+      nodeId: session.nodeId, sessionId: session.sessionId, reference, purpose,
+    }, signal)
+    checkFleetRoute(route)
+    return blob
   }
 
   function requestFilesList(query = '', limit = 60, sKey?: string) {
@@ -3463,16 +3472,14 @@ export const useFleetStore = defineStore('fleet', () => {
     })
   }
 
-  function downloadWorkspaceFile(path: string, sKey?: string) {
+  function downloadWorkspaceFile(path: string, sKey?: string, onSaved?: () => void) {
     const key = sKey || activeSessionKey.value
     const sess = key ? sessionsByKey.value[key] : null
     const clean = path.trim()
     if (!sess || !clean) return false
     const reqId = createRequestId()
     const fileName = clean.replace(/\\/g, '/').split('/').pop() || 'download'
-    pendingDownloadRequests.set(reqId, fileName)
-    silentFileReadRequests.add(reqId)
-    return sendWsCommand({
+    const sent = sendWsCommand({
       type: 'file.read',
       nodeId: sess.nodeId,
       provider: sess.provider,
@@ -3481,6 +3488,11 @@ export const useFleetStore = defineStore('fleet', () => {
       path: clean,
       requestId: reqId,
     })
+    if (sent) {
+      pendingDownloadRequests.set(reqId, { fileName, onSaved })
+      silentFileReadRequests.add(reqId)
+    }
+    return sent
   }
 
   function requestDiffFileContext(path: string, sKey?: string, force = false) {
@@ -4196,5 +4208,6 @@ export const useFleetStore = defineStore('fleet', () => {
     sendFanout,
     ensureArtifactImagePreview,
     downloadArtifactToBrowser,
+    readHermesAttachment,
   }
 })

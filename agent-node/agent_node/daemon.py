@@ -26,6 +26,7 @@ from .adapters.hermes import HermesAdapter
 from .adapters.registry import build_adapter_registry
 from .config import NodeConfig, PathOutsideAllowedRootsError, detect_lan_urls, ensure_allowed_path
 from .crypto_chunks import generate_file_key
+from .hermes_media import CAPABILITY as HERMES_MEDIA_CAPABILITY, MediaError, relay_hermes_attachment
 from .terminal_session import TerminalManager
 from .port_preview import PortPreviewManager
 from .transfer import (
@@ -293,6 +294,8 @@ class AgentNodeDaemon:
                         *p.capabilities,
                         "project-permissions",
                         *(["deny-requests", "auto-approve"] if "approval" in p.capabilities else []),
+                        *([HERMES_MEDIA_CAPABILITY] if isinstance(adapter, HermesAdapter)
+                           and self.config.hermes_media and os.open in os.supports_dir_fd else []),
                     ],
                 })
             except Exception:
@@ -472,7 +475,7 @@ class AgentNodeDaemon:
         await self._send_ws(ws, evt)
         return artifact_ref
 
-    async def handle_command(self, ws: Any, frame: dict[str, Any]) -> None:
+    async def handle_command(self, ws: Any, frame: dict[str, Any], *, node_id: str | None = None) -> None:
         cmd = str(frame.get("type") or "")
         req_id = frame.get("requestId")
         client_conn_id = frame.get("_clientConnId")
@@ -485,6 +488,20 @@ class AgentNodeDaemon:
             if req_id and "requestId" not in payload:
                 payload["requestId"] = req_id
             await self._send_ws(ws, payload)
+
+        if cmd == "hermes.media.relay":
+            rpc_id = frame.get("_rpcId")
+            if not isinstance(rpc_id, str) or not isinstance(adapter, HermesAdapter):
+                return
+            sid = frame.get("sessionId")
+            history = adapter.live_attachment_history(sid) if isinstance(sid, str) else []
+            result = {"type": "HermesMediaResult", "_rpcId": rpc_id, "sessionId": sid}
+            try:
+                result.update(await relay_hermes_attachment(self.config, frame, node_id, history), ok=True)
+            except MediaError as exc:
+                result.update(ok=False, code=str(exc))
+            await send_back(result)
+            return
 
         if cmd == "session.active.list":
             await send_back({
@@ -1439,7 +1456,7 @@ class AgentNodeDaemon:
                     frame = json.loads(raw)
                     if not isinstance(frame, dict):
                         continue
-                    task = asyncio.create_task(self.handle_command(ws, frame))
+                    task = asyncio.create_task(self.handle_command(ws, frame, node_id=ready.get("nodeId")))
                     bg_tasks.add(task)
                     task.add_done_callback(bg_tasks.discard)
             finally:

@@ -23,12 +23,21 @@ class DirectTransferConfig:
 
 
 @dataclass(frozen=True)
+class HermesMediaConfig:
+    base_url: str
+    token_file: Path = field(repr=False)
+    max_bytes: int = 32 * 1024 * 1024
+    timeout_seconds: int = 30
+
+
+@dataclass(frozen=True)
 class NodeConfig:
     core_url: str
     node_token: str = field(repr=False)
     allowed_roots: tuple[Path, ...]
     direct: DirectTransferConfig = field(default_factory=DirectTransferConfig)
     providers: dict[str, dict[str, Any]] = field(default_factory=dict)
+    hermes_media: HermesMediaConfig | None = None
 
     @property
     def ws_url(self) -> str:
@@ -102,6 +111,28 @@ def detect_lan_urls(port: int) -> list[str]:
     return urls
 
 
+def load_hermes_media_config(raw: dict[str, Any], env: dict[str, str]) -> HermesMediaConfig | None:
+    url = env.get("STUDIOLO_HERMES_MEDIA_URL") or raw.get("baseUrl")
+    if not url:
+        return None
+    base = validate_core_base_url(str(url))
+    parts = urlsplit(str(url))
+    try:
+        loopback = ip_address(parts.hostname or "").is_loopback
+    except ValueError:
+        loopback = parts.hostname == "localhost"
+    if not loopback or parts.path not in ("", "/"):
+        raise ValueError("Hermes media URL must be a loopback HTTP(S) origin")
+    token_file = env.get("STUDIOLO_HERMES_MEDIA_TOKEN_FILE") or raw.get("tokenFile")
+    if not token_file:
+        raise ValueError("Hermes media requires a dashboard token file")
+    max_bytes = int(env.get("STUDIOLO_HERMES_MEDIA_MAX_BYTES") or raw.get("maxBytes", 32 * 1024 * 1024))
+    timeout = int(env.get("STUDIOLO_HERMES_MEDIA_TIMEOUT_SECONDS") or raw.get("timeoutSeconds", 30))
+    if min(max_bytes, timeout) <= 0:
+        raise ValueError("Hermes media size and timeout must be positive")
+    return HermesMediaConfig(base, Path(str(token_file)).expanduser(), max_bytes, timeout)
+
+
 def load_node_config(config_path: str | Path | None = None, environ: dict[str, str] | None = None) -> NodeConfig:
     env = dict(os.environ if environ is None else environ)
     raw: dict[str, Any] = {}
@@ -134,4 +165,5 @@ def load_node_config(config_path: str | Path | None = None, environ: dict[str, s
         allowed_roots=roots,
         direct=direct_cfg,
         providers=providers,
+        hermes_media=load_hermes_media_config(raw.get("hermesMedia") or {}, env),
     )

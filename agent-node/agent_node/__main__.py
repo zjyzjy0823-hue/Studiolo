@@ -13,6 +13,8 @@ def main() -> None:
     parser.add_argument("--config", default=None, help="Path to config.json (optional if env vars are set)")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [agent-node] %(levelname)s %(message)s")
+    # HTTPX INFO includes the full Hermes file URL with the host path in its query.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     config = load_node_config(args.config)
     daemon = AgentNodeDaemon(config)
     asyncio.run(daemon.run_forever())

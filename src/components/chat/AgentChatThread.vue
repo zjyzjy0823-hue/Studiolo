@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, useId, watch, watchEffect } from 'vue'
+import { isAndroidLocal } from '../../desktop/androidLocal'
 import { useAuthStore } from '../../stores/auth'
 import { useDataStore } from '../../stores/data'
 import { sessionKey as buildSessionKey, useFleetStore } from '../../stores/fleet'
@@ -27,6 +28,7 @@ import {
 } from '../../services/customPrompts'
 import { estimateTextTokens, formatTokenCount } from '../../services/tokenUsage'
 import { findProjectPermission, supportsChatPermission } from '../../services/projectPermissions'
+import { saveBlobToDevice } from '../../services/saveDownload'
 import type {
   ApprovalDecision,
   ArtifactRef,
@@ -1998,47 +2000,34 @@ function queuedFileThumb(file: File): string | undefined {
   return queuedThumbUrls.value.get(file)
 }
 
-function openImageLightbox(src: string, alt: string, download?: () => Promise<void>, handoff?: () => void) {
+function openImageLightbox(src: string, alt: string, download: () => Promise<void>, handoff?: () => void) {
   lightboxSrc.value = src
   lightboxAlt.value = alt
-  lightboxDownload.value = download ?? null
+  lightboxDownload.value = download
   lightboxHandoff.value = handoff ?? null
   void nextTick(() => {
     lightboxEl.value?.showModal()
   })
 }
 
-function cleanMediaFileName(raw?: string): string {
-  const s = (raw || '').trim()
-  if (!s) return 'download'
-  return s.replace(/\\/g, '/').split('/').pop() || s
-}
-
-function triggerBrowserDownload(url: string, fileName: string) {
-  if (!url || typeof document === 'undefined') return
-  const cleanName = cleanMediaFileName(fileName)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = cleanName
-  a.target = '_blank'
-  a.rel = 'noopener noreferrer'
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  emit('action', `正在下载 ${cleanName}`)
+function openQueuedImageLightbox(file: File) {
+  const src = queuedFileThumb(file)
+  if (!src) return
+  openImageLightbox(src, file.name, async () => {
+    const savedName = await saveBlobToDevice(file, file.name)
+    emit('action', isAndroidLocal() ? '已保存到 Download/Studiolo' : `正在下载 ${savedName}`)
+  })
 }
 
 async function downloadLightboxImage() {
-  if (lightboxDownloading.value) return
-  if (lightboxDownload.value) {
-    lightboxDownloading.value = true
-    try {
-      await lightboxDownload.value()
-    } finally {
-      lightboxDownloading.value = false
-    }
-  } else if (lightboxSrc.value) {
-    triggerBrowserDownload(lightboxSrc.value, lightboxAlt.value || 'image.png')
+  if (lightboxDownloading.value || !lightboxDownload.value) return
+  lightboxDownloading.value = true
+  try {
+    await lightboxDownload.value()
+  } catch (error) {
+    emit('action', error instanceof Error ? error.message : '下载失败')
+  } finally {
+    lightboxDownloading.value = false
   }
 }
 
@@ -2377,6 +2366,8 @@ async function retryTurn(msg: ChatMessage) {
                       v-else
                       :attachment="uSeg.attachment"
                       :compact="compact"
+                      :session-key="effectiveKey || undefined"
+                      :hermes-media="effectiveProvider === 'hermes'"
                       @preview-image="openImageLightbox"
                       @open-file="fp => emit('openFile', fp)"
                       @handoff="art => shareAsHandoff(msg, art)"
@@ -2468,6 +2459,9 @@ async function retryTurn(msg: ChatMessage) {
                           v-else-if="item.type === 'media'"
                           :attachment="item.attachment"
                           :compact="compact"
+                          :session-key="effectiveKey || undefined"
+                          :hermes-media="effectiveProvider === 'hermes'"
+                          :streaming="msg.streaming"
                           @preview-image="openImageLightbox"
                           @open-file="fp => emit('openFile', fp)"
                           @handoff="art => shareAsHandoff(msg, art)"
@@ -2858,7 +2852,7 @@ async function retryTurn(msg: ChatMessage) {
                 type="button"
                 class="chip-thumb-btn"
                 :title="`查看大图：${file.name}`"
-                @click="openImageLightbox(queuedFileThumb(file)!, file.name)"
+                @click="openQueuedImageLightbox(file)"
               >
                 <img :src="queuedFileThumb(file)" :alt="file.name" class="chip-thumb" />
               </button>

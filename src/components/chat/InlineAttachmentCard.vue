@@ -1,6 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { isAndroidLocal } from '../../desktop/androidLocal'
+import { decodeBase64Url } from '../../services/blobTransfer'
 import type { InlineMediaAttachment } from '../../services/messageSegments'
+import { saveBlobToDevice } from '../../services/saveDownload'
 import { useFleetStore } from '../../stores/fleet'
 import type { ArtifactRef } from '../../types/fleet'
 import OpusIcon from '../ui/OpusIcon.vue'
@@ -9,6 +12,9 @@ import { formatBytes } from './providerMeta'
 const props = defineProps<{
   attachment: InlineMediaAttachment
   compact?: boolean
+  sessionKey?: string
+  hermesMedia?: boolean
+  streaming?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -22,6 +28,13 @@ const fleet = useFleetStore()
 const downloading = ref(false)
 const previewFailed = ref(false)
 const loadingPreview = ref(false)
+const imageButton = ref<HTMLButtonElement | null>(null)
+const hermesPreviewUrl = ref('')
+const mediaError = ref('')
+let previewController: AbortController | undefined
+const hermesReference = computed(() => props.hermesMedia && !props.attachment.artifact && !props.attachment.url
+  ? props.attachment.filePath : undefined)
+const opensWorkspaceFile = computed(() => Boolean(props.attachment.filePath && !hermesReference.value))
 
 onMounted(async () => {
   if (props.attachment.artifact && props.attachment.mime.startsWith('image/')) {
@@ -32,6 +45,7 @@ onMounted(async () => {
 })
 
 const effectiveUrl = computed(() => {
+  if (hermesPreviewUrl.value) return hermesPreviewUrl.value
   if (props.attachment.url) return props.attachment.url
   if (props.attachment.artifact) {
     return fleet.imagePreviewByArtifactId[props.attachment.artifact.artifactId] || ''
@@ -52,6 +66,7 @@ const isAudio = computed(() =>
 )
 
 const subLabel = computed(() => {
+  if (mediaError.value) return mediaError.value
   const parts: string[] = []
   if (props.attachment.sizeBytes && props.attachment.sizeBytes > 0) {
     parts.push(formatBytes(props.attachment.sizeBytes))
@@ -60,19 +75,71 @@ const subLabel = computed(() => {
     parts.push('AES-256-GCM')
   } else if (props.attachment.mime && props.attachment.mime !== 'application/octet-stream') {
     parts.push(props.attachment.mime)
-  } else if (props.attachment.filePath) {
+  } else if (opensWorkspaceFile.value && props.attachment.filePath) {
     parts.push(props.attachment.filePath)
   }
   return parts.join(' · ') || '文件附件'
 })
 
 function handleCardClick() {
-  if (props.attachment.filePath) {
+  if (opensWorkspaceFile.value && props.attachment.filePath) {
     emit('openFile', props.attachment.filePath)
   }
 }
 
-function openImage() {
+async function loadHermesPreview() {
+  const key = props.sessionKey
+  const reference = hermesReference.value
+  if (!reference || !key || previewController || hermesPreviewUrl.value) return
+  const controller = new AbortController()
+  previewController = controller
+  loadingPreview.value = true
+  mediaError.value = ''
+  try {
+    const blob = await fleet.readHermesAttachment(key, reference, 'preview', controller.signal)
+    if (!controller.signal.aborted) hermesPreviewUrl.value = URL.createObjectURL(blob)
+  } catch (error) {
+    if (!controller.signal.aborted) mediaError.value = error instanceof Error ? error.message : '图片预览失败'
+  } finally {
+    if (previewController === controller) {
+      previewController = undefined
+      loadingPreview.value = false
+    }
+  }
+}
+
+watch([imageButton, hermesReference, () => props.sessionKey, () => props.attachment.id, () => props.streaming],
+  ([button, reference, key, , streaming], _previous, onCleanup) => {
+    mediaError.value = ''
+    previewFailed.value = false
+    let observer: IntersectionObserver | undefined
+    onCleanup(() => {
+      observer?.disconnect()
+      previewController?.abort()
+      previewController = undefined
+      loadingPreview.value = false
+      if (hermesPreviewUrl.value) URL.revokeObjectURL(hermesPreviewUrl.value)
+      hermesPreviewUrl.value = ''
+    })
+    if (!reference || !key || !button || streaming) return
+    if (typeof IntersectionObserver === 'undefined') {
+      void loadHermesPreview()
+    } else {
+      observer = new IntersectionObserver(entries => {
+        if (!entries.some(entry => entry.isIntersecting)) return
+        observer?.disconnect()
+        void loadHermesPreview()
+      })
+      observer.observe(button)
+    }
+  },
+)
+
+async function openImage() {
+  const reference = hermesReference.value
+  const key = props.sessionKey
+  if (reference && !hermesPreviewUrl.value) await loadHermesPreview()
+  if (reference !== hermesReference.value || key !== props.sessionKey) return
   const artifact = props.attachment.artifact
   emit(
     'previewImage',
@@ -83,35 +150,84 @@ function openImage() {
   )
 }
 
+async function readDownloadBlob(url: string): Promise<Blob> {
+  // Tauri allows these URLs as image sources, but its CSP blocks fetching them.
+  const dataUrl = /^data:([^,]*),/i.exec(url)
+  if (dataUrl) {
+    const metadata = dataUrl[1]
+    const payloadStart = dataUrl[0].length
+    const fragmentStart = url.indexOf('#', payloadStart)
+    const payload = url.slice(payloadStart, fragmentStart === -1 ? undefined : fragmentStart)
+    const type = metadata.replace(/;base64$/i, '') || 'text/plain;charset=US-ASCII'
+    if (/;base64$/i.test(metadata)) {
+      return new Blob([decodeBase64Url(decodeURIComponent(payload))], { type })
+    }
+    const bytes = new TextEncoder().encode(payload)
+    let length = 0
+    for (let i = 0; i < bytes.length; i += 1) {
+      if (bytes[i] === 0x25 && i + 2 < bytes.length) {
+        const hex = String.fromCharCode(bytes[i + 1], bytes[i + 2])
+        if (/^[\da-f]{2}$/i.test(hex)) {
+          bytes[length++] = Number.parseInt(hex, 16)
+          i += 2
+          continue
+        }
+      }
+      bytes[length++] = bytes[i]
+    }
+    return new Blob([bytes.subarray(0, length)], { type })
+  }
+  const response = await fetch(url)
+  if (!response.ok) throw new Error('下载失败')
+  return response.blob()
+}
+
 async function handleDownload() {
   if (downloading.value) return
-  if (props.attachment.artifact) {
-    downloading.value = true
-    try {
-      await fleet.downloadArtifactToBrowser(props.attachment.artifact)
-      emit('status', `已解密下载 ${props.attachment.fileName}`)
-    } catch (err) {
-      emit('status', err instanceof Error ? err.message : '下载失败')
-    } finally {
-      downloading.value = false
+  const { artifact, fileName, filePath } = props.attachment
+  const reference = hermesReference.value
+  const url = effectiveUrl.value
+  const android = isAndroidLocal()
+  const androidStatus = '已保存到 Download/Studiolo'
+  downloading.value = true
+  if (reference) mediaError.value = ''
+  try {
+    if (artifact) {
+      await fleet.downloadArtifactToBrowser(artifact)
+      emit('status', android ? androidStatus : `已解密下载 ${fileName}`)
+    } else if (reference) {
+      if (!props.sessionKey) throw new Error('找不到附件所属的 Hermes 会话')
+      const blob = await fleet.readHermesAttachment(props.sessionKey, reference, 'download')
+      await saveBlobToDevice(blob, fileName)
+      emit('status', android ? androidStatus : `正在下载 ${fileName}`)
+    } else if (url) {
+      const blob = await readDownloadBlob(url).catch(error => {
+        if (android || !/^(?:https?:)?\/\//i.test(url)) throw error
+        // Preserve browser navigation for external URLs that cannot be fetched (for example, CORS).
+        const link = document.createElement('a')
+        link.href = url
+        link.download = fileName || 'download'
+        link.target = '_blank'
+        link.rel = 'noopener noreferrer'
+        document.body.appendChild(link)
+        link.click()
+        link.remove()
+        return null
+      })
+      if (blob) await saveBlobToDevice(blob, fileName)
+      emit('status', android ? androidStatus : `正在下载 ${fileName}`)
+    } else if (filePath) {
+      const onSaved = android ? () => emit('status', androidStatus) : undefined
+      if (fleet.downloadWorkspaceFile(filePath, props.sessionKey, onSaved)) {
+        emit('status', `正在请求节点下载 ${fileName}`)
+      }
     }
-    return
-  }
-  if (effectiveUrl.value) {
-    const a = document.createElement('a')
-    a.href = effectiveUrl.value
-    a.download = props.attachment.fileName || 'download'
-    a.target = '_blank'
-    a.rel = 'noopener noreferrer'
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    emit('status', `正在下载 ${props.attachment.fileName}`)
-    return
-  }
-  if (props.attachment.filePath) {
-    fleet.downloadWorkspaceFile(props.attachment.filePath)
-    emit('status', `正在请求节点下载 ${props.attachment.fileName}`)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '下载失败'
+    if (reference) mediaError.value = message
+    emit('status', message)
+  } finally {
+    downloading.value = false
   }
 }
 </script>
@@ -119,6 +235,7 @@ async function handleDownload() {
 <template>
   <div v-if="isImage" class="inline-att-img-card">
     <button
+      ref="imageButton"
       type="button"
       class="inline-att-img-btn"
       :aria-label="`预览图片：${attachment.fileName}`"
@@ -135,7 +252,7 @@ async function handleDownload() {
       />
       <span v-else class="inline-att-img-placeholder">
         <OpusIcon name="file" />
-        {{ loadingPreview ? '正在加载图片…' : attachment.fileName }}
+        {{ loadingPreview ? '正在加载图片…' : mediaError || attachment.fileName }}
       </span>
     </button>
   </div>
@@ -162,19 +279,19 @@ async function handleDownload() {
   <div
     v-else
     class="inline-att-file-card"
-    :class="{ 'is-clickable': Boolean(attachment.filePath) }"
-    :data-pressable="attachment.filePath ? '' : undefined"
+    :class="{ 'is-clickable': opensWorkspaceFile }"
+    :data-pressable="opensWorkspaceFile ? '' : undefined"
     @click="handleCardClick"
   >
     <div class="inline-att-file-ic">
       <OpusIcon name="file" />
     </div>
     <div class="inline-att-file-copy">
-      <div class="inline-att-name" :title="attachment.filePath || attachment.fileName">{{ attachment.fileName }}</div>
+      <div class="inline-att-name" :title="opensWorkspaceFile ? attachment.filePath : attachment.fileName">{{ attachment.fileName }}</div>
       <div class="inline-att-sub">{{ subLabel }}</div>
     </div>
     <button
-      v-if="attachment.filePath"
+      v-if="opensWorkspaceFile && attachment.filePath"
       type="button"
       class="btn btn-subtle btn-sm"
       title="在文件抽屉中预览"

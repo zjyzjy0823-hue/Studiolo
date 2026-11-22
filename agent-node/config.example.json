@@ -11,6 +11,12 @@
     "port": 18910,
     "advertiseUrls": []
   },
+  "hermesMedia": {
+    "baseUrl": "",
+    "tokenFile": "",
+    "maxBytes": 33554432,
+    "timeoutSeconds": 30
+  },
   "providers": {
     "codex": { "enabled": true, "command": "codex" },
     "opencode": { "enabled": true, "serveUrl": "http://127.0.0.1:4096" },

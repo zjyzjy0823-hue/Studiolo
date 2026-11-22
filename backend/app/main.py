@@ -21,6 +21,7 @@ from .api.devices.routes import router as devices_router, legacy_router as legac
 from .api.websites import router as websites_router
 from .api.agent_actions import router as agent_actions_router
 from .fleet.routes import router as fleet_router, ws_router as fleet_ws_router
+from .fleet.media import MediaRelay
 from .space.routes import router as space_router
 from .scheduler.routes import router as scheduler_router
 from .realtime.events import Event
@@ -59,6 +60,8 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        for transfer_id in list(_app.state.hermes_media.transfers):
+            _app.state.hermes_media.discard(transfer_id)
         if automation is not None:
             await automation.stop()
             _app.state.automation_engine = None
@@ -69,6 +72,11 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Studiolo API", version=APP_VERSION, lifespan=lifespan)
+app.state.hermes_media = MediaRelay(
+    runtime_config.hermes_media_max_bytes,
+    runtime_config.hermes_media_timeout_seconds,
+    runtime_config.hermes_media_ticket_seconds,
+)
 native_origins = ("http://tauri.localhost", "https://tauri.localhost", "tauri://localhost")
 app.add_middleware(
     CORSMiddleware,

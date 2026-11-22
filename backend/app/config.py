@@ -27,6 +27,9 @@ class RuntimeConfig:
     vault_master_key: str = field(default="", repr=False)
     space_max_file_bytes: int = 50 * 1024 * 1024
     space_default_quota_bytes: int = 500 * 1024 * 1024
+    hermes_media_max_bytes: int = 32 * 1024 * 1024
+    hermes_media_timeout_seconds: int = 35
+    hermes_media_ticket_seconds: int = 60
 
 
 def load_runtime_config(environ: Mapping[str, str] | None = None) -> RuntimeConfig:
@@ -81,6 +84,13 @@ def load_runtime_config(environ: Mapping[str, str] | None = None) -> RuntimeConf
         space_max_file_bytes,
         int(environ.get("STUDIOLO_SPACE_DEFAULT_QUOTA_BYTES", str(500 * 1024 * 1024))),
     )
+    hermes_media_max_bytes = int(environ.get("STUDIOLO_HERMES_MEDIA_MAX_BYTES", str(32 * 1024 * 1024)))
+    hermes_media_timeout_seconds = int(environ.get("STUDIOLO_HERMES_MEDIA_TIMEOUT_SECONDS", "35"))
+    hermes_media_ticket_seconds = int(environ.get("STUDIOLO_HERMES_MEDIA_TICKET_SECONDS", "60"))
+    if not 0 < hermes_media_max_bytes <= 32 * 1024 * 1024:
+        raise RuntimeError("Hermes media byte limit must be between 1 byte and 32 MiB")
+    if not (0 < hermes_media_timeout_seconds <= 120 and 0 < hermes_media_ticket_seconds <= 300):
+        raise RuntimeError("Invalid Hermes media timeout or ticket lifetime")
 
     return RuntimeConfig(
         mode=mode,
@@ -95,4 +105,7 @@ def load_runtime_config(environ: Mapping[str, str] | None = None) -> RuntimeConf
         vault_master_key=vault_master_key,
         space_max_file_bytes=space_max_file_bytes,
         space_default_quota_bytes=space_default_quota_bytes,
+        hermes_media_max_bytes=hermes_media_max_bytes,
+        hermes_media_timeout_seconds=hermes_media_timeout_seconds,
+        hermes_media_ticket_seconds=hermes_media_ticket_seconds,
     )
