@@ -68,7 +68,6 @@ html:active-view-transition-type(tab)::view-transition-new(m-view) { animation: 
 .mcard-h .i { width: 16px; height: 16px; }
 .quick { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }
 .quick button { display: grid; justify-items: center; gap: 6px; padding: 12px 4px; border-radius: 18px; font-size: 12px; font-weight: 550; color: var(--text-2); transition: scale var(--dur-1) var(--ease-out); }
-.quick button:active { scale: calc(1 - .05 * var(--move)); }
 .quick .qi { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 14px; background: var(--accent-soft); color: var(--accent); }
 .quick .qi .i { width: 20px; height: 20px; }
 .mbig { font-size: 32px; font-weight: 720; letter-spacing: -.02em; line-height: 1.1; }
@@ -85,9 +84,8 @@ html:active-view-transition-type(tab)::view-transition-new(m-view) { animation: 
 
 /* 列表 */
 .mlist { border-radius: 20px; overflow: hidden; margin-bottom: 12px; }
-.mrow { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 60px; padding: 10px 14px; text-align: left; transition: background-color var(--dur-1); }
+.mrow { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 60px; padding: 10px 14px; text-align: left; transition: background-color var(--dur-1), scale var(--dur-1) var(--ease-out); }
 .mrow + .mrow { border-top: 1px solid var(--line); }
-.mrow:active { background: var(--surface-3); }
 .mrow .grow { flex: 1; min-width: 0; }
 .mrow .title { font-weight: 560; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mrow .sub { font-size: 12.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; gap: 6px; align-items: center; }
@@ -170,7 +168,6 @@ html:active-view-transition-type(tab)::view-transition-new(m-view) { animation: 
 .mchips { display: flex; gap: 6px; overflow-x: auto; margin: 0 -16px 12px; padding: 0 16px; scrollbar-width: none; }
 .mchips .chip { height: 32px; padding: 0 13px; font-size: 13px; flex: none; }
 .jobcard { display: grid; gap: 8px; width: 100%; padding: 14px 16px; border-radius: 20px; margin-bottom: 10px; text-align: left; transition: scale var(--dur-1) var(--ease-out); }
-.jobcard:active { scale: calc(1 - .02 * var(--move)); }
 .jobcard .top { display: flex; align-items: center; gap: 8px; }
 .jobcard .top b { font-size: 15.5px; font-weight: 620; flex: 1; }
 .jobcard .meta { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--text-3); }
@@ -200,7 +197,6 @@ html:active-view-transition-type(tab)::view-transition-new(m-view) { animation: 
 .tab-add { display: grid; place-items: center; }
 .tab-add button { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 18px; background: var(--accent); color: var(--accent-ink); box-shadow: 0 8px 20px -6px color-mix(in srgb, var(--accent) 60%, transparent); transition: scale var(--dur-2) var(--ease-spring), rotate var(--dur-3) var(--ease-spring); }
 .tab-add button .i { width: 26px; height: 26px; stroke-width: 2.2; }
-.tab-add button:active { scale: calc(1 - .08 * var(--move)); }
 .tab-add button[aria-expanded="true"] { rotate: calc(45deg * var(--move)); }
 .home-ind { position: absolute; z-index: 21; left: 50%; bottom: 5px; translate: -50% 0; width: 130px; height: 5px; border-radius: 3px; background: var(--text); opacity: .35; }
 
@@ -235,7 +231,6 @@ html:active-view-transition-type(tab)::view-transition-new(m-view) { animation: 
 .cats .chip { height: 32px; padding: 0 12px; font-size: 13px; flex: none; }
 .keypad { display: grid; grid-template-columns: repeat(3, 1fr) 1.15fr; gap: 6px; }
 .keypad button { height: 52px; border-radius: 14px; background: var(--surface-3); font-size: 21px; font-weight: 550; transition: background-color var(--dur-1), scale var(--dur-1); }
-.keypad button:active { scale: calc(1 - .05 * var(--move)); background: var(--line-strong); }
 .keypad .save { grid-column: 4; grid-row: 2 / span 3; height: auto; background: var(--accent); color: var(--accent-ink); font-size: 16px; font-weight: 650; }
 .keypad .save:disabled { opacity: .45; }
 .offline-note { display: flex; align-items: center; gap: 6px; justify-content: center; font-size: 12px; color: var(--text-3); margin-top: 10px; }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ExternalLink as ExternalIcon, RefreshCw } from 'lucide-vue-next'
 import ExternalLink from './ExternalLink.vue'
 import { useFleetStore } from '../../stores/fleet'
@@ -39,6 +39,15 @@ const rows = computed(() => providers.map(provider => {
   }
 }))
 
+for (const provider of providers) {
+  watch(() => {
+    const row = rows.value.find(item => item.id === provider.id)
+    return row?.canRead ? row.node?.id : undefined
+  }, nodeId => {
+    if (nodeId) void fleet.refreshSubscriptionQuota(nodeId, provider.id)
+  }, { immediate: true })
+}
+
 function status(row: (typeof rows.value)[number]) {
   if (demo) return '示例数据'
   if (row.busy) return '正在读取额度…'
@@ -50,7 +59,7 @@ function status(row: (typeof rows.value)[number]) {
     : 'Codex 未返回订阅额度'
   if (row.quota?.status === 'unsupported') return '当前 Core 或 Agent Node 版本暂不支持读取'
   if (row.quota?.status === 'unavailable') return `读取失败，请检查 ${row.label} 连接`
-  return row.quota?.checkedAt ? `读取于 ${clock.format(row.quota.checkedAt * 1000)}` : '点击读取额度'
+  return row.quota?.checkedAt ? `读取于 ${clock.format(row.quota.checkedAt * 1000)}` : '连接就绪后自动刷新'
 }
 
 function windowLabel(window: SubscriptionQuotaWindow) {
@@ -78,7 +87,7 @@ function windowLabel(window: SubscriptionQuotaWindow) {
         </select>
         <button v-if="row.id === 'codex' && fleet.coreSignInUrl && !demo" class="btn btn-sm btn-subtle quota-action" type="button" @click="emit('signIn')">登录 Core Fleet</button>
         <button v-if="row.canRead && row.node" class="btn btn-sm btn-subtle quota-action" type="button" :disabled="row.busy" @click="fleet.refreshSubscriptionQuota(row.node.id, row.id)">
-          <RefreshCw :size="13" aria-hidden="true" /> {{ row.quota ? '刷新额度' : '读取额度' }}
+          <RefreshCw :size="13" aria-hidden="true" /> {{ row.quota?.status === 'unavailable' ? '重试' : '刷新额度' }}
         </button>
         <ExternalLink v-if="row.id === 'opencode'" class="btn btn-sm btn-subtle quota-action" href="https://opencode.ai/console" @action="emit('action', $event)">
           打开控制台 <ExternalIcon :size="12" aria-hidden="true" />

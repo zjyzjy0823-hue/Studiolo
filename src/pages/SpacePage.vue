@@ -302,20 +302,24 @@ async function handleSelectEntry(entryId: string) {
 }
 
 function handleMobileBack() {
+  if (!props.mobile) return false
   if (mobilePanel.value === 'canvas') {
     if (activeTab.value !== 'entries') {
       activeTab.value = 'entries'
     }
     mobilePanel.value = 'entries'
     spaceStore.clearSensitiveMemory()
-    return
+    return true
   }
   if (mobilePanel.value === 'entries') {
     mobilePanel.value = 'spaces'
     spaceStore.clearSensitiveMemory()
-    return
+    return true
   }
-  emit('back')
+  return false
+}
+function backFromSpace() {
+  if (!handleMobileBack()) emit('back')
 }
 
 // ---------------------------------------------------------------------------
@@ -980,6 +984,7 @@ onUnmounted(() => {
 
 defineExpose({
   openSpace: handleSelectSpace,
+  handleMobileBack,
   openSpaceList: () => { mobilePanel.value = 'spaces' },
 })
 </script>
@@ -1005,7 +1010,7 @@ defineExpose({
 
     <!-- 移动端顶栏 -->
     <div v-if="mobile" class="navbar">
-      <button type="button" class="icon-btn" aria-label="返回" @click="handleMobileBack">
+      <button type="button" class="icon-btn" aria-label="返回" @click="backFromSpace">
         <OpusIcon name="chevL" />
       </button>
       <div class="t">{{ mobileHeaderTitle }}</div>

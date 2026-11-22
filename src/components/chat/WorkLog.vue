@@ -122,7 +122,7 @@ const label = computed(() => {
   border-radius: 50%;
 }
 .work-log-timeline {
-  --work-step-height: 26px;
+  --work-step-height: 24px;
   display: grid;
   padding: 1px 2px 0 10px;
   margin: 0;
@@ -173,7 +173,8 @@ const label = computed(() => {
   .work-log-spinner { animation: work-log-spin .85s linear infinite; }
 }
 @media (pointer: coarse) {
-  .work-log-toggle { min-height: 44px; }
-  .work-log-timeline { --work-step-height: 44px; }
+  .work-log-toggle { min-height: 36px; }
+  .work-log-timeline { --work-step-height: 32px; }
+  .thought-label { width: 100%; }
 }
 </style>

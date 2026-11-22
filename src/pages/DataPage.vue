@@ -117,7 +117,13 @@ async function openCreate() {
   await nextTick()
   nameInput.value?.focus()
 }
-defineExpose({ openCreate, openCreateRecord: () => {
+function handleMobileBack() {
+  if (!mobileRecord.value) return false
+  mobileRecord.value = null
+  emit('mobileDetail', false)
+  return true
+}
+defineExpose({ openCreate, handleMobileBack, openCreateRecord: () => {
   if (selectedCollection.value) void openRecord()
   else void openCreate()
 } })
@@ -210,7 +216,7 @@ onUnmounted(() => {
 <template>
   <div v-if="mobile && mobileRecord" class="mpage push">
     <div class="navbar">
-      <button class="icon-btn" type="button" aria-label="返回" @click="showMobileRecord(null)"><OpusIcon name="chevL" /></button>
+      <button class="icon-btn" type="button" aria-label="返回" @click="handleMobileBack"><OpusIcon name="chevL" /></button>
       <div class="t">{{ mobileRecord.name }}</div>
       <button class="icon-btn" type="button" aria-label="编辑记录" @click="mobileRecord && openRecord(mobileRecord)"><OpusIcon name="pencil" /></button>
     </div>
@@ -264,7 +270,7 @@ onUnmounted(() => {
         </div>
         <div style="overflow:auto;flex:1">
           <table class="tbl"><thead><tr><th>名称</th><th>状态</th><th>分类</th><th>更新时间</th></tr></thead>
-            <tbody><tr v-for="item in visibleRecords" :key="item.id" :class="{ 'is-selected': focusedRecord?.id === item.id, flash: flashRecordId === item.id }" @click="focusedRecord = item">
+            <tbody><tr v-for="item in visibleRecords" :key="item.id" :class="{ 'is-selected': focusedRecord?.id === item.id, flash: flashRecordId === item.id }" data-pressable @click="focusedRecord = item">
               <td style="font-weight:550"><button type="button" @click.stop="focusedRecord = item">{{ item.name }}</button></td><td class="muted">{{ item.status }}</td><td class="muted">{{ item.category || '未分类' }}</td><td class="muted">{{ item.updatedAt.slice(0, 10) }}</td>
             </tr></tbody>
           </table>

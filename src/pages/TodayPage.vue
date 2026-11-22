@@ -20,6 +20,7 @@ import DashboardGauge from '../components/ui/DashboardGauge.vue'
 import OpusIcon from '../components/ui/OpusIcon.vue'
 import TokenUsageChart from '../components/ui/TokenUsageChart.vue'
 import SubscriptionQuotaPanel from '../components/ui/SubscriptionQuotaPanel.vue'
+import { desktopPlatform } from '../desktop/platform'
 import type { SyncStatus } from '../api/sync'
 import { useAuthStore } from '../stores/auth'
 import { useLedgerStore } from '../stores/ledger'
@@ -475,6 +476,7 @@ async function submitCapture() {
 
 onMounted(async () => {
   if (!auth.token) return
+  if (desktopPlatform() === 'web') void fleet.loadNodes()
   await Promise.allSettled([
     ledger.load(auth.token),
     automation.load(auth.token),
@@ -749,14 +751,14 @@ onUnmounted(() => {
           <TokenUsageChart :key="revealSeq" :dates="usageDates" :records="tokenRecords" :report="usageReport" />
         </section>
 
-        <section class="deliv-card deliv-wide quota-card" aria-labelledby="h-subscription-quota">
-          <div class="deliv-head">
-            <span class="deliv-icon"><Gauge :size="15" :stroke-width="1.9" /></span>
-            <div class="deliv-head-copy"><strong id="h-subscription-quota">订阅额度</strong></div>
-          </div>
-          <SubscriptionQuotaPanel @sign-in="emit('navigate', 'Chat')" @action="emit('action', $event)" />
-        </section>
       </template>
+      <section v-show="!showSkeleton" class="deliv-card deliv-wide quota-card" aria-labelledby="h-subscription-quota">
+        <div class="deliv-head">
+          <span class="deliv-icon"><Gauge :size="15" :stroke-width="1.9" /></span>
+          <div class="deliv-head-copy"><strong id="h-subscription-quota">订阅额度</strong></div>
+        </div>
+        <SubscriptionQuotaPanel @sign-in="emit('navigate', 'Chat')" @action="emit('action', $event)" />
+      </section>
     </section>
   </div>
   </div>

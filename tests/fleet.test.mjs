@@ -893,6 +893,20 @@ test('工作记录折叠思考与连续工具，保留旧历史与穿插正文�
   assert.deepEqual(old[0].steps.map(step => step.type), ['thought', 'tool'])
 })
 
+test('leaves literal media labels in prose while extracting later attachments once', () => {
+  const intro = 'Use MEDIA: as a label'
+  const middle = 'Second @image: example'
+  const reply = `${intro}\nMEDIA:/tmp/chart.png\n${middle}\n@file:/tmp/report.pdf`
+
+  assert.deepEqual(extractHostMediaDirectives(reply), [
+    { match: 'MEDIA:/tmp/chart.png', path: '/tmp/chart.png', offset: intro.length },
+    { match: '@file:/tmp/report.pdf', path: '/tmp/report.pdf', offset: `${intro}\n\n${middle}`.length },
+  ])
+  assert.deepEqual(splitTextByInlineMedia(reply, []).segments.map(segment =>
+    segment.type === 'text' ? segment.text : segment.attachment.fileName,
+  ), [intro, 'chart.png', middle, 'report.pdf'])
+})
+
 test('hermes-mobile 风格正文内联媒体分段：MEDIA 指令、路径引用穿插与代码围栏闭合保护', () => {
   // 1. MEDIA:<path> 指令提取与剥离
   const rawWithDirective = '第一段说明文字\nMEDIA:/tmp/chart.png\n第二段结论分析'
