@@ -297,7 +297,11 @@ fn setup_macos_menu(app: &tauri::App) -> tauri::Result<()> {
 pub fn run() {
     let builder = tauri::Builder::default();
     #[cfg(target_os = "android")]
-    let builder = builder.plugin(android::plugin()).plugin(android::notifications_plugin()).invoke_handler(tauri::generate_handler![
+    let builder = builder
+        .plugin(android::plugin())
+        .plugin(android::notifications_plugin())
+        .plugin(android::downloads_plugin())
+        .invoke_handler(tauri::generate_handler![
         desktop_platform, backend_status, open_external_url,
         fleet::fleet_connect, fleet::fleet_disconnect, fleet::fleet_send, fleet::fleet_notifications,
         android::android_validate_core_url, android::android_core_status, android::android_core_prepare,
@@ -311,7 +315,7 @@ pub fn run() {
         android::android_sync_rejected_list, android::android_sync_rejected_dismiss, android::android_sync_rejected_retry,
         android::android_notifications_enabled, android::android_set_notifications_enabled, android::android_show_fleet_notification,
         android::android_show_fleet_approval, android::android_listen_fleet_approval,
-        android::android_read_device_space,
+        android::android_read_device_space, android::android_save_attachment,
     ]);
     #[cfg(not(target_os = "android"))]
     let builder = builder.invoke_handler(tauri::generate_handler![

@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -8,6 +8,7 @@ use studiolo_local_core::{
     SyncStatus, Website, WebsiteFilters, WebsitePatch,
 };
 use tauri::plugin::{Builder, PluginHandle, TauriPlugin};
+use tauri::plugin::mobile::PluginInvokeError;
 use tauri::{AppHandle, Manager, State, Wry};
 use tokio::sync::{Mutex, OnceCell, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use uuid::Uuid;
@@ -129,6 +130,52 @@ pub(crate) fn notifications_plugin() -> TauriPlugin<Wry> {
 }
 
 type CommandResult<T> = std::result::Result<T, String>;
+
+pub(crate) struct AndroidDownloads {
+    handle: PluginHandle<Wry>,
+    save_lock: Mutex<()>,
+}
+
+pub(crate) fn downloads_plugin() -> TauriPlugin<Wry> {
+    Builder::new("studiolo-android-downloads")
+        .setup(|app, api| {
+            let handle = api.register_android_plugin("com.isidel.studiolo", "AndroidDownloads")?;
+            app.manage(AndroidDownloads { handle, save_lock: Mutex::new(()) });
+            Ok(())
+        })
+        .build()
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SavedDownload {
+    saved: bool,
+    display_path: String,
+}
+
+impl AndroidDownloads {
+    async fn invoke(&self, command: &str, payload: Value) -> CommandResult<SavedDownload> {
+        let _save = self.save_lock.lock().await;
+        self.handle
+            .run_mobile_plugin_async(command, payload)
+            .await
+            .map_err(|error| match error {
+                PluginInvokeError::InvokeRejected(response) => {
+                    response.code.unwrap_or_else(|| "download_failed".into())
+                }
+                _ => "download_failed".into(),
+            })
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn android_save_attachment(
+    state: State<'_, AndroidDownloads>,
+    name: String,
+    base64: String,
+) -> CommandResult<SavedDownload> {
+    state.invoke("saveDownload", json!({ "name": name, "base64": base64 })).await
+}
 
 impl AndroidNotifications {
     async fn invoke(&self, command: &str, payload: Value) -> CommandResult<bool> {

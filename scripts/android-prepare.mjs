@@ -58,7 +58,7 @@ const copy = async (file, destination) => {
 }
 
 await copy('LocalCorePlugin.kt', join(android, 'java', ...config.identifier.split('.'), 'LocalCorePlugin.kt'))
-for (const file of ['AndroidNotifications.kt', 'FleetConnectionService.kt', 'MainActivity.kt']) {
+for (const file of ['AndroidNotifications.kt', 'AndroidDownloads.kt', 'FleetConnectionService.kt', 'MainActivity.kt']) {
   await copy(file, join(android, 'java', ...config.identifier.split('.'), file))
 }
 for (const resource of ['studiolo_backup_rules.xml', 'studiolo_data_extraction_rules.xml', 'studiolo_network_security.xml']) {
@@ -141,6 +141,10 @@ for (const permission of ['POST_NOTIFICATIONS', 'FOREGROUND_SERVICE', 'FOREGROUN
     manifest = manifest.replace(/<uses-permission\b[^>]*android.permission.INTERNET[^>]*\/>/,
       '$&\n    <uses-permission android:name="android.permission.' + permission + '" />')
   }
+}
+if (!manifest.includes('android.permission.WRITE_EXTERNAL_STORAGE"')) {
+  manifest = manifest.replace(/<uses-permission\b[^>]*android.permission.INTERNET[^>]*\/>/,
+    '$&\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />')
 }
 if (!manifest.includes('android:name=".FleetConnectionService"')) {
   manifest = manifest.replace(/<application\b[^>]*>/s, '$&\n' +
