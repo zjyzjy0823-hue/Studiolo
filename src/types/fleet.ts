@@ -473,6 +473,7 @@ export interface ChatMessage {
   activeBranchIndex?: number
   durationMs?: number
   turnTokens?: number
+  turnOutputTokens?: number
   modelLabel?: string
   systemEvents?: ChatSystemEvent[]
   createdAt: number

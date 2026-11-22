@@ -25,7 +25,7 @@ import {
   saveCustomPrompt,
   type CustomPromptTemplate,
 } from '../../services/customPrompts'
-import { formatTokenCount } from '../../services/tokenUsage'
+import { estimateTextTokens, formatTokenCount } from '../../services/tokenUsage'
 import { findProjectPermission, supportsChatPermission } from '../../services/projectPermissions'
 import type {
   ApprovalDecision,
@@ -36,7 +36,7 @@ import type {
   PastedTextBlock,
   ToolCallBadge,
 } from '../../types/fleet'
-import { LoaderCircle } from 'lucide-vue-next'
+import { LoaderCircle, Square, Volume2 } from 'lucide-vue-next'
 import OpusIcon from '../ui/OpusIcon.vue'
 import ChangedFilesSummaryBar from './ChangedFilesSummaryBar.vue'
 import FormQuestionCard from './FormQuestionCard.vue'
@@ -1086,11 +1086,6 @@ async function switchModelAndRetry(modelId: string, msgIndex: number) {
   await handleRegenerate(msgIndex)
 }
 
-function formatDurationShort(ms?: number): string {
-  if (ms === undefined || ms === null || Number.isNaN(ms) || ms <= 0) return ''
-  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`
-}
-
 // 自定义 Prompt 模板与节点信任命令白名单
 const customPrompts = ref<CustomPromptTemplate[]>(loadCustomPrompts())
 const promptLibraryOpen = ref(false)
@@ -2093,6 +2088,48 @@ function formatMsgTime(ts: number): string {
   return new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
 }
 
+const canReadReplies = typeof window !== 'undefined'
+  && 'speechSynthesis' in window && typeof SpeechSynthesisUtterance !== 'undefined'
+const readingReplyId = ref<string>()
+let readingUtterance: SpeechSynthesisUtterance | undefined
+
+function stopReadingReply() {
+  if (!readingUtterance) return
+  readingUtterance = undefined
+  readingReplyId.value = undefined
+  window.speechSynthesis.cancel()
+}
+
+function toggleReadingReply(msg: ChatMessage) {
+  const wasReading = readingReplyId.value === msg.id
+  stopReadingReply()
+  if (!canReadReplies || wasReading || !msg.text?.trim()) return
+  const utterance = new SpeechSynthesisUtterance(msg.text)
+  utterance.lang = document.documentElement.lang || navigator.language
+  readingUtterance = utterance
+  readingReplyId.value = msg.id
+  const finish = () => {
+    if (readingUtterance !== utterance) return
+    readingUtterance = undefined
+    readingReplyId.value = undefined
+  }
+  utterance.onend = finish
+  utterance.onerror = () => {
+    if (readingUtterance !== utterance) return
+    finish()
+    emit('action', '当前设备无法朗读回复')
+  }
+  window.speechSynthesis.speak(utterance)
+}
+
+watch(effectiveKey, stopReadingReply)
+onUnmounted(stopReadingReply)
+
+function replyTokenRate(msg: ChatMessage) {
+  if (!msg.turnOutputTokens || !msg.durationMs || msg.durationMs <= 0) return null
+  return Math.round(msg.turnOutputTokens * 1000 / msg.durationMs)
+}
+
 async function copyMessageText(msg: ChatMessage) {
   if (!msg.text || !navigator.clipboard?.writeText) return
   try {
@@ -2341,57 +2378,55 @@ async function retryTurn(msg: ChatMessage) {
                       @status="emit('action', $event)"
                     />
                   </template>
-                </div>
-
-                <div class="user-foot">
-                  <div v-if="msg.branches && msg.branches.length > 1" class="branch-switcher">
-                    <button
-                      type="button"
-                      class="branch-nav-btn"
-                      aria-label="上一分支"
-                      :disabled="(msg.activeBranchIndex ?? 0) <= 0 || isStreaming"
-                      @click="fleet.switchBranch(effectiveKey, msgIdx, (msg.activeBranchIndex ?? 0) - 1)"
-                    >‹</button>
-                    <span class="num">{{ (msg.activeBranchIndex ?? 0) + 1 }} / {{ msg.branches.length }}</span>
-                    <button
-                      type="button"
-                      class="branch-nav-btn"
-                      aria-label="下一分支"
-                      :disabled="(msg.activeBranchIndex ?? 0) >= msg.branches.length - 1 || isStreaming"
-                      @click="fleet.switchBranch(effectiveKey, msgIdx, (msg.activeBranchIndex ?? 0) + 1)"
-                    >›</button>
-                  </div>
-                  <div class="user-hover-actions">
+                  <div class="user-foot">
+                    <div v-if="msg.branches && msg.branches.length > 1" class="branch-switcher">
+                      <button
+                        type="button"
+                        class="message-action branch-nav-btn"
+                        aria-label="上一分支"
+                        title="上一分支"
+                        :disabled="(msg.activeBranchIndex ?? 0) <= 0 || isStreaming"
+                        @click="fleet.switchBranch(effectiveKey, msgIdx, (msg.activeBranchIndex ?? 0) - 1)"
+                      ><OpusIcon name="chevL" /></button>
+                      <span class="num">{{ (msg.activeBranchIndex ?? 0) + 1 }} / {{ msg.branches.length }}</span>
+                      <button
+                        type="button"
+                        class="message-action branch-nav-btn"
+                        aria-label="下一分支"
+                        title="下一分支"
+                        :disabled="(msg.activeBranchIndex ?? 0) >= msg.branches.length - 1 || isStreaming"
+                        @click="fleet.switchBranch(effectiveKey, msgIdx, (msg.activeBranchIndex ?? 0) + 1)"
+                      ><OpusIcon name="chevR" /></button>
+                    </div>
                     <button
                       v-if="msg.text"
                       type="button"
-                      class="btn btn-subtle btn-sm"
-                      :class="{ 'is-copied': copiedMsgId === msg.id }"
+                      class="message-action"
+                      :aria-label="copiedMsgId === msg.id ? '已复制' : '复制'"
+                      :title="copiedMsgId === msg.id ? '已复制' : '复制'"
                       @click="copyMessageText(msg)"
-                    >
-                      <OpusIcon :name="copiedMsgId === msg.id ? 'check' : 'copy'" />
-                      <span>{{ copiedMsgId === msg.id ? '已复制' : '复制' }}</span>
-                    </button>
+                    ><OpusIcon :name="copiedMsgId === msg.id ? 'check' : 'copy'" /></button>
                     <button
                       v-if="!compact && effectiveKey && fleet.sessionsByKey[effectiveKey]"
                       type="button"
-                      class="btn btn-subtle btn-sm"
+                      class="message-action"
+                      aria-label="分支"
+                      title="分支"
                       @click="handleForkAt(msgIdx)"
-                    >
-                      <OpusIcon name="branch" />
-                      <span>分支</span>
-                    </button>
+                    ><OpusIcon name="branch" /></button>
+                    <span v-if="msg.createdAt" class="num">{{ formatMsgTime(msg.createdAt) }}</span>
+                    <span
+                      v-if="messageReceipts.get(msg.id)"
+                      class="message-receipt"
+                      :class="'is-' + messageReceipts.get(msg.id)"
+                      role="img"
+                      :aria-label="receiptStyles[messageReceipts.get(msg.id)!].label"
+                      :title="receiptStyles[messageReceipts.get(msg.id)!].label"
+                    ><OpusIcon :name="receiptStyles[messageReceipts.get(msg.id)!].icon" /></span>
+                    <span v-if="msg.text?.trim()" class="user-token-count num" title="估算输入 token">
+                      {{ formatTokenCount(estimateTextTokens(msg.text)) }} tok
+                    </span>
                   </div>
-                  <span
-                    v-if="messageReceipts.get(msg.id)"
-                    class="message-receipt"
-                    :class="`is-${messageReceipts.get(msg.id)}`"
-                    role="img"
-                    :aria-label="receiptStyles[messageReceipts.get(msg.id)!].label"
-                    :title="receiptStyles[messageReceipts.get(msg.id)!].label"
-                  >
-                    <OpusIcon :name="receiptStyles[messageReceipts.get(msg.id)!].icon" />
-                  </span>
                 </div>
               </div>
             </template>
@@ -2475,15 +2510,12 @@ async function retryTurn(msg: ChatMessage) {
 
                 <div
                   v-if="msg.role === 'assistant' && !msg.streaming && (msg.text || msg.error || msg.checkpointId || msg.diffSummary?.filesChanged || assistantTurns.get(msg.id)?.testResult)"
-                  class="msg-foot msg-foot--outside"
+                  class="msg-foot"
                 >
-                  <div class="msg-foot-meta">
-                    <span v-if="msg.createdAt" class="msg-time num" :title="usageTooltip">
-                      {{ formatMsgTime(msg.createdAt) }}
-                      <template v-if="msg.modelLabel"> · {{ msg.modelLabel }}</template>
-                      <template v-if="!assistantTurns.get(msg.id)?.singleLog && formatDurationShort(msg.durationMs)"> · {{ formatDurationShort(msg.durationMs) }}</template>
-                      <template v-if="msg.turnTokens"> · {{ formatTokenCount(msg.turnTokens) }} tok</template>
-                    </span>
+                  <div
+                    v-if="assistantTurns.get(msg.id)?.testResult || msg.checkpointId || msg.diffSummary?.filesChanged"
+                    class="msg-foot-details"
+                  >
                     <div v-if="assistantTurns.get(msg.id)?.testResult" class="turn-diff-bar" aria-label="本轮测试结果">
                       <span class="num">{{ assistantTurns.get(msg.id)?.testResult?.passed }} 项测试通过
                         <template v-if="assistantTurns.get(msg.id)?.testResult?.failed"> · {{ assistantTurns.get(msg.id)?.testResult?.failed }} 项失败</template>
@@ -2506,62 +2538,74 @@ async function retryTurn(msg: ChatMessage) {
                   </div>
                   <div class="msg-foot-actions">
                     <button
-                      v-if="msg.checkpointId && !isCheckpointReverted(msg.checkpointId)"
-                      type="button"
-                      class="btn btn-subtle btn-sm"
-                      title="撤销本轮产生的代码改动"
-                      @click="handleRevertCheckpoint(msg.checkpointId)"
-                    >
-                      <OpusIcon name="history" />
-                      <span>回滚此轮</span>
-                    </button>
-                    <button
                       v-if="msg.text"
                       type="button"
-                      class="btn btn-subtle btn-sm"
-                      :class="{ 'is-copied': copiedMsgId === msg.id }"
+                      class="message-action"
+                      :aria-label="copiedMsgId === msg.id ? '已复制' : '复制'"
+                      :title="copiedMsgId === msg.id ? '已复制' : '复制'"
                       @click="copyMessageText(msg)"
+                    ><OpusIcon :name="copiedMsgId === msg.id ? 'check' : 'copy'" /></button>
+                    <button
+                      v-if="canReadReplies && msg.text?.trim()"
+                      type="button"
+                      class="message-action"
+                      :aria-label="readingReplyId === msg.id ? '停止朗读' : '朗读回复'"
+                      :title="readingReplyId === msg.id ? '停止朗读' : '朗读回复'"
+                      :aria-pressed="readingReplyId === msg.id"
+                      @click="toggleReadingReply(msg)"
                     >
-                      <OpusIcon :name="copiedMsgId === msg.id ? 'check' : 'copy'" />
-                      <span>{{ copiedMsgId === msg.id ? '已复制' : '复制' }}</span>
+                      <Square v-if="readingReplyId === msg.id" aria-hidden="true" />
+                      <Volume2 v-else aria-hidden="true" />
                     </button>
                     <button
                       type="button"
-                      class="btn btn-subtle btn-sm"
+                      class="message-action"
+                      aria-label="重生成"
+                      title="重生成"
                       :disabled="sending || isStreaming"
                       @click="handleRegenerate(msgIdx)"
-                    >
-                      <OpusIcon name="sync" />
-                      <span>重生成</span>
-                    </button>
+                    ><OpusIcon name="sync" /></button>
                     <button
                       v-if="!compact && effectiveKey && fleet.sessionsByKey[effectiveKey]"
                       type="button"
-                      class="btn btn-subtle btn-sm"
+                      class="message-action"
+                      aria-label="分支"
+                      title="分支"
                       @click="handleForkAt(msgIdx)"
-                    >
-                      <OpusIcon name="branch" />
-                      <span>分支</span>
-                    </button>
+                    ><OpusIcon name="branch" /></button>
                     <button
                       type="button"
-                      class="btn btn-subtle btn-sm msg-foot-secondary"
+                      class="message-action"
                       :class="{ 'is-bookmarked': isMessageBookmarked(msg.id) }"
-                      :title="isMessageBookmarked(msg.id) ? '取消本条消息书签' : '添加内存书签以便快速回看（仅当前会话内存保存）'"
+                      :aria-pressed="isMessageBookmarked(msg.id)"
+                      :aria-label="isMessageBookmarked(msg.id) ? '取消收藏' : '收藏'"
+                      :title="isMessageBookmarked(msg.id) ? '取消收藏' : '收藏'"
                       @click="toggleBookmark(msg.id)"
-                    >
-                      <OpusIcon name="sparkle" />
-                      <span>{{ isMessageBookmarked(msg.id) ? '已收藏' : '收藏' }}</span>
-                    </button>
+                    ><OpusIcon name="sparkle" /></button>
                     <button
                       v-if="msg.text && !compact"
                       type="button"
-                      class="btn btn-subtle btn-sm msg-foot-secondary"
+                      class="message-action"
+                      aria-label="交接会话"
+                      title="交接会话"
                       @click="shareAsHandoff(msg)"
-                    >
-                      <OpusIcon name="send" />
-                      <span>交接会话</span>
-                    </button>
+                    ><OpusIcon name="send" /></button>
+                    <button
+                      v-if="msg.checkpointId && !isCheckpointReverted(msg.checkpointId)"
+                      type="button"
+                      class="message-action"
+                      aria-label="回滚此轮"
+                      title="撤销本轮产生的代码改动"
+                      @click="handleRevertCheckpoint(msg.checkpointId)"
+                    ><OpusIcon name="history" /></button>
+                    <span v-if="msg.turnOutputTokens || msg.turnTokens" class="msg-foot-metrics num">
+                      <span :title="msg.turnOutputTokens ? '本轮输出 token' : '本轮总 token'">
+                        {{ formatTokenCount(msg.turnOutputTokens || msg.turnTokens || 0) }} tok
+                      </span>
+                      <span v-if="replyTokenRate(msg) !== null" title="按本轮用时计算的平均输出速度">
+                        {{ replyTokenRate(msg) }} t/s
+                      </span>
+                    </span>
                   </div>
                 </div>
               </div>
@@ -4504,27 +4548,49 @@ async function retryTurn(msg: ChatMessage) {
   color: var(--text);
 }
 .msg-foot {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  width: 100%;
+}
+.msg-foot-actions,
+.msg-foot-details {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 6px 8px;
-  margin-top: 8px;
-  padding-top: 6px;
-  border-top: 1px solid var(--line);
+  gap: 2px;
+  color: var(--text-2);
 }
-.msg-time {
+.msg-foot-details {
+  gap: 4px 8px;
   font-size: 11px;
   color: var(--text-3);
 }
-.msg-foot-actions {
+.msg-foot-metrics {
   display: inline-flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
-  margin-left: auto;
-  max-width: 100%;
+  gap: 7px;
+  padding-inline: 5px;
+  white-space: nowrap;
+  font-size: 11px;
 }
+.message-action {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.message-action > svg { width: 15px; height: 15px; }
+.message-action:hover { background: color-mix(in srgb, currentColor 12%, transparent); }
+.message-action:focus-visible { outline: 2px solid currentColor; outline-offset: 1px; }
+.message-action:disabled { opacity: .45; cursor: not-allowed; }
 .chip--image {
   padding-left: 4px;
   gap: 6px;
@@ -4813,62 +4879,40 @@ dialog.img-lightbox::backdrop {
 }
 .user-foot {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 2px 4px;
   margin-top: 4px;
-  padding-right: 2px;
+  color: var(--text-3);
+  font-size: 11px;
+  white-space: nowrap;
 }
 .message-receipt {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  color: var(--text-3);
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 20px;
+  height: 24px;
 }
-.message-receipt .i { width: 16px; height: 16px; }
+.message-receipt .i { width: 17px; height: 17px; }
 .message-receipt.is-replied { color: var(--info, #1675c2); }
 .message-receipt.is-failed { color: var(--warn, #a84a18); }
-.user-hover-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  opacity: 0.72;
-  transition: opacity var(--dur-1);
-}
-.msg.user:hover .user-hover-actions,
-.msg.user:focus-within .user-hover-actions,
-.mmsg.user .user-hover-actions {
-  opacity: 1;
-}
-.msg.user .user-hover-actions .btn-subtle,
-.mmsg.user .user-hover-actions .btn-subtle {
-  color: var(--text-3);
-}
-.msg.user .user-hover-actions .btn-subtle:hover,
-.mmsg.user .user-hover-actions .btn-subtle:hover {
-  background: var(--surface-3);
-  color: var(--text);
+.user-token-count::before {
+  content: '';
+  display: inline-block;
+  width: 3px;
+  height: 3px;
+  margin: 0 5px 2px 1px;
+  border-radius: 50%;
+  background: currentColor;
 }
 .branch-switcher {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  font-size: 11px;
-  color: var(--text-2);
+  gap: 2px;
 }
-.branch-nav-btn {
-  padding: 0 3px;
-  color: var(--text-2);
-  cursor: pointer;
-  font-weight: 600;
-}
-.branch-nav-btn:disabled { opacity: .35; cursor: not-allowed; }
+.branch-nav-btn { width: 22px; }
 .follow-queue {
   margin: 0 auto 6px;
   width: min(760px, 100%);
@@ -5034,18 +5078,6 @@ dialog.img-lightbox::backdrop {
   white-space: nowrap;
 }
 .ts-nav-btn { width: 24px; height: 24px; }
-.msg-foot-actions .msg-foot-secondary {
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity var(--dur-1);
-}
-.msg.agent:hover .msg-foot-actions .msg-foot-secondary,
-.msg.agent:focus-within .msg-foot-actions .msg-foot-secondary,
-.mmsg.agent .msg-foot-actions .msg-foot-secondary,
-.msg-foot-actions .msg-foot-secondary.is-bookmarked {
-  opacity: 1;
-  pointer-events: auto;
-}
 .bookmark-strip {
   display: flex;
   align-items: center;
@@ -5462,16 +5494,6 @@ dialog.img-lightbox::backdrop {
   flex: none;
 }
 
-/* 降噪克制：助手消息底栏操作区默认柔和半隐，悬停时浮现 */
-.msg.agent .msg-foot-actions {
-  opacity: 0.42;
-  transition: opacity 0.16s ease;
-}
-.msg.agent:hover .msg-foot-actions,
-.msg.agent:focus-within .msg-foot-actions {
-  opacity: 1;
-}
-
 /* 窄分屏自适应容器查询：避免并排打开工作台时模型名与权限胶囊被挤压成单字母 */
 .composer-box {
   container-type: inline-size;
@@ -5519,37 +5541,6 @@ dialog.img-lightbox::backdrop {
   width: 100%;
   box-sizing: border-box;
 }
-.msg-foot--outside {
-  width: 100%;
-  margin-top: 0;
-  padding: 2px 4px 0;
-  border-top: 0;
-  background: transparent;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
-}
-.msg-foot-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 8px;
-  font-size: 11px;
-  color: var(--text-3);
-}
-.msg-foot--outside .msg-foot-actions {
-  margin-left: 0;
-  justify-content: flex-start;
-}
-.thread-mobile .msg-foot--outside .msg-foot-actions {
-  gap: 4px;
-}
-.thread-mobile .msg-foot--outside .btn-sm {
-  height: 26px;
-  padding: 0 7px;
-  font-size: 11.5px;
-}
-
 /* 限额/模型报错卡片内一键救场行 */
 .error-card-wrap {
   display: flex;
@@ -5604,9 +5595,9 @@ dialog.img-lightbox::backdrop {
   background: var(--surface-3);
   color: var(--text);
   border: 0;
-  border-radius: 18px 18px 6px 18px;
+  border-radius: 22px 22px 6px 22px;
   box-shadow: none;
-  padding: 9px 14px;
+  padding: 9px 13px 5px;
 }
 .thread-root[data-bubble-style="minimal"] :is(.msg.agent, .mmsg.agent) .bubble {
   background: transparent;

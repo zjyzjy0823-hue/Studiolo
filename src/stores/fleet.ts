@@ -2148,6 +2148,7 @@ export const useFleetStore = defineStore('fleet', () => {
         updateAssistantMessage(sKey, nodeId, effProvider, frame.runId, frame.requestId, msg => ({
           ...msg,
           turnTokens: turnSummary.lastTurnTokens,
+          turnOutputTokens: turnSummary.lastOutputTokens,
         }))
       }
       if (frame.runId) pendingRunPrompts.delete(`${sKey}::${frame.runId}`)
