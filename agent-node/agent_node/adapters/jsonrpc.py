@@ -9,6 +9,7 @@ from typing import Any
 
 NotificationHandler = Callable[[str, dict[str, Any]], Awaitable[None]]
 ServerRequestHandler = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
+ResultHandler = Callable[[Any], None]
 
 
 class JsonRpcError(RuntimeError):
@@ -38,7 +39,7 @@ class StdioJsonRpcProcess:
         self._proc: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._next_id = 1
-        self._pending: dict[int, asyncio.Future[Any]] = {}
+        self._pending: dict[int, tuple[asyncio.Future[Any], ResultHandler | None]] = {}
         self._write_lock = asyncio.Lock()
         self._start_lock = asyncio.Lock()
 
@@ -99,19 +100,22 @@ class StdioJsonRpcProcess:
         self._fail_pending()
 
     def _fail_pending(self) -> None:
-        for fut in self._pending.values():
+        for fut, _ in self._pending.values():
             if not fut.done():
                 fut.set_exception(RuntimeError("JSON-RPC process closed"))
         self._pending.clear()
 
-    async def call(self, method: str, params: dict[str, Any] | None = None, *, timeout: float | None = 60.0) -> Any:
+    async def call(
+        self, method: str, params: dict[str, Any] | None = None, *,
+        timeout: float | None = 60.0, on_result: ResultHandler | None = None,
+    ) -> Any:
         if self.auto_start:
             await self.start()
         req_id = self._next_id
         self._next_id += 1
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[Any] = loop.create_future()
-        self._pending[req_id] = fut
+        self._pending[req_id] = (fut, on_result)
         msg = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params or {}}
         try:
             await self._write(msg)
@@ -176,13 +180,25 @@ class StdioJsonRpcProcess:
             if not isinstance(frame, dict):
                 continue
             if "id" in frame and "method" not in frame:
-                fut = self._pending.pop(frame["id"], None)
-                if fut and not fut.done():
-                    if "error" in frame and frame["error"]:
-                        err = frame["error"]
-                        fut.set_exception(JsonRpcError(int(err.get("code", -1)), str(err.get("message", "RPC Error"))))
-                    else:
-                        fut.set_result(frame.get("result"))
+                pending = self._pending.pop(frame["id"], None)
+                if pending is None:
+                    continue
+                fut, on_result = pending
+                if fut.done():
+                    continue
+                if "error" in frame and frame["error"]:
+                    err = frame["error"]
+                    fut.set_exception(JsonRpcError(int(err.get("code", -1)), str(err.get("message", "RPC Error"))))
+                    continue
+                result = frame.get("result")
+                # Apply response state before a later notification from the same stream.
+                try:
+                    if on_result is not None:
+                        on_result(result)
+                except Exception as err:
+                    fut.set_exception(err)
+                else:
+                    fut.set_result(result)
             elif "id" in frame and "method" in frame:
                 asyncio.create_task(self._handle_server_request(proc, frame["id"], str(frame["method"]), frame.get("params") or {}))
             elif "method" in frame and self.on_notification is not None:

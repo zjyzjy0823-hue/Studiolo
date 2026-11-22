@@ -287,6 +287,7 @@ export interface ChatSession {
   projectDirectory?: string
   branch?: string
   model?: string
+  currentEffort?: string | null
   updatedAt?: string | number
   hasDiff?: boolean
   todoCount?: number
@@ -481,6 +482,7 @@ export type FleetConnectionState = 'disconnected' | 'connecting' | 'reconnecting
 export interface FleetWsEvent {
   type: string
   contextUsage?: ChatContextUsage | null
+  currentEffort?: string | null
   nodeId?: string
   provider?: AdapterProvider
   sessionId?: string

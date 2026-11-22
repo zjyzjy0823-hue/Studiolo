@@ -177,6 +177,8 @@ class HermesAdapter(AgentAdapter):
         self._picker_models: list[dict[str, Any]] | None = None
         self._model_by_session: dict[str, str] = {}
         self._effort_by_session: dict[str, str] = {}
+        self._effort_current: dict[str, str | None] = {}
+        self.on_effort_update: EventEmitter | None = None
         self._effort_levels: list[str] = []
 
     async def _ensure_acp(self) -> StdioJsonRpcProcess:
@@ -200,6 +202,7 @@ class HermesAdapter(AgentAdapter):
                 self._context_usage.clear()
                 self._model_by_session.clear()
                 self._effort_by_session.clear()
+                self._effort_current.clear()
             if not self._initialized:
                 await self._proc.call("initialize", {"protocolVersion": 1, "clientInfo": {"name": "studiolo", "version": "0.8.1"}})
                 self._initialized = True
@@ -266,6 +269,18 @@ class HermesAdapter(AgentAdapter):
             })
         return sessions
 
+    async def _new_acp_session(self, proc: StdioJsonRpcProcess, cwd: Path, fallback_id: str = "") -> str:
+        sid = fallback_id
+
+        def remember(response: dict[str, Any] | None) -> None:
+            nonlocal sid
+            sid = str((response or {}).get("sessionId") or fallback_id)
+            if sid:
+                self._remember_models(response, sid)
+
+        await proc.call("session/new", {"cwd": str(cwd), "mcpServers": []}, on_result=remember)
+        return sid
+
     async def _load_acp_session(self, proc: StdioJsonRpcProcess, sid: str) -> None:
         if sid not in self._session_cwds:
             await self.list_sessions(limit=100)
@@ -280,7 +295,8 @@ class HermesAdapter(AgentAdapter):
         self._history_replays[sid] = messages
         self._history_updated[sid] = updated
         try:
-            response = await proc.call("session/load", {"sessionId": sid, "cwd": str(cwd), "mcpServers": []})
+            await proc.call("session/load", {"sessionId": sid, "cwd": str(cwd), "mcpServers": []},
+                            on_result=lambda response: self._remember_models(response, sid))
             # Replay notifications may continue arriving after the RPC response.
             try:
                 if not messages:
@@ -291,7 +307,6 @@ class HermesAdapter(AgentAdapter):
                         await asyncio.wait_for(updated.wait(), timeout=0.12)
             except TimeoutError:
                 pass
-            self._remember_models(response, sid)
             self._save_history(sid, messages)
         finally:
             self._history_replays.pop(sid, None)
@@ -312,6 +327,24 @@ class HermesAdapter(AgentAdapter):
             if self._picker_models is None and sid not in self._turns:
                 await self._load_acp_session(proc, sid)
 
+    def _remember_effort(self, response: dict[str, Any] | None, session_id: str) -> dict[str, Any]:
+        if not isinstance(response, dict):
+            return {}
+        for option in response.get("configOptions") or response.get("config_options") or []:
+            if isinstance(option, dict) and option.get("id") == "reasoning_effort":
+                current = option.get("currentValue", option.get("current_value"))
+                if isinstance(current, str) and (level := current.strip().lower()):
+                    self._effort_current[session_id] = None if level == "default" else level
+                    if level != self._effort_by_session.get(session_id):
+                        self._effort_by_session.pop(session_id, None)
+                return option
+        return {}
+
+    def session_effort_fields(self, session_id: str) -> dict[str, Any]:
+        if session_id in self._effort_current:
+            return {"currentEffort": self._effort_current[session_id]}
+        return {}
+
     def _remember_models(self, response: dict[str, Any] | None, session_id: str) -> None:
         """缓存 ACP 会话响应里的 SessionModelState（availableModels / currentModelId）。
 
@@ -322,16 +355,12 @@ class HermesAdapter(AgentAdapter):
         if not isinstance(response, dict):
             return
         effort_levels: list[str] = []
-        for option in response.get("configOptions") or []:
-            if not isinstance(option, dict):
-                continue
-            if str(option.get("id") or "") != "reasoning_effort":
-                continue
-            for choice in option.get("options") or []:
-                if isinstance(choice, dict):
-                    value = str(choice.get("value") or "").strip().lower()
-                    if value and value != "default":
-                        effort_levels.append(value)
+        option = self._remember_effort(response, session_id)
+        for choice in option.get("options") or []:
+            if isinstance(choice, dict):
+                value = str(choice.get("value") or "").strip().lower()
+                if value and value != "default":
+                    effort_levels.append(value)
         if not effort_levels:
             effort_levels = self._effort_levels_from_meta(response.get("models") or {})
         self._effort_levels = effort_levels
@@ -406,10 +435,8 @@ class HermesAdapter(AgentAdapter):
                 except Exception:
                     pass
         if self._picker_models is None:
-            res = await proc.call("session/new", {"cwd": str(self.allowed_roots[0]), "mcpServers": []})
-            new_sid = str((res or {}).get("sessionId") or "")
+            new_sid = await self._new_acp_session(proc, self.allowed_roots[0])
             if new_sid:
-                self._remember_models(res, new_sid)
                 self._session_cwds.setdefault(new_sid, self.allowed_roots[0])
                 self._loaded_sessions.add(new_sid)
                 self._save_history(new_sid, deque(maxlen=_HISTORY_LIMIT))
@@ -436,13 +463,12 @@ class HermesAdapter(AgentAdapter):
                 else:
                     eff_cwd = self._session_cwds.get(sid) or eff_cwd
         else:
-            res = await proc.call("session/new", {"cwd": str(eff_cwd), "mcpServers": []})
-            sid = str((res or {}).get("sessionId") or sid_seed)
+            sid = await self._new_acp_session(proc, eff_cwd, sid_seed)
             self._session_cwds[sid] = eff_cwd
             self._loaded_sessions.add(sid)
             self._save_history(sid, deque(maxlen=_HISTORY_LIMIT))
-            self._remember_models(res, sid)
-        return {"sessionId": sid, "provider": self.provider, "cwd": str(eff_cwd), "worktreePath": wt_path, "title": f"Hermes ({eff_cwd.name})"}
+        return {"sessionId": sid, "provider": self.provider, "cwd": str(eff_cwd), "worktreePath": wt_path,
+                "title": f"Hermes ({eff_cwd.name})", **self.session_effort_fields(sid)}
 
     async def get_history(self, *, session_id: str, limit: int = 50) -> list[dict[str, Any]]:
         limit = max(1, min(limit, _HISTORY_LIMIT))
@@ -559,15 +585,20 @@ class HermesAdapter(AgentAdapter):
             requested_effort = str((options or {}).get("effort") or "").strip().lower()
             if requested_effort and requested_effort != self._effort_by_session.get(session_id) and self.mode != "gateway":
                 # 思考档位同样走会话级 config option（Hermes ACP 侧已经实现 reasoning_effort）。
+                def remember(response: dict[str, Any] | None) -> None:
+                    self._effort_by_session[session_id] = requested_effort
+                    self._remember_effort(response, session_id)
+
                 await proc.call(
                     "session/set_config_option",
                     {"sessionId": session_id, "configId": "reasoning_effort", "value": requested_effort},
+                    on_result=remember,
                 )
-                self._effort_by_session[session_id] = requested_effort
             messages = self._history.get(session_id, deque(maxlen=_HISTORY_LIMIT))
             self._save_history(session_id, messages)
             messages.append({"role": "user", "text": text, "runId": request_id})
-            await emit({"type": "Accepted", "sessionId": session_id, "runId": request_id, "requestId": request_id, "provider": self.provider})
+            await emit({"type": "Accepted", "sessionId": session_id, "runId": request_id, "requestId": request_id,
+                        "provider": self.provider, **self.session_effort_fields(session_id)})
             # ACP resolves the prompt only after the whole turn, including tools and user approvals.
             prompt_res = await proc.call(
                 "session/prompt",
@@ -663,6 +694,13 @@ class HermesAdapter(AgentAdapter):
         if not isinstance(upd, dict) or not sid:
             return
         kind = upd.get("sessionUpdate") or upd.get("session_update")
+        if kind == "config_option_update":
+            previous = self.session_effort_fields(sid)
+            self._remember_effort(upd, sid)
+            current = self.session_effort_fields(sid)
+            if current != previous and self.on_effort_update:
+                await self.on_effort_update({"type": "ContextUsage", "provider": self.provider, "sessionId": sid, **current})
+            return
         if kind == "usage_update":
             context = _hermes_context(upd, acp=True)
             if context:

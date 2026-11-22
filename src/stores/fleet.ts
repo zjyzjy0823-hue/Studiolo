@@ -911,6 +911,13 @@ export const useFleetStore = defineStore('fleet', () => {
     requestProjectPermissions(node.id)
   }
 
+  function rememberSessionEffort(key: string, effort: FleetWsEvent['currentEffort']) {
+    const session = sessionsByKey.value[key]
+    if (session && (typeof effort === 'string' || effort === null) && session.currentEffort !== effort) {
+      sessionsByKey.value[key] = { ...session, currentEffort: effort }
+    }
+  }
+
   function handleWsEvent(frame: FleetWsEvent) {
     const etype = frame.type
 
@@ -1196,6 +1203,7 @@ export const useFleetStore = defineStore('fleet', () => {
           projectName: frame.projectName,
           projectDirectory: frame.projectDirectory,
           branch: frame.branch,
+          currentEffort: frame.currentEffort,
           updatedAt: existing?.updatedAt ?? Date.now(),
         },
       }
@@ -1229,6 +1237,7 @@ export const useFleetStore = defineStore('fleet', () => {
 
     if (etype === 'SessionHistory' && nodeId && frame.sessionId && Array.isArray(frame.messages)) {
       const k = sessionKey(nodeId, provider, frame.sessionId)
+      rememberSessionEffort(k, frame.currentEffort)
       if (pendingHistoryPages.value[k] === frame.requestId) delete pendingHistoryPages.value[k]
       if (frame.cursorExpired) {
         delete historyCursorBySession.value[k]
@@ -1373,6 +1382,8 @@ export const useFleetStore = defineStore('fleet', () => {
       lastSeqBySession.value = { ...lastSeqBySession.value, [sKey]: frame.seq }
     }
 
+    if (etype !== 'SessionStreamReplay') rememberSessionEffort(sKey, frame.currentEffort)
+
     if (etype === 'SessionStreamReplay' && sid && Array.isArray(frame.events)) {
       pendingStreamResync.delete(sKey)
       const refreshApprovals = () => {
@@ -1381,6 +1392,7 @@ export const useFleetStore = defineStore('fleet', () => {
         for (const approval of frame.pendingApprovals) handleWsEvent({ ...approval, nodeId, provider: effProvider, sessionId: sid })
       }
       if (frame.snapshotRequired) {
+        rememberSessionEffort(sKey, frame.currentEffort)
         const at = Date.now()
         appendSystemEvent(sKey, nodeId, effProvider, `sys-reconnect-${frame.requestId ?? createRequestId()}`, {
           kind: 'reconnected', at, detail: { summary: '实时记录无法接续，已请求节点返回会话快照。' },
@@ -1420,6 +1432,7 @@ export const useFleetStore = defineStore('fleet', () => {
           handleWsEvent({ ...sub, nodeId, provider: effProvider, sessionId: sid })
         }
       }
+      rememberSessionEffort(sKey, frame.currentEffort)
       if (typeof frame.lastSeq === 'number') {
         const sameStream = streamIdBySession.get(sKey) === frame.streamId
         if (frame.streamId) streamIdBySession.set(sKey, frame.streamId)

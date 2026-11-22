@@ -316,16 +316,22 @@ const permissionIcon = computed(() => activePermission.value?.icon ?? 'shield')
 const effortLabels: Record<string, string> = {
   none: '关闭', minimal: '极低', low: '低', medium: '中', high: '高', xhigh: '极高', max: '最高',
 }
+const currentEffort = computed(() => {
+  const confirmed = effectiveSession.value?.currentEffort
+  return confirmed === undefined ? options.value.effort : confirmed
+})
 const triggerEffortLabel = computed(() => {
-  if (options.value.effort) return effortLabels[options.value.effort] ?? options.value.effort
+  if (currentEffort.value === null) return '默认'
+  if (currentEffort.value) return effortLabels[currentEffort.value] ?? currentEffort.value
   const def = model.value?.defaultEffort
   return def ? (effortLabels[def] ?? def) : ''
 })
 
 function rowEffortText(entry: FleetModel): string {
   if (entry.unavailable) return ''
-  if (options.value.model === entry.id && options.value.effort) {
-    return effortLabels[options.value.effort] ?? options.value.effort
+  if (options.value.model === entry.id) {
+    if (currentEffort.value === null) return '默认'
+    if (currentEffort.value) return effortLabels[currentEffort.value] ?? currentEffort.value
   }
   if (entry.defaultEffort) return effortLabels[entry.defaultEffort] ?? entry.defaultEffort
   if (options.value.model === entry.id && entry.efforts.length) return '默认'
@@ -3442,22 +3448,22 @@ async function retryTurn(msg: ChatMessage) {
                 <button
                   type="button"
                   class="picker-option"
-                  :aria-pressed="options.model === entry.id && !options.effort"
+                  :aria-pressed="options.model === entry.id && !currentEffort"
                   @click="chooseModelEffort(entry.id, '')"
                 >
                   <span class="option-title">默认</span>
-                  <OpusIcon v-if="options.model === entry.id && !options.effort" name="check" class="option-tail is-check" />
+                  <OpusIcon v-if="options.model === entry.id && !currentEffort" name="check" class="option-tail is-check" />
                 </button>
                 <button
                   v-for="effort in entry.efforts"
                   :key="effort"
                   type="button"
                   class="picker-option"
-                  :aria-pressed="options.model === entry.id && options.effort === effort"
+                  :aria-pressed="options.model === entry.id && currentEffort === effort"
                   @click="chooseModelEffort(entry.id, effort)"
                 >
                   <span class="option-title">{{ effortLabels[effort] ?? effort }}</span>
-                  <OpusIcon v-if="options.model === entry.id && options.effort === effort" name="check" class="option-tail is-check" />
+                  <OpusIcon v-if="options.model === entry.id && currentEffort === effort" name="check" class="option-tail is-check" />
                 </button>
               </div>
             </div>
@@ -3508,22 +3514,22 @@ async function retryTurn(msg: ChatMessage) {
             <button
               type="button"
               class="picker-option"
-              :aria-pressed="options.model === subModel.id && !options.effort"
+              :aria-pressed="options.model === subModel.id && !currentEffort"
               @click="chooseModelEffort(subModel.id, '')"
             >
               <span class="option-title">默认</span>
-              <OpusIcon v-if="options.model === subModel.id && !options.effort" name="check" class="option-tail is-check" />
+              <OpusIcon v-if="options.model === subModel.id && !currentEffort" name="check" class="option-tail is-check" />
             </button>
             <button
               v-for="effort in subModel.efforts"
               :key="effort"
               type="button"
               class="picker-option"
-              :aria-pressed="options.model === subModel.id && options.effort === effort"
+              :aria-pressed="options.model === subModel.id && currentEffort === effort"
               @click="chooseModelEffort(subModel.id, effort)"
             >
               <span class="option-title">{{ effortLabels[effort] ?? effort }}</span>
-              <OpusIcon v-if="options.model === subModel.id && options.effort === effort" name="check" class="option-tail is-check" />
+              <OpusIcon v-if="options.model === subModel.id && currentEffort === effort" name="check" class="option-tail is-check" />
             </button>
           </div>
         </template>

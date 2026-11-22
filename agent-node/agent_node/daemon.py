@@ -22,6 +22,7 @@ import uvicorn
 import websockets
 
 from .adapters.base import AgentAdapter, ApprovalCallback, EventEmitter
+from .adapters.hermes import HermesAdapter
 from .adapters.registry import build_adapter_registry
 from .config import NodeConfig, PathOutsideAllowedRootsError, detect_lan_urls, ensure_allowed_path
 from .crypto_chunks import generate_file_key
@@ -786,6 +787,7 @@ class AgentNodeDaemon:
                         "pendingApprovals": [event for event in self._pending_approval_events.values()
                                              if (event["provider"], event["sessionId"]) == key],
                         "events": buffered,
+                        **(adapter.session_effort_fields(sid) if isinstance(adapter, HermesAdapter) else {}),
                     }
                 )
             elif cmd == "form.reply":
@@ -833,6 +835,7 @@ class AgentNodeDaemon:
                     msgs = await adapter.get_history(session_id=sid, limit=limit)
                 else:
                     source = await adapter.get_history(session_id=sid, limit=500 if before else min(500, limit + 1))
+                    effort = adapter.session_effort_fields(sid) if isinstance(adapter, HermesAdapter) else {}
                     end = len(source)
                     if before:
                         end = next((i for i in range(len(source) - 1, 0, -1)
@@ -845,9 +848,10 @@ class AgentNodeDaemon:
                     msgs = source[start:end]
                     cursor = _history_cursor(source[start], source[start - 1]) if start > 0 and msgs else None
                     await send_back({"type": "SessionHistory", "provider": provider, "sessionId": sid,
-                                     "messages": msgs, "historyCursor": cursor, "beforeCursor": before})
+                                     "messages": msgs, "historyCursor": cursor, "beforeCursor": before, **effort})
                     return
-                await send_back({"type": "SessionHistory", "provider": provider, "sessionId": sid, "messages": msgs})
+                await send_back({"type": "SessionHistory", "provider": provider, "sessionId": sid, "messages": msgs,
+                                 **(adapter.session_effort_fields(sid) if isinstance(adapter, HermesAdapter) else {})})
             elif cmd == "session.context.read":
                 sid = str(frame.get("sessionId") or "")
                 try:
@@ -1359,6 +1363,16 @@ class AgentNodeDaemon:
             if ready.get("nodeId"):
                 self._command_scope = sha256(f"{self.config.core_url}\n{ready['nodeId']}".encode()).hexdigest()
 
+            async def send_effort_update(event: dict[str, Any]) -> None:
+                try:
+                    await self._send_ws(ws, event)
+                except websockets.ConnectionClosed:
+                    pass
+
+            hermes = self.adapters.get("hermes")
+            if isinstance(hermes, HermesAdapter):
+                hermes.on_effort_update = send_effort_update
+
             async def heartbeat_loop() -> None:
                 while True:
                     await asyncio.sleep(30.0)
@@ -1375,6 +1389,8 @@ class AgentNodeDaemon:
                     bg_tasks.add(task)
                     task.add_done_callback(bg_tasks.discard)
             finally:
+                if isinstance(hermes, HermesAdapter):
+                    hermes.on_effort_update = None
                 hb_task.cancel()
                 for t in list(bg_tasks):
                     t.cancel()
