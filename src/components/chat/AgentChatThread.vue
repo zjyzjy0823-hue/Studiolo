@@ -1615,7 +1615,12 @@ function openPermissions() {
   togglePanelWithButton('permissions', contextTriggerRef.value ?? null)
 }
 
-defineExpose({ insertFileReference, openThreadSearch, openPermissions })
+function handleMobileBack() {
+  if (!settingsOpen.value) return false
+  closeSettings()
+  return true
+}
+defineExpose({ insertFileReference, openThreadSearch, openPermissions, handleMobileBack })
 
 watch(
   () => effectiveMessages.value.length,

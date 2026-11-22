@@ -140,10 +140,9 @@ function chooseRemoteTask(item: UnifiedJob) {
   }
 }
 function closeMobileDetail() {
-  runViewTransition(async () => {
-    showMobileDetail.value = false
-    await nextTick()
-  }, ['backward'])
+  if (!props.mobile || !showMobileDetail.value) return false
+  showMobileDetail.value = false
+  return true
 }
 function requestCreate() { pickedOwner.value = 'studiolo'; ownerPicker.value?.showModal?.() }
 function confirmOwner() {
@@ -239,7 +238,7 @@ const date = (value?: string | null) => value ? new Date(value).toLocaleString()
 const duration = (item: Execution) => item.finishedAt ? `${Math.max(0, (Date.parse(item.finishedAt) - Date.parse(item.startedAt)) / 1000).toFixed(1)}s` : '—'
 let poll: ReturnType<typeof setInterval> | undefined
 function openCreate() { Object.assign(form, defaults()); editingId.value = ''; formError.value = ''; open.value = true; nextTick(() => firstField.value?.focus?.()) }
-defineExpose({ openCreate })
+defineExpose({ openCreate, handleMobileBack: closeMobileDetail })
 function edit(item: Workflow) {
   openCreate(); editingId.value = item.id; form.name = item.name; form.description = item.description; form.enabled = item.enabled; form.trigger = item.triggerType
   const t = item.triggerConfigJson, s = t.schedule as Record<string, unknown> | undefined

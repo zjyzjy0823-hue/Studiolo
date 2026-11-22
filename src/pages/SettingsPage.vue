@@ -28,7 +28,7 @@ import type {
 } from '../types/settings'
 import '../components/settings/settings.css'
 
-const emit = defineEmits<{ action: [message: string]; navigate: [page: string]; 'update:reducedMotion': [value: boolean]; back: [] }>()
+const emit = defineEmits<{ action: [message: string]; navigate: [page: string]; 'update:reducedMotion': [value: boolean]; sectionChange: [id: SettingsSectionId | null]; back: [] }>()
 
 const props = defineProps<{ openSync?: boolean; mobile?: boolean; reducedMotion?: boolean; syncStatus?: SyncStatus | null; syncLabel?: string }>()
 const sections = [
@@ -46,12 +46,16 @@ function writeSectionUrl(id: SettingsSectionId | null) {
   if (window.location.pathname + window.location.search !== nextUrl) {
     window.history.replaceState(window.history.state, '', nextUrl)
   }
+  emit('sectionChange', id)
 }
 const activeSection = ref<SettingsSectionId>(props.openSync ? 'sync' : sectionFromSearch() ?? 'appearance')
 const mobileDetail = ref<SettingsSectionId | null>(props.openSync ? 'sync' : sectionFromSearch())
 watch(() => props.openSync, open => {
-  selectSection(open ? 'sync' : 'appearance')
-  mobileDetail.value = open ? 'sync' : null
+  if (open && activeSection.value !== 'sync') selectSection('sync')
+  else if (!open && activeSection.value === 'sync') {
+    activeSection.value = sectionFromSearch() ?? 'appearance'
+    mobileDetail.value = sectionFromSearch()
+  }
 })
 const { theme, setTheme, bubbleStyle, setBubbleStyle } = useWorkbenchTheme()
 const themes = workbenchThemeOptions
@@ -122,19 +126,17 @@ function openMobileSection(id: SettingsSectionId) {
     await nextTick()
   }, ['forward'])
 }
-function mobileBack() {
-  if (mobileDetail.value) {
-    runViewTransition(async () => {
-      mobileDetail.value = null
-      activeSection.value = 'appearance'
-      writeSectionUrl(null)
-      await nextTick()
-    }, ['backward'])
-  } else {
-    emit('back')
-  }
+function handleMobileBack() {
+  if (!props.mobile || !mobileDetail.value) return false
+  mobileDetail.value = null
+  activeSection.value = 'appearance'
+  writeSectionUrl(null)
+  return true
 }
-defineExpose({ selectSection })
+function mobileBack() {
+  if (!handleMobileBack()) emit('back')
+}
+defineExpose({ selectSection, handleMobileBack })
 function selectFirstSearchResult() {
   const match = settingsNavigation.find(item => item.label.includes(searchQuery.value.trim()))
   if (match) selectSection(match.id)

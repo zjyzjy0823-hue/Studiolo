@@ -58,7 +58,7 @@ const copy = async (file, destination) => {
 }
 
 await copy('LocalCorePlugin.kt', join(android, 'java', ...config.identifier.split('.'), 'LocalCorePlugin.kt'))
-for (const file of ['AndroidNotifications.kt', 'FleetConnectionService.kt']) {
+for (const file of ['AndroidNotifications.kt', 'FleetConnectionService.kt', 'MainActivity.kt']) {
   await copy(file, join(android, 'java', ...config.identifier.split('.'), file))
 }
 for (const resource of ['studiolo_backup_rules.xml', 'studiolo_data_extraction_rules.xml', 'studiolo_network_security.xml']) {
@@ -167,15 +167,6 @@ if (!mainActivityTag.test(manifest)) throw new Error('Unexpected Tauri main acti
 const updated = manifest.replace(/<application\b[^>]*>/s, tag => setAttributes(tag, attributes))
   .replace(mainActivityTag, tag => setAttributes(tag, { theme: '@style/Theme.Studiolo.Starting' }))
 await writeFile(manifestPath, updated)
-
-const mainActivityPath = join(android, 'java', ...config.identifier.split('.'), 'MainActivity.kt')
-const mainActivity = await readFile(mainActivityPath, 'utf8')
-const baseTheme = 'setTheme(R.style.Theme_studiolo_desktop)'
-if (!mainActivity.includes(baseTheme)) {
-  const onCreate = /override fun onCreate\(savedInstanceState: Bundle\?\) \{/
-  if (!onCreate.test(mainActivity)) throw new Error('Unexpected Tauri main activity template')
-  await writeFile(mainActivityPath, mainActivity.replace(onCreate, `$&\n    ${baseTheme}`))
-}
 
 // Keep the app SDK aligned with the pinned SDK installed by Android CI.
 const gradlePath = join(android, '../../build.gradle.kts')

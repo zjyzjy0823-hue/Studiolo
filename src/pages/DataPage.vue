@@ -117,7 +117,13 @@ async function openCreate() {
   await nextTick()
   nameInput.value?.focus()
 }
-defineExpose({ openCreate, openCreateRecord: () => {
+function handleMobileBack() {
+  if (!mobileRecord.value) return false
+  mobileRecord.value = null
+  emit('mobileDetail', false)
+  return true
+}
+defineExpose({ openCreate, handleMobileBack, openCreateRecord: () => {
   if (selectedCollection.value) void openRecord()
   else void openCreate()
 } })
@@ -210,7 +216,7 @@ onUnmounted(() => {
 <template>
   <div v-if="mobile && mobileRecord" class="mpage push">
     <div class="navbar">
-      <button class="icon-btn" type="button" aria-label="返回" @click="showMobileRecord(null)"><OpusIcon name="chevL" /></button>
+      <button class="icon-btn" type="button" aria-label="返回" @click="handleMobileBack"><OpusIcon name="chevL" /></button>
       <div class="t">{{ mobileRecord.name }}</div>
       <button class="icon-btn" type="button" aria-label="编辑记录" @click="mobileRecord && openRecord(mobileRecord)"><OpusIcon name="pencil" /></button>
     </div>

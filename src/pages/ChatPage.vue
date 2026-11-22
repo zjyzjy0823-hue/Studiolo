@@ -64,6 +64,7 @@ const lastWorkbenchTab = ref<Exclude<RightPaneMode, 'none'>>('diff')
 const sideChatSessionKey = ref<string>('')
 const focusedSubagentKey = ref<string>('')
 const mobileWorkbench = ref<'none' | 'diff' | 'tree' | 'file' | 'terminal'>('none')
+let mobileFileParent: 'none' | 'tree' | 'diff' = 'none'
 const diffFocusFile = ref<string | undefined>(undefined)
 const autoCollapsedLeft = ref(false)
 const selectedCheckpointId = ref<string>('')
@@ -942,6 +943,10 @@ function openMobileWorkbench(mode: 'diff' | 'tree' | 'file' | 'terminal') {
     emit('action', '请先进入一个活跃会话')
     return
   }
+  if (mode === 'file' && mobileWorkbench.value !== 'file') {
+    const previous = mobileWorkbench.value
+    mobileFileParent = previous === 'tree' || previous === 'diff' ? previous : 'none'
+  }
   mobileWorkbench.value = mode
   if (mode === 'diff') fleet.requestSessionDiff(fleet.activeSessionKey)
   else if (mode === 'tree') fleet.requestWorkspaceTree('', fleet.activeSessionKey)
@@ -996,7 +1001,7 @@ function openFilePreview(filePath: string, line?: number) {
   }
   fleet.requestFileContent(filePath, fleet.activeSessionKey, line)
   if (props.mobile) {
-    mobileWorkbench.value = 'file'
+    openMobileWorkbench('file')
     return
   }
   setRightPane('file')
@@ -1604,11 +1609,44 @@ function attachTerminalOutput(text: string) {
   emit('action', '终端输出已加入草稿附件')
 }
 
-function mobileBackToInbox() {
-  mobileWorkbench.value = 'none'
-  closeMobileSessionSheet()
-  mobileView.value = 'inbox'
+function closeMobileWorkbench() {
+  mobileWorkbench.value = mobileWorkbench.value === 'file' ? mobileFileParent : 'none'
+  mobileFileParent = 'none'
 }
+
+function handleMobileBack() {
+  if (!props.mobile) return false
+  if (showCachedCoreLogin.value) {
+    showCachedCoreLogin.value = false
+    return true
+  }
+  if (mobileWorkbench.value !== 'none') {
+    closeMobileWorkbench()
+    return true
+  }
+  if (mobileThreadRef.value?.handleMobileBack()) return true
+  if (mobileView.value === 'thread') {
+    mobileView.value = 'inbox'
+    return true
+  }
+  if (mobileFilterSub.value) {
+    mobileFilterSub.value = null
+    return true
+  }
+  if (mobileFilterMenuOpen.value || mobileMoreMenuOpen.value || mobileCreateMenuOpen.value) {
+    closeMobileFilterMenu()
+    mobileMoreMenuOpen.value = false
+    closeMobileCreateMenu()
+    return true
+  }
+  if (mobileSearchOpen.value || mobileInboxQuery.value) {
+    mobileSearchOpen.value = false
+    mobileInboxQuery.value = ''
+    return true
+  }
+  return false
+}
+defineExpose({ handleMobileBack })
 
 function openMobileSessionSheet() {
   mobileRenaming.value = false
@@ -2082,7 +2120,7 @@ function handleClearMemory() {
           type="button"
           class="m-bar-btn m-back-btn"
           aria-label="返回会话列表"
-          @click="mobileBackToInbox"
+          @click="handleMobileBack"
         >
           <OpusIcon name="chevL" />
           <span v-if="mobileOtherApprovalsCount" class="m-wb-dot num">{{ mobileOtherApprovalsCount }}</span>
@@ -2331,7 +2369,7 @@ function handleClearMemory() {
             :aria-selected="mobileWorkbench === 'file'"
             class="wb-tab-btn"
             :class="{ 'is-active': mobileWorkbench === 'file' }"
-            @click="mobileWorkbench = 'file'"
+            @click="openMobileWorkbench('file')"
           >
             <OpusIcon name="file" />
             <span>预览</span>
@@ -2348,7 +2386,7 @@ function handleClearMemory() {
             <span>终端</span>
           </button>
         </div>
-        <button type="button" class="icon-btn wb-close-btn" aria-label="关闭工作台" @click="mobileWorkbench = 'none'">
+        <button type="button" class="icon-btn wb-close-btn" aria-label="关闭工作台" @click="closeMobileWorkbench">
           <OpusIcon name="x" />
         </button>
       </div>
@@ -2362,7 +2400,7 @@ function handleClearMemory() {
           :focus-file-path="diffFocusFile"
           :is-worktree="Boolean(fleet.currentSession?.worktreePath)"
           @refresh="fleet.requestSessionDiff(fleet.activeSessionKey)"
-          @close="mobileWorkbench = 'none'"
+          @close="closeMobileWorkbench"
           @revert-latest="fleet.revertCheckpoint(fleet.activeSessionKey, $event)"
           @revert-files="(paths, cpId) => fleet.revertFiles(fleet.activeSessionKey, paths, cpId)"
           @revert-hunk="(fp, patch) => fleet.revertDiffHunk(fleet.activeSessionKey, fp, patch)"
@@ -2374,14 +2412,14 @@ function handleClearMemory() {
         <WorkspaceTreeDrawer
           v-else-if="mobileWorkbench === 'tree'"
           :session-key="fleet.activeSessionKey"
-          @close="mobileWorkbench = 'none'"
+          @close="closeMobileWorkbench"
           @open-file="openFilePreview($event)"
           @open-external="fp => fleet.openExternalTarget(fp, 'editor', fleet.activeSessionKey)"
         />
         <FileViewerDrawer
           v-else-if="mobileWorkbench === 'file'"
           :preview="fleet.activeSessionKey ? fleet.filePreviewBySession[fleet.activeSessionKey] ?? null : null"
-          @close="mobileWorkbench = 'none'"
+          @close="closeMobileWorkbench"
           @refresh="openFilePreview($event)"
           @save-file="(fp, content) => { fleet.saveWorkspaceFile(fp, content, fleet.activeSessionKey); emit('action', '已保存文件修改') }"
           @request-blame="fp => fleet.requestFileBlame(fp, fleet.activeSessionKey)"
@@ -2391,7 +2429,7 @@ function handleClearMemory() {
           v-else-if="mobileWorkbench === 'terminal'"
           :session-key="fleet.activeSessionKey"
           @attach="attachTerminalOutput"
-          @close="mobileWorkbench = 'none'"
+          @close="closeMobileWorkbench"
         />
       </div>
     </div>

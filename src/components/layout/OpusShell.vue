@@ -34,7 +34,7 @@ interface ToastItem {
 }
 
 const props = defineProps<{ page: string; mobile: boolean; hideMobileTabbar?: boolean; toast: string; toastKey?: number; theme: WorkbenchTheme; mode: string; reducedMotion?: boolean }>()
-const emit = defineEmits<{ navigate: [page: string]; create: [kind: string]; action: [message: string]; openSpace: [spaceId?: string]; syncSettings: []; back: []; toggleMode: []; toggleTheme: []; setTheme: [theme: WorkbenchTheme]; toggleReducedMotion: [] }>()
+const emit = defineEmits<{ navigate: [page: string]; 'mobile-tab': [page: string]; create: [kind: string]; action: [message: string]; openSpace: [spaceId?: string]; syncSettings: []; back: []; toggleMode: []; toggleTheme: []; setTheme: [theme: WorkbenchTheme]; toggleReducedMotion: [] }>()
 const auth = useAuthStore()
 const automation = useAutomationStore()
 const fleet = useFleetStore()
@@ -260,11 +260,12 @@ async function moveCommand(step: number) {
   await nextTick()
   palette.value?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' })
 }
-function go(page: string) {
+function go(page: string, mobileTab = false) {
   palette.value?.close()
   panelOpen.value = false
   add.value = ''
-  emit('navigate', page)
+  if (mobileTab) emit('mobile-tab', page)
+  else emit('navigate', page)
 }
 function openPalette() {
   query.value = ''
@@ -309,7 +310,13 @@ function logoutAccount() {
   emit('action', '已退出登录')
   auth.logout()
 }
-defineExpose({ openDock: () => { dockOpen.value = true } })
+function handleMobileBack() {
+  if (!add.value && !panelOpen.value) return false
+  add.value = ''
+  panelOpen.value = false
+  return true
+}
+defineExpose({ openDock: () => { dockOpen.value = true }, handleMobileBack })
 let resizeObserver: ResizeObserver | null = null
 let androidSyncTimer: ReturnType<typeof setInterval> | undefined
 let spaceSyncTimer: ReturnType<typeof setInterval> | undefined
@@ -380,7 +387,7 @@ onUnmounted(() => {
         <nav v-if="!hideMobileTabbar" class="tabbar" aria-label="主导航">
           <template v-for="tab in mobileTabs" :key="tab.page">
             <div v-if="tab.page === '+'" class="tab-add"><button type="button" aria-label="快速新增" :aria-expanded="!!add" @click="add = add ? '' : 'tx'"><OpusIcon name="plus" /></button></div>
-            <button v-else class="tab" type="button" :aria-current="mobileActive === tab.page ? 'page' : undefined" @click="go(tab.page === 'Ledger' ? savedLibrary : tab.page)">
+            <button v-else class="tab" type="button" :aria-current="mobileActive === tab.page ? 'page' : undefined" @click="go(tab.page === 'Ledger' ? savedLibrary : tab.page, true)">
               <span class="ico"><OpusIcon :name="tab.icon" /></span>{{ tab.label }}
               <span v-if="tab.page === 'Home' && syncStatus?.conflicts" class="badge">{{ syncStatus.conflicts }}</span><span v-if="tab.page === 'Chat' && fleet.pendingApprovalsList.length" class="badge">{{ fleet.pendingApprovalsList.length }}</span><span v-if="tab.page === 'Automation' && attentionTasks" class="badge">{{ attentionTasks }}</span>
             </button>

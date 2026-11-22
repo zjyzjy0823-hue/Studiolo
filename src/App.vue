@@ -80,6 +80,7 @@ watch(currentPage, page => {
 })
 const shellRef = ref<InstanceType<typeof OpusShell> | null>(null)
 const spacePageRef = ref<InstanceType<typeof SpacePage> | null>(null)
+const chatPageRef = ref<InstanceType<typeof ChatPage> | null>(null)
 const storedPreviewMode = localStorage.getItem('studiolo:preview-mode')
 const previewMode = ref<'light' | 'dark' | null>(
   storedPreviewMode === 'light' || storedPreviewMode === 'dark' ? storedPreviewMode : null
@@ -103,7 +104,11 @@ const currentComponent = computed(() => ({
   Data: DataPage, Ledger: LedgerPage, Automation: AutomationPage,
   API: ApiPage, Settings: SettingsPage, Space: OpusModulePage, Chat: OpusModulePage,
 })[currentPage.value])
-const pageRef = ref<{ openCreate?: (value?: string) => void; openCreateRecord?: () => void } | null>(null)
+const pageRef = ref<{
+  openCreate?: (value?: string) => void
+  openCreateRecord?: () => void
+  handleMobileBack?: () => boolean
+} | null>(null)
 const settingsPageRef = ref<InstanceType<typeof SettingsPage> | null>(null)
 const toast = ref('')
 const toastKey = ref(0)
@@ -190,31 +195,39 @@ function setReducedMotionWithToast(value: boolean) {
   setReducedMotion(value)
   showToast(value ? '已开启减弱动画' : '已开启完整动画')
 }
-async function navigate(page: string, section?: 'sync', back = false) {
+function appHistoryDepth(): number {
+  const depth = window.history.state?.studioloDepth
+  return Number.isSafeInteger(depth) && depth > 0 ? depth : 0
+}
+
+let waitingForBack = false
+
+async function showPage(target: Page, toSync: boolean) {
+  currentPage.value = target
+  syncSettings.value = toSync
+  libraryDetailOpen.value = false
+  if (!libraryItems.some(item => item.page === target)) libraryQuery.value = ''
+  await nextTick()
+  scrollPageToTop()
+  document.querySelector('.main')?.scrollTo(0, 0)
+  document.querySelector('.mpage')?.scrollTo(0, 0)
+}
+
+async function navigate(page: string, section?: 'sync', mode: 'push' | 'replace' = 'push') {
   if (!Object.hasOwn(pagePaths, page)) return
   const target = page as Page
   const toSync = target === 'Settings' && section === 'sync'
   const url = pagePaths[target] + (toSync ? '?section=sync' : '')
-  if (currentPage.value === target && syncSettings.value === toSync) return
-  const pushed = target === 'Settings' || target === 'Space' || target === 'Agents' || target === 'API' || target === 'Dashboard'
-  const update = async () => {
-    currentPage.value = target
-    syncSettings.value = toSync
-    libraryDetailOpen.value = false
-    if (!libraryItems.some(item => item.page === target)) libraryQuery.value = ''
-    if (window.location.pathname + window.location.search !== url || window.location.hash) {
-      window.history.pushState({ page: target }, '', url)
-    }
-    await nextTick()
-    scrollPageToTop()
-    document.querySelector('.main')?.scrollTo(0, 0)
-    document.querySelector('.mpage')?.scrollTo(0, 0)
+  if (window.location.pathname + window.location.search === url && !window.location.hash) return
+
+  const state = { studioloDepth: appHistoryDepth() + (mode === 'push' ? 1 : 0) }
+  if (mode === 'replace') window.history.replaceState(state, '', url)
+  else window.history.pushState(state, '', url)
+  if (!mobile.value && document.startViewTransition && !motionReduced.value) {
+    await document.startViewTransition(() => showPage(target, toSync)).updateCallbackDone
+  } else {
+    await showPage(target, toSync)
   }
-  // Snapshot transitions can cover the fixed tab bar and intercept a second tap.
-  if (document.startViewTransition && !motionReduced.value && (!mobile.value || pushed || back)) {
-    const transition = document.startViewTransition({ update, types: mobile.value ? [back ? 'backward' : 'forward'] : [] })
-    await transition.updateCallbackDone
-  } else await update()
 }
 async function openQuickSpace(spaceId?: string) {
   await navigate('Space')
@@ -222,27 +235,48 @@ async function openQuickSpace(spaceId?: string) {
   else spacePageRef.value?.openSpaceList()
 }
 function onLocationChange() {
+  waitingForBack = false
   const target = pageFromLocation()
-  const toSync = new URLSearchParams(window.location.search).get('section') === 'sync'
-  if (target === currentPage.value && toSync === syncSettings.value) return
-  const update = async () => {
-    currentPage.value = target
-    syncSettings.value = toSync
-    libraryDetailOpen.value = false
-    await nextTick()
-    document.querySelector('.main, .mpage')?.scrollTo(0, 0)
-  }
-  if (mobile.value && document.startViewTransition && !motionReduced.value) {
-    document.startViewTransition({ update, types: ['backward'] })
-  } else void update()
+  const toSync = target === 'Settings' && new URLSearchParams(window.location.search).get('section') === 'sync'
+  if (target !== currentPage.value || toSync !== syncSettings.value) void showPage(target, toSync)
 }
+
 async function openSyncSettings() {
   await navigate('Settings', 'sync')
   settingsPageRef.value?.selectSection('sync')
 }
-function back() {
-  if (window.history.state?.page) window.history.back()
-  else void navigate('Home', undefined, true)
+
+function closeTopDialog() {
+  const dialog = document.activeElement?.closest<HTMLDialogElement>('dialog[open]')
+    ?? Array.from(document.querySelectorAll<HTMLDialogElement>('dialog[open]')).at(-1)
+  if (!dialog) return false
+  if (dialog.dispatchEvent(new Event('cancel', { cancelable: true }))) dialog.close()
+  return true
+}
+
+function back(): boolean {
+  if (waitingForBack) return true
+  if (mobile.value) {
+    if (closeTopDialog() || shellRef.value?.handleMobileBack()) return true
+    const page = currentPage.value === 'Chat' ? chatPageRef.value
+      : currentPage.value === 'Settings' ? settingsPageRef.value
+        : currentPage.value === 'Space' ? spacePageRef.value
+          : pageRef.value
+    if (page?.handleMobileBack?.()) return true
+  }
+  if (!auth.user && !auth.androidOffline) return false
+  if (appHistoryDepth() > 0) {
+    waitingForBack = true
+    window.history.back()
+    return true
+  }
+  if (currentPage.value === 'Home') return false
+  void navigate('Home', undefined, 'replace')
+  return true
+}
+
+function handleSystemBack(event: Event) {
+  if (back()) event.preventDefault()
 }
 async function restoreSession() {
   if (restoringSession) return
@@ -283,6 +317,7 @@ const openChatFromNotification = () => { void navigate('Chat') }
 
 onMounted(async () => {
   window.addEventListener('popstate', onLocationChange)
+  window.addEventListener('studiolo:back', handleSystemBack)
   window.addEventListener('hashchange', onLocationChange)
   window.addEventListener('studiolo:open-chat', openChatFromNotification)
   systemDark.addEventListener('change', updateSystemTheme)
@@ -297,6 +332,7 @@ onMounted(async () => {
 })
 onUnmounted(() => {
   window.removeEventListener('popstate', onLocationChange)
+  window.removeEventListener('studiolo:back', handleSystemBack)
   window.removeEventListener('hashchange', onLocationChange)
   window.removeEventListener('studiolo:open-chat', openChatFromNotification)
   systemDark.removeEventListener('change', updateSystemTheme)
@@ -329,10 +365,10 @@ onUnmounted(() => {
     </div>
   </template>
   <OpusShell v-else ref="shellRef" :page="currentPage" :mobile="mobile" :hide-mobile-tabbar="hideMobileTabbar" :toast="toast" :toast-key="toastKey" :theme="theme" :mode="mode" :reduced-motion="motionReduced"
-    @navigate="navigate" @create="create" @action="showToast" @open-space="openQuickSpace" @sync-settings="openSyncSettings" @back="back" @toggle-mode="toggleColorMode" @toggle-theme="toggleWorkbenchTheme" @set-theme="setThemeWithToast" @toggle-reduced-motion="setReducedMotionWithToast(!motionReduced)">
+    @navigate="navigate" @mobile-tab="navigate($event, undefined, 'replace')" @create="create" @action="showToast" @open-space="openQuickSpace" @sync-settings="openSyncSettings" @back="back" @toggle-mode="toggleColorMode" @toggle-theme="toggleWorkbenchTheme" @set-theme="setThemeWithToast" @toggle-reduced-motion="setReducedMotionWithToast(!motionReduced)">
     <template #default="{ syncStatus, syncLabel, syncKind, openSync, inLibrary }">
       <TodayPage v-if="currentPage === 'Home'" :mobile="mobile" :sync-status="syncStatus" :sync-label="syncLabel" :sync-kind="syncKind" @navigate="navigate" @action="showToast" @create="create" @sync="openSync" @ask-agent="shellRef?.openDock()" />
-      <ChatPage v-else-if="currentPage === 'Chat'" :mobile="mobile" @navigate="navigate" @action="showToast" @mobile-fullscreen="hideMobileTabbar = $event" />
+      <ChatPage v-else-if="currentPage === 'Chat'" ref="chatPageRef" :mobile="mobile" @navigate="navigate" @action="showToast" @mobile-fullscreen="hideMobileTabbar = $event" />
       <SpacePage v-else-if="currentPage === 'Space'" ref="spacePageRef" :mobile="mobile" @action="showToast" @back="back" />
       <div v-else-if="inLibrary" :class="libraryDetailOpen ? 'opus-subpage-host' : 'mpage'">
         <template v-if="!libraryDetailOpen">
@@ -342,11 +378,11 @@ onUnmounted(() => {
             <span class="lk"><OpusIcon name="lock" /></span>
             <span style="flex:1;min-width:0"><div style="font-weight:650;font-size:15px">共享空间</div><div class="faint" style="font-size:12.5px">普通随时看 · 机密按次输密 · 极密 E2EE</div></span><OpusIcon name="chevR" />
           </button>
-          <OpusSegment class="mseg" role="group" aria-label="资料类型"><button v-for="item in libraryItems" :key="item.page" type="button" :aria-pressed="currentPage === item.page" @click="navigate(item.page)">{{ item.label }}</button></OpusSegment>
+          <OpusSegment class="mseg" role="group" aria-label="资料类型"><button v-for="item in libraryItems" :key="item.page" type="button" :aria-pressed="currentPage === item.page" @click="navigate(item.page, undefined, 'replace')">{{ item.label }}</button></OpusSegment>
         </template>
         <component :is="currentComponent" :key="currentPage" ref="pageRef" mobile :search="libraryQuery" @action="showToast" @mobile-detail="libraryDetailOpen = $event" />
       </div>
-      <SettingsPage v-else-if="currentPage === 'Settings'" ref="settingsPageRef" :sync-status="syncStatus" :sync-label="syncLabel" :mobile="mobile" :reduced-motion="motionReduced" :open-sync="syncSettings" @update:reduced-motion="setReducedMotion" @action="showToast" @navigate="navigate" @back="back" />
+      <SettingsPage v-else-if="currentPage === 'Settings'" ref="settingsPageRef" :sync-status="syncStatus" :sync-label="syncLabel" :mobile="mobile" :reduced-motion="motionReduced" :open-sync="syncSettings" @update:reduced-motion="setReducedMotion" @section-change="syncSettings = $event === 'sync'" @action="showToast" @navigate="navigate" @back="back" />
       <DataPage v-else-if="currentPage === 'Data'" ref="pageRef" @action="showToast" />
       <div v-else :class="mobile ? 'opus-subpage-host' : 'page'">
         <component :is="currentComponent" :key="currentPage" ref="pageRef" :mobile="mobile" @action="showToast" @navigate="navigate" @back="back" />
