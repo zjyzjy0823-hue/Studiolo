@@ -58,7 +58,9 @@ const copy = async (file, destination) => {
 }
 
 await copy('LocalCorePlugin.kt', join(android, 'java', ...config.identifier.split('.'), 'LocalCorePlugin.kt'))
-await copy('AndroidNotifications.kt', join(android, 'java', ...config.identifier.split('.'), 'AndroidNotifications.kt'))
+for (const file of ['AndroidNotifications.kt', 'FleetConnectionService.kt']) {
+  await copy(file, join(android, 'java', ...config.identifier.split('.'), file))
+}
 for (const resource of ['studiolo_backup_rules.xml', 'studiolo_data_extraction_rules.xml', 'studiolo_network_security.xml']) {
   await copy(resource, join(android, 'res/xml', resource))
 }
@@ -134,9 +136,16 @@ let manifest = await readFile(manifestPath, 'utf8')
 if (!/<application\b[^>]*>/s.test(manifest) || !manifest.includes('android.permission.INTERNET')) {
   throw new Error('Unexpected Tauri Android manifest template')
 }
-if (!manifest.includes('android.permission.POST_NOTIFICATIONS')) {
-  manifest = manifest.replace(/<uses-permission\b[^>]*android.permission.INTERNET[^>]*\/>/,
-    '$&\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />')
+for (const permission of ['POST_NOTIFICATIONS', 'FOREGROUND_SERVICE', 'FOREGROUND_SERVICE_REMOTE_MESSAGING']) {
+  if (!manifest.includes('android.permission.' + permission + '"')) {
+    manifest = manifest.replace(/<uses-permission\b[^>]*android.permission.INTERNET[^>]*\/>/,
+      '$&\n    <uses-permission android:name="android.permission.' + permission + '" />')
+  }
+}
+if (!manifest.includes('android:name=".FleetConnectionService"')) {
+  manifest = manifest.replace(/<application\b[^>]*>/s, '$&\n' +
+    '        <service android:name=".FleetConnectionService" android:exported="false"\n' +
+    '            android:foregroundServiceType="remoteMessaging" android:stopWithTask="false" />')
 }
 const attributes = {
   icon: '@mipmap/studiolo_launcher',

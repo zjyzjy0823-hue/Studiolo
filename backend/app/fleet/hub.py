@@ -39,6 +39,8 @@ ALLOWED_CLIENT_COMMANDS = frozenset({
     "session.open",
     "session.history",
     "session.model.set",
+    "session.effort.set",
+    "session.active.list",
     "session.context.read",
     "session.diff",
     "session.compact",
@@ -101,6 +103,7 @@ ALLOWED_NODE_EVENTS = frozenset({
     "SessionOpened",
     "SessionHistory",
     "SessionStreamReplay",
+    "ActiveRunsSnapshot",
     "SessionCompacted",
     "TerminalPreview",
     "RunStopStatus",
@@ -214,7 +217,9 @@ class FleetRelayHub:
                 for (ws_id, _), n in self._nodes.items()
                 if ws_id == workspace_id
             ]
-        await websocket.send_json({"type": "FleetSnapshot", "nodes": online_snapshot})
+        await websocket.send_json({
+            "type": "FleetSnapshot", "nodes": online_snapshot, "capabilities": ["active-runs"],
+        })
         return conn_id
 
     async def unregister_client(self, workspace_id: str, conn_id: str) -> None:
@@ -317,7 +322,8 @@ class FleetRelayHub:
         """将前端指令校验并路由至工作区内的目标在线 AgentNode，返回即时错误帧或 None。"""
         cmd_type = str(frame.get("type") or "")
         if cmd_type not in ALLOWED_CLIENT_COMMANDS:
-            return {"type": "Error", "code": "unsupported_command", "message": f"Unsupported command: {cmd_type}"}
+            return {"type": "Error", "code": "unsupported_command", "requestId": frame.get("requestId"),
+                    "message": f"Unsupported command: {cmd_type}"}
 
         if cmd_type == "node.ping":
             return {"type": "Pong", "requestId": frame.get("requestId")}

@@ -211,7 +211,7 @@ class HermesAdapter(AgentAdapter):
     async def probe(self) -> AdapterProbe:
         caps = ("chat", "history", "approval", "worktree", "models", "cron", "files", "diff", "checkpoints", "todos", "context-usage")
         if self.mode != "gateway":
-            caps += ("session-model",)
+            caps += ("session-model", "session-effort")
         if self.mode == "gateway" and self.serve_url:
             try:
                 headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
@@ -542,6 +542,42 @@ class HermesAdapter(AgentAdapter):
                 raise ValueError("Hermes 未返回当前会话模型")
             return {"currentModel": current}
 
+    async def _set_acp_effort(self, proc: StdioJsonRpcProcess, session_id: str, effort: str) -> None:
+        def remember(response: dict[str, Any] | None) -> None:
+            self._effort_by_session[session_id] = effort
+            self._remember_effort(response, session_id)
+
+        await proc.call(
+            "session/set_config_option",
+            {"sessionId": session_id, "configId": "reasoning_effort", "value": effort},
+            on_result=remember,
+        )
+
+    async def set_session_effort(self, *, session_id: str, effort: str) -> dict[str, Any]:
+        if self.mode == "gateway":
+            raise ValueError("当前 Hermes 连接不支持直接切换思考强度")
+        proc = await self._ensure_acp()
+        async with self._history_lock:
+            if session_id in self._turns:
+                raise ValueError("当前会话已有任务运行中")
+            if session_id not in self._loaded_sessions:
+                await self._load_acp_session(proc, session_id)
+            # An older server may ACK without config options. Read back the
+            # session instead of treating the old cached value as confirmation.
+            previous = self.session_effort_fields(session_id)
+            self._effort_current.pop(session_id, None)
+            try:
+                await self._set_acp_effort(proc, session_id, effort)
+                if session_id not in self._effort_current:
+                    await self._load_acp_session(proc, session_id)
+                fields = self.session_effort_fields(session_id)
+                if not fields:
+                    raise ValueError("Hermes 未返回当前思考强度")
+                return fields
+            finally:
+                if previous:
+                    self._effort_current.setdefault(session_id, previous["currentEffort"])
+
     async def _gateway_context_usage(self, session_id: str) -> dict[str, Any] | None:
         if not self.serve_url:
             return None
@@ -630,16 +666,7 @@ class HermesAdapter(AgentAdapter):
                 await self._set_acp_model(proc, session_id, requested_model)
             requested_effort = str((options or {}).get("effort") or "").strip().lower()
             if requested_effort and requested_effort != self._effort_by_session.get(session_id) and self.mode != "gateway":
-                # 思考档位同样走会话级 config option（Hermes ACP 侧已经实现 reasoning_effort）。
-                def remember(response: dict[str, Any] | None) -> None:
-                    self._effort_by_session[session_id] = requested_effort
-                    self._remember_effort(response, session_id)
-
-                await proc.call(
-                    "session/set_config_option",
-                    {"sessionId": session_id, "configId": "reasoning_effort", "value": requested_effort},
-                    on_result=remember,
-                )
+                await self._set_acp_effort(proc, session_id, requested_effort)
             messages = self._history.get(session_id, deque(maxlen=_HISTORY_LIMIT))
             self._save_history(session_id, messages)
             messages.append({"role": "user", "text": text, "runId": request_id})

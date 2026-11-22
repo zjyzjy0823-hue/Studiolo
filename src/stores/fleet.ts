@@ -3,10 +3,11 @@
  */
 
 import { defineStore } from 'pinia'
-import { Channel } from '@tauri-apps/api/core'
+import { Channel, invoke } from '@tauri-apps/api/core'
 import { computed, nextTick, ref, shallowReactive, watch } from 'vue'
 import { apiRequest, ApiError } from '../api/client'
 import { androidInvoke, isAndroidLocal } from '../desktop/androidLocal'
+import { desktopPlatform } from '../desktop/platform'
 import { downloadAndDecryptBlob, encryptAndUploadFile } from '../services/blobTransfer'
 import { normalizeCoreOrigin } from '../services/fleetUrl'
 import { FleetLocalStore, type FleetOutboxItem } from '../services/fleetLocal'
@@ -85,6 +86,10 @@ import { useAuthStore } from './auth'
 
 const MAX_MESSAGES_PER_SESSION = 500
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 15000]
+const DESKTOP_NOTIFICATION_PREF = 'studiolo:fleet-system-notifications'
+type NativeFleetEvent =
+  | { event: 'frame'; frame: FleetWsEvent }
+  | { event: 'reconnecting' | 'unauthorized' }
 
 export function sessionKey(nodeId: string, provider: AdapterProvider, sessionId: string): string {
   return `${nodeId}::${provider}::${sessionId}`
@@ -197,6 +202,8 @@ export const useFleetStore = defineStore('fleet', () => {
 
   // ---------------- 实时连接状态 ----------------
   const wsState = ref<FleetConnectionState>('disconnected')
+  const nativeTransport = desktopPlatform() !== 'web'
+  let nativeConnectionId: string | null = null
   let socket: WebSocket | null = null
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let reconnectAttempt = 0
@@ -283,11 +290,23 @@ export const useFleetStore = defineStore('fleet', () => {
   const sideChatSessionKeyByParent = ref<Record<string, string>>({})
   const projectPermissionsByNode = ref<Record<string, ProjectPermission[]>>({})
   const projectPermissionWrites = new Map<string, (error?: Error) => void>()
-  const pendingModelWrites = new Map<string, { key: string; finish: (result: string | Error) => void }>()
+  const pendingSessionWrites = new Map<string, {
+    key: string
+    field: 'currentModel' | 'currentEffort'
+    finish: (result: string | null | Error) => void
+  }>()
+  const pendingSessionEffort = shallowReactive<Record<string, string>>({})
   const android = isAndroidLocal()
   const notificationsEnabled = ref(
-    !android && typeof window !== 'undefined' && typeof Notification !== 'undefined' && Notification.permission === 'granted',
+    nativeTransport && !android
+      ? localStorage.getItem(DESKTOP_NOTIFICATION_PREF) !== 'off'
+      : !android && typeof Notification !== 'undefined' && Notification.permission === 'granted',
   )
+  if (nativeTransport && !android) {
+    watch(notificationsEnabled, enabled => {
+      void invoke('fleet_notifications', { enabled }).catch(() => {})
+    }, { immediate: true })
+  }
   const androidNotificationsReady = android
     ? androidInvoke<boolean>('android_notifications_enabled').then(
       enabled => { notificationsEnabled.value = enabled },
@@ -376,21 +395,6 @@ export const useFleetStore = defineStore('fleet', () => {
         void androidInvoke('android_show_fleet_approval', { count, callId: count === 1 ? pending[0].callId : null }).catch(() => {})
       }
     })
-    watch(() => {
-      const attention = new Set([
-        ...pendingApprovalsList.value.map(card => sessionKey(card.nodeId, card.provider, card.sessionId)),
-        ...Object.values(pendingFormsById.value).filter(form => form.status === 'pending')
-          .map(form => sessionKey(form.nodeId, form.provider, form.sessionId)),
-      ])
-      const active = Object.keys(runningBySession.value).filter(key => !attention.has(key))
-      return { attention: [...attention], active, enabled: notificationsEnabled.value && wsState.value === 'online' }
-    }, ({ attention, active, enabled }) => {
-      const count = attention.length + active.length
-      void androidInvoke('android_show_fleet_notification', {
-        title: 'Studiolo 任务状态', body: `${active.length} 个运行中 · ${attention.length} 个待处理`,
-        sessionKey: attention[0] ?? active[0] ?? null, ongoing: true, clear: !enabled || count === 0,
-      }).catch(() => {})
-    }, { immediate: true })
   }
 
   const nodesWithApprovalPending = computed(() => {
@@ -486,7 +490,7 @@ export const useFleetStore = defineStore('fleet', () => {
     forkSeedBySession.value = {}
     sideChatSessionKeyByParent.value = {}
     for (const finish of projectPermissionWrites.values()) finish(new Error('节点连接已变更'))
-    for (const { finish } of pendingModelWrites.values()) finish(new Error('节点连接已变更'))
+    for (const { finish } of pendingSessionWrites.values()) finish(new Error('节点连接已变更'))
     projectPermissionsByNode.value = {}
     unreadNotifyTitle.value = ''
     tokenUsageStateBySession.value = {}
@@ -513,6 +517,11 @@ export const useFleetStore = defineStore('fleet', () => {
   function disconnectSocket() {
     intentionalClose = true
     activeConnectRoute = null
+    if (nativeConnectionId) {
+      const id = nativeConnectionId
+      nativeConnectionId = null
+      void invoke('fleet_disconnect', { id }).catch(() => {})
+    }
     if (reconnectTimer) {
       clearTimeout(reconnectTimer)
       reconnectTimer = null
@@ -720,11 +729,61 @@ export const useFleetStore = defineStore('fleet', () => {
   }
 
   // ---------------- WebSocket 连接与首帧认证 ----------------
+  function connectionLost(code?: number) {
+    autoPulledProviders.clear()
+    pendingStreamResync.clear()
+    forcedHistoryRequests.clear()
+    pendingHistoryPages.value = {}
+    contextReads.value = {}
+    contextCompactions.value = {}
+    transmittingOutbox.clear()
+    for (const finish of projectPermissionWrites.values()) finish(new Error('节点连接已断开'))
+    for (const { finish } of pendingSessionWrites.values()) finish(new Error('节点连接已断开'))
+    for (const target of pendingSessionLists.values()) sessionListStates.value[target] = {}
+    pendingSessionLists.clear()
+    if (code === 4401) {
+      wsState.value = 'disconnected'
+      if (linkedCore.value) coreSession.value = null
+      lastError.value = 'Fleet 会话认证失败或登录已过期'
+    } else {
+      wsState.value = 'reconnecting'
+    }
+  }
+
+  function connectNative(route: FleetRoute) {
+    if (nativeConnectionId && activeConnectRoute === route) return
+    if (nativeConnectionId) disconnectSocket()
+    activeConnectRoute = route
+    wsState.value = 'connecting'
+    const id = createRequestId()
+    nativeConnectionId = id
+    const events = new Channel<NativeFleetEvent>(message => {
+      if (nativeConnectionId !== id || fleetRoute.value !== route) return
+      if (message.event === 'frame') handleWsEvent(message.frame)
+      else if (message.event === 'unauthorized') {
+        nativeConnectionId = null
+        connectionLost(4401)
+      } else {
+        connectionLost()
+      }
+    })
+    void invoke('fleet_connect', { id, url: buildFleetWsUrl(route.origin), token: route.token, events }).catch(error => {
+      if (nativeConnectionId !== id || fleetRoute.value !== route) return
+      nativeConnectionId = null
+      wsState.value = 'disconnected'
+      lastError.value = typeof error === 'string' ? error : 'Fleet 连接无法启动'
+    })
+  }
+
   function connectSocket() {
     fleetRequested = true
     localCacheRequested.value = true
     const route = fleetRoute.value
     if (!route) return
+    if (nativeTransport) {
+      connectNative(route)
+      return
+    }
     const { token, origin } = route
     if (
       socket &&
@@ -762,26 +821,12 @@ export const useFleetStore = defineStore('fleet', () => {
     ws.onclose = ev => {
       if (socket !== ws || fleetRoute.value !== route) return
       socket = null
-      autoPulledProviders.clear()
-      pendingStreamResync.clear()
-      forcedHistoryRequests.clear()
-      pendingHistoryPages.value = {}
-      contextReads.value = {}
-      contextCompactions.value = {}
-      transmittingOutbox.clear()
-      for (const finish of projectPermissionWrites.values()) finish(new Error('节点连接已断开'))
-      for (const { finish } of pendingModelWrites.values()) finish(new Error('节点连接已断开'))
-      for (const target of pendingSessionLists.values()) sessionListStates.value[target] = {}
-      pendingSessionLists.clear()
-      if (intentionalClose || ev.code === 4401) {
+      if (intentionalClose) {
         wsState.value = 'disconnected'
-        if (ev.code === 4401) {
-          if (linkedCore.value) coreSession.value = null
-          lastError.value = 'Fleet 会话认证失败或登录已过期'
-        }
         return
       }
-      wsState.value = 'reconnecting'
+      connectionLost(ev.code)
+      if (ev.code === 4401) return
       const delay = RECONNECT_DELAYS_MS[Math.min(reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)]
       reconnectAttempt += 1
       reconnectTimer = setTimeout(() => {
@@ -799,6 +844,19 @@ export const useFleetStore = defineStore('fleet', () => {
   function sendWsCommand(frame: Record<string, unknown>, reportError = true): boolean {
     const route = fleetRoute.value
     if (!route) return false
+    if (nativeTransport && nativeConnectionId && activeConnectRoute === route && wsState.value === 'online') {
+      const id = nativeConnectionId
+      void invoke('fleet_send', { id, frame }).catch(() => {
+        if (nativeConnectionId !== id || fleetRoute.value !== route || wsState.value !== 'online') return
+        if (typeof frame.requestId === 'string') {
+          pendingSessionWrites.get(frame.requestId)?.finish(new Error('Fleet 暂时无法发送请求'))
+          projectPermissionWrites.get(frame.requestId)?.(new Error('Fleet 暂时无法发送请求'))
+          transmittingOutbox.delete(frame.requestId)
+        }
+        if (reportError) lastError.value = 'Fleet 暂时无法发送请求'
+      })
+      return true
+    }
     if (!socket || activeConnectRoute !== route || socket.readyState !== WebSocket.OPEN) {
       connectSocket()
       if (reportError) lastError.value = '正在建立到 Core Relay 的连接，请稍候重试'
@@ -1006,9 +1064,9 @@ export const useFleetStore = defineStore('fleet', () => {
     }
 
     if (frame.requestId && ['Failed', 'NodeUnavailable', 'Error'].includes(etype)) {
-      const modelWrite = pendingModelWrites.get(frame.requestId)
-      if (modelWrite) {
-        modelWrite.finish(new Error(frame.message || '切换模型失败'))
+      const settingWrite = pendingSessionWrites.get(frame.requestId)
+      if (settingWrite) {
+        settingWrite.finish(new Error(frame.message || (settingWrite.field === 'currentModel' ? '切换模型失败' : '切换思考强度失败')))
         return
       }
       const projectWrite = projectPermissionWrites.get(frame.requestId)
@@ -1407,9 +1465,14 @@ export const useFleetStore = defineStore('fleet', () => {
     if (etype !== 'SessionStreamReplay') rememberSessionRuntime(sKey, frame)
 
     if (etype === 'ContextUsage' && frame.requestId) {
-      const modelWrite = pendingModelWrites.get(frame.requestId)
-      if (modelWrite?.key === sKey) {
-        modelWrite.finish(typeof frame.currentModel === 'string' ? frame.currentModel : new Error('节点未确认当前模型'))
+      const settingWrite = pendingSessionWrites.get(frame.requestId)
+      if (settingWrite?.key === sKey) {
+        const value = frame[settingWrite.field]
+        if (typeof value === 'string' || (settingWrite.field === 'currentEffort' && value === null)) {
+          settingWrite.finish(value)
+        } else {
+          settingWrite.finish(new Error(settingWrite.field === 'currentModel' ? '节点未确认当前模型' : '节点未确认当前思考强度'))
+        }
         return
       }
     }
@@ -2248,7 +2311,15 @@ export const useFleetStore = defineStore('fleet', () => {
 
   function sessionPromptOptions(key: string) {
     const options = runSettings.value[key]
-    return sessionsByKey.value[key]?.currentModel === undefined ? options : { ...options, model: undefined }
+    const session = sessionsByKey.value[key]
+    if (!session || !options) return options
+    const node = nodes.value.find(node => node.id === session.nodeId)
+    const adapter = node?.adapters.find(adapter => adapter.provider === session.provider)
+    return {
+      ...options,
+      ...(session.currentModel !== undefined ? { model: undefined } : {}),
+      ...(session.currentEffort !== undefined && adapter?.capabilities.includes('session-effort') ? { effort: undefined } : {}),
+    }
   }
 
   function setModelPreference(
@@ -2280,27 +2351,52 @@ export const useFleetStore = defineStore('fleet', () => {
     runSettings.value = next
   }
 
-  async function setSessionModel(key: string, modelId: string): Promise<string> {
+  function writeSessionSetting(
+    key: string, field: 'currentModel' | 'currentEffort', command: Record<string, unknown>,
+  ): Promise<string | null> {
     const session = sessionsByKey.value[key]
     if (!session) throw new Error('目标会话不存在')
-    if ([...pendingModelWrites.values()].some(write => write.key === key)) {
-      throw new Error('正在等待节点确认模型，请稍候')
+    if ([...pendingSessionWrites.values()].some(write => write.key === key)) {
+      throw new Error('正在等待节点确认会话设置，请稍候')
     }
     const { nodeId, provider, sessionId } = session
     const requestId = createRequestId()
     return new Promise((resolve, reject) => {
-      const finish = (result: string | Error) => {
+      const finish = (result: string | null | Error) => {
         clearTimeout(timer)
-        pendingModelWrites.delete(requestId)
+        pendingSessionWrites.delete(requestId)
         if (result instanceof Error) reject(result)
         else resolve(result)
       }
-      const timer = setTimeout(() => finish(new Error('等待节点确认模型超时')), 120_000)
-      pendingModelWrites.set(requestId, { key, finish })
-      if (!sendWsCommand({ type: 'session.model.set', nodeId, provider, sessionId, modelId, requestId }, false)) {
+      const timeoutText = field === 'currentModel' ? '等待节点确认模型超时' : '等待节点确认思考强度超时'
+      const timer = setTimeout(() => finish(new Error(timeoutText)), 120_000)
+      pendingSessionWrites.set(requestId, { key, field, finish })
+      if (!sendWsCommand({ ...command, nodeId, provider, sessionId, requestId }, false)) {
         finish(new Error('无法连接 Agent Node'))
       }
     })
+  }
+
+  async function setSessionModel(key: string, modelId: string): Promise<string> {
+    const result = await writeSessionSetting(key, 'currentModel', { type: 'session.model.set', modelId })
+    if (result === null) throw new Error('节点未确认当前模型')
+    return result
+  }
+
+  async function setSessionEffort(key: string, modelId: string, effort: string): Promise<void> {
+    if (pendingSessionEffort[key]) return
+    const session = sessionsByKey.value[key]
+    if (!session) throw new Error('目标会话不存在')
+    pendingSessionEffort[key] = effort || 'default'
+    try {
+      if (session.currentModel !== modelId) modelId = await setSessionModel(key, modelId)
+      const confirmed = await writeSessionSetting(key, 'currentEffort', {
+        type: 'session.effort.set', effort: pendingSessionEffort[key],
+      })
+      setModelPreference(session.nodeId, session.provider, modelId, confirmed ?? undefined, key)
+    } finally {
+      delete pendingSessionEffort[key]
+    }
   }
 
   function requestSessionsList(nodeId?: string, provider?: AdapterProvider) {
@@ -3847,6 +3943,11 @@ export const useFleetStore = defineStore('fleet', () => {
         changingAndroidNotifications = false
       }
     }
+    if (nativeTransport) {
+      notificationsEnabled.value = !notificationsEnabled.value
+      localStorage.setItem(DESKTOP_NOTIFICATION_PREF, notificationsEnabled.value ? 'on' : 'off')
+      return notificationsEnabled.value
+    }
     if (typeof window === 'undefined' || typeof Notification === 'undefined') return false
     if (notificationsEnabled.value) {
       notificationsEnabled.value = false
@@ -3891,8 +3992,13 @@ export const useFleetStore = defineStore('fleet', () => {
     if (typeof document === 'undefined') return
     if (document.hidden) {
       unreadNotifyTitle.value = title
-      if (android && notificationsEnabled.value) {
-        if (!isPermission) void androidInvoke('android_show_fleet_notification', { title, body: body.slice(0, 120), sessionKey: target }).catch(() => {})
+      if (nativeTransport) {
+        if (cueKind === 'complete' || !notificationsEnabled.value) return
+        if (android) {
+          if (!isPermission) void androidInvoke('android_show_fleet_notification', { title, body: body.slice(0, 120), sessionKey: target }).catch(() => {})
+        } else {
+          void invoke('fleet_notify_attention', { title, body: body.slice(0, 120) }).catch(() => {})
+        }
       } else if (notificationsEnabled.value && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
         try {
           const notice = new Notification(title, { body: body.slice(0, 120) })
@@ -4028,6 +4134,8 @@ export const useFleetStore = defineStore('fleet', () => {
     sessionPromptOptions,
     setModelPreference,
     setSessionModel,
+    setSessionEffort,
+    pendingSessionEffort,
     requestSessionsList,
     openSession,
     activateSession,

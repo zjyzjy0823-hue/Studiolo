@@ -36,6 +36,13 @@ class FleetNotification {
 }
 
 @InvokeArg
+class FleetConnectionNotice {
+    var status: String? = null
+    var active = 0
+    var sessionKey: String? = null
+}
+
+@InvokeArg
 class FleetApprovalNotice {
     var count = 0
     var callId: String? = null
@@ -101,7 +108,7 @@ class AndroidNotifications(private val host: Activity) : Plugin(host) {
     fun showApproval(invoke: Invoke) {
         val data = invoke.parseArgs(FleetApprovalNotice::class.java)
         synchronized(approvalIntents) { approvalIntents.clear() }
-        if (data.count <= 0 || !preferences.getBoolean("enabled", false) || !canNotify()) {
+        if (data.count <= 0 || !preferences.getBoolean("enabled", true) || !canNotify()) {
             manager.cancel(approvalNotificationId)
             invoke.resolve(JSObject().put("value", false))
             return
@@ -138,13 +145,11 @@ class AndroidNotifications(private val host: Activity) : Plugin(host) {
             host.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
 
     private fun canNotify(): Boolean =
-        hasPermission() && manager.areNotificationsEnabled() &&
-            (Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
-                manager.getNotificationChannel(channelId)?.importance != NotificationManager.IMPORTANCE_NONE)
+        hasPermission() && manager.areNotificationsEnabled()
 
     @Command
     fun enabled(invoke: Invoke) {
-        invoke.resolve(JSObject().put("value", preferences.getBoolean("enabled", false) && canNotify()))
+        invoke.resolve(JSObject().put("value", preferences.getBoolean("enabled", true) && canNotify()))
     }
 
     @Command
@@ -166,6 +171,48 @@ class AndroidNotifications(private val host: Activity) : Plugin(host) {
     }
 
     @Command
+    fun updateFleetConnection(invoke: Invoke) {
+        val data = invoke.parseArgs(FleetConnectionNotice::class.java)
+        host.runOnUiThread {
+            val updated = FleetConnectionService.update(host.applicationContext, data)
+            invoke.resolve(JSObject().put("value", updated))
+        }
+    }
+
+    @Command
+    fun showCompletion(invoke: Invoke) {
+        val data = invoke.parseArgs(FleetConnectionNotice::class.java)
+        host.runOnUiThread {
+            if (host.hasWindowFocus() || !preferences.getBoolean("enabled", true) ||
+                !hasPermission() || !manager.areNotificationsEnabled()) {
+                invoke.resolve(JSObject().put("value", false))
+                return@runOnUiThread
+            }
+            val channel = "studiolo.chat.completed"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                manager.createNotificationChannel(NotificationChannel(
+                    channel, "任务完成", NotificationManager.IMPORTANCE_HIGH
+                ))
+            }
+            val notice = NotificationCompat.Builder(host, channel)
+                .setSmallIcon(R.drawable.studiolo_notification_icon)
+                .setContentTitle("Studiolo 任务已完成")
+                .setContentText("Agent 回复已就绪")
+                .setContentIntent(FleetConnectionService.openSession(host, data.sessionKey, UUID.randomUUID().hashCode()))
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setDefaults(NotificationCompat.DEFAULT_ALL)
+                .setAutoCancel(true)
+                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            try {
+                manager.notify(UUID.randomUUID().toString(), 1, notice.build())
+                invoke.resolve(JSObject().put("value", true))
+            } catch (_: SecurityException) {
+                invoke.resolve(JSObject().put("value", false))
+            }
+        }
+    }
+
+    @Command
     fun show(invoke: Invoke) {
         val data = invoke.parseArgs(FleetNotification::class.java)
         if (data.clear) {
@@ -173,7 +220,7 @@ class AndroidNotifications(private val host: Activity) : Plugin(host) {
             invoke.resolve(JSObject().put("value", true))
             return
         }
-        if (!preferences.getBoolean("enabled", false) || !canNotify()) {
+        if (!preferences.getBoolean("enabled", true) || !canNotify()) {
             invoke.resolve(JSObject().put("value", false))
             return
         }

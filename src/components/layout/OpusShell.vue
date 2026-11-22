@@ -337,6 +337,10 @@ function syncSpaceForeground() {
 }
 watch(() => space.route, route => { if (route) syncSpaceForeground() })
 onMounted(() => {
+  if (platform !== 'web') {
+    void fleet.loadNodes()
+    fleet.connectSocket()
+  }
   document.addEventListener('keydown', keydown)
   document.addEventListener('pointerdown', dismissSync)
   spaceSyncTimer = setInterval(syncSpaceForeground, 30_000)

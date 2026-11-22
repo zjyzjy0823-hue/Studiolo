@@ -144,6 +144,20 @@ impl AndroidNotifications {
     }
 }
 
+pub(crate) async fn update_fleet_connection(
+    app: &AppHandle, status: Option<&str>, active: usize, session_key: Option<String>,
+) {
+    let state = app.state::<AndroidNotifications>();
+    let _ = state.invoke("updateFleetConnection", json!({
+        "status": status, "active": active, "sessionKey": session_key,
+    })).await;
+}
+
+pub(crate) async fn notify_fleet_completion(app: &AppHandle, session_key: String) {
+    let state = app.state::<AndroidNotifications>();
+    let _ = state.invoke("showCompletion", json!({ "sessionKey": session_key })).await;
+}
+
 #[tauri::command]
 pub(crate) async fn android_notifications_enabled(
     state: State<'_, AndroidNotifications>,

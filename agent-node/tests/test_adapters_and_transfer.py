@@ -383,6 +383,10 @@ for line in sys.stdin:
 HERMES_ACP_SCRIPT = """
 import sys, json, os, time
 current_model = 'initial'
+current_effort = 'default'
+def effort_options():
+    return {'configOptions': [{'id': 'reasoning_effort', 'currentValue': current_effort,
+                               'options': [{'value': 'default'}, {'value': 'high'}]}]}
 for line in sys.stdin:
     if not line.strip():
         continue
@@ -402,6 +406,15 @@ for line in sys.stdin:
             current_model = {'alias': 'resolved', 'empty-result': 'read-back'}[model_id]
             result = {} if model_id == 'empty-result' else {'models': {'currentModelId': current_model}}
             print(json.dumps({'jsonrpc': '2.0', 'id': mid, 'result': result}))
+    elif m == 'session/set_config_option':
+        assert msg['params']['configId'] == 'reasoning_effort'
+        effort = msg['params']['value']
+        if effort == 'invalid':
+            print(json.dumps({'jsonrpc': '2.0', 'id': mid, 'error': {'code': -32602, 'message': 'Invalid effort'}}))
+        else:
+            current_effort = effort
+            result = {} if effort == 'default' else effort_options()
+            print(json.dumps({'jsonrpc': '2.0', 'id': mid, 'result': result}))
     elif m == 'session/list':
         cursor = msg['params'].get('cursor')
         sid = 'herm-older' if cursor == 'herm-1' else 'herm-1'
@@ -413,7 +426,7 @@ for line in sys.stdin:
     elif m == 'session/load':
         sid = msg['params']['sessionId']
         assert msg['params']['cwd'] == os.getcwd()
-        result = {'models': {'currentModelId': current_model}} if sid == 'herm-1' else {}
+        result = {'models': {'currentModelId': current_model}, **effort_options()} if sid == 'herm-1' else {}
         print(json.dumps({'jsonrpc': '2.0', 'id': mid, 'result': result}), flush=True)
         if sid == 'herm-1':
             continue
@@ -567,6 +580,12 @@ def test_codex_and_hermes_jsonrpc_adapters(tmp_path):
             await hermes.set_session_model(session_id="herm-1", model_id="invalid")
         assert hermes.session_model_fields("herm-1") == {"currentModel": "resolved"}
         assert await hermes.set_session_model(session_id="herm-1", model_id="empty-result") == {"currentModel": "read-back"}
+        assert await hermes.set_session_effort(session_id="herm-1", effort="high") == {"currentEffort": "high"}
+        with pytest.raises(JsonRpcError, match="Invalid effort"):
+            await hermes.set_session_effort(session_id="herm-1", effort="invalid")
+        assert hermes.session_effort_fields("herm-1") == {"currentEffort": "high"}
+        assert await hermes.set_session_effort(session_id="herm-1", effort="default") == {"currentEffort": None}
+        assert not h_events
         reopened = await hermes.open_session(cwd=str(tmp_path), session_id="herm-1")
         assert reopened["currentModel"] == "read-back"
         await hermes.send_prompt(session_id="herm-1", text="hi", request_id="r-hermes", emit=h_emit,

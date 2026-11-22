@@ -320,6 +320,7 @@ const permissionIcon = computed(() => activePermission.value?.icon ?? 'shield')
 const effortLabels: Record<string, string> = {
   none: '关闭', minimal: '极低', low: '低', medium: '中', high: '高', xhigh: '极高', max: '最高',
 }
+const effortSwitching = computed(() => Boolean(fleet.pendingSessionEffort[settingsKey.value]))
 const currentEffort = computed(() => {
   const confirmed = effectiveSession.value?.currentEffort
   return confirmed === undefined ? options.value.effort : confirmed
@@ -616,6 +617,7 @@ async function applyModelChoice(modelId: string, effort?: string) {
 }
 
 async function chooseModel(modelId: string) {
+  if (effortSwitching.value) return
   const nextEntry = catalog.value?.models.find(m => m.id === modelId)
   if (nextEntry?.unavailable) return
   const selectedModel = modelId && canSetSessionModel.value ? effectiveSession.value?.currentModel : options.value.model
@@ -637,8 +639,17 @@ async function chooseModel(modelId: string) {
 
 async function chooseModelEffort(modelId: string, effort: string) {
   const entry = catalog.value?.models.find(m => m.id === modelId)
-  if (entry?.unavailable) return
+  if (entry?.unavailable || effortSwitching.value) return
   const key = settingsKey.value
+  if (effectiveSession.value && caps.value.includes('session-effort')) {
+    closeSettings()
+    try {
+      await fleet.setSessionEffort(key, modelId, effort)
+    } catch (err) {
+      emit('action', err instanceof Error ? err.message : '切换思考强度失败')
+    }
+    return
+  }
   if (await applyModelChoice(modelId, effort || undefined) && settingsKey.value === key) closeSettings()
 }
 
@@ -725,6 +736,7 @@ function togglePanelWithButton(next: ComposerPanel, triggerEl: HTMLButtonElement
 }
 
 function showPanel(next: ComposerPanel, event: MouseEvent) {
+  if (next === 'model' && effortSwitching.value) return
   if (dismissedBySelfTrigger === next) {
     dismissedBySelfTrigger = null
     return
@@ -1805,6 +1817,10 @@ function tryExecuteDirectSlash(text: string): boolean {
 
 async function handleSubmit() {
   if (sending.value) return
+  if (effortSwitching.value) {
+    emit('action', '正在切换思考强度，请稍候发送')
+    return
+  }
   const text = draft.value.trim()
   const files = [...queuedFiles.value]
   const contexts = [...queuedContexts.value]
@@ -2913,7 +2929,9 @@ async function retryTurn(msg: ChatMessage) {
               ref="modelTriggerRef"
               class="model-trigger"
               type="button"
-              :aria-label="`选择模型：${modelLabel}${triggerEffortLabel ? ' ' + triggerEffortLabel : ''}`"
+              :aria-label="`选择模型：${modelLabel}${effortSwitching ? '，思考强度切换中' : triggerEffortLabel ? ' ' + triggerEffortLabel : ''}`"
+              :aria-busy="effortSwitching"
+              :disabled="effortSwitching"
               aria-haspopup="dialog"
               :aria-controls="settingsId"
               :aria-expanded="settingsOpen && panel === 'model'"
@@ -2926,7 +2944,14 @@ async function retryTurn(msg: ChatMessage) {
                 class="trigger-provider"
                 :title="`provider: ${model.provider}`"
               >{{ model.provider }}</span>
-              <span v-if="triggerEffortLabel" class="trigger-effort">{{ triggerEffortLabel }}</span>
+              <span v-if="effortSwitching" class="trigger-effort trigger-effort--switching" role="status">
+                <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" opacity=".25" />
+                  <path d="M8 2a6 6 0 0 1 6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+                </svg>
+                切换中
+              </span>
+              <span v-else-if="triggerEffortLabel" class="trigger-effort">{{ triggerEffortLabel }}</span>
               <OpusIcon name="chevD" class="trigger-chev" />
             </button>
             <span v-if="!mobile && !settingsOpen" class="trigger-tip" role="tooltip">选择模型 <kbd>Ctrl+/</kbd></span>
@@ -3831,6 +3856,22 @@ async function retryTurn(msg: ChatMessage) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.trigger-effort--switching {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.trigger-effort--switching svg {
+  width: 12px;
+  height: 12px;
+  animation: effort-spin .8s linear infinite;
+}
+@keyframes effort-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .trigger-effort--switching svg { animation: none; }
 }
 .trigger-effort {
   flex: none;

@@ -1,3 +1,4 @@
+mod fleet;
 use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
@@ -298,6 +299,7 @@ pub fn run() {
     #[cfg(target_os = "android")]
     let builder = builder.plugin(android::plugin()).plugin(android::notifications_plugin()).invoke_handler(tauri::generate_handler![
         desktop_platform, backend_status, open_external_url,
+        fleet::fleet_connect, fleet::fleet_disconnect, fleet::fleet_send, fleet::fleet_notifications,
         android::android_validate_core_url, android::android_core_status, android::android_core_prepare,
         android::android_core_connect, android::android_core_cancel_pending, android::android_core_disconnect,
         android::android_core_new_replica, android::android_websites_list, android::android_website_create,
@@ -312,9 +314,14 @@ pub fn run() {
         android::android_read_device_space,
     ]);
     #[cfg(not(target_os = "android"))]
-    let builder = builder.invoke_handler(tauri::generate_handler![desktop_platform, backend_status, open_external_url]);
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        desktop_platform, backend_status, open_external_url,
+        fleet::fleet_connect, fleet::fleet_disconnect, fleet::fleet_send, fleet::fleet_notifications,
+        fleet::fleet_notify_attention,
+    ]);
     #[cfg(desktop)]
     let builder = builder
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             if app.state::<DesktopState>().status.lock().unwrap().as_str() != "starting" {
                 show_main(app);
@@ -324,6 +331,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
         .manage(DesktopState::default())
+        .manage(fleet::FleetTransport::default())
         .setup(|app| {
             #[cfg(target_os = "macos")]
             setup_macos_menu(app)?;

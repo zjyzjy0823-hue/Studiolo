@@ -501,6 +501,7 @@ async def fleet_node_ws(websocket: WebSocket):
                     "SessionHistory",
                     "ContextSnapshot",
                     "SessionStreamReplay",
+                    "ActiveRunsSnapshot",
                     "RunStopStatus",
                     "TerminalPreview",
                     "DuplicateIgnored",

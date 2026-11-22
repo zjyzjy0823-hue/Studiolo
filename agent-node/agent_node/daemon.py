@@ -486,6 +486,18 @@ class AgentNodeDaemon:
                 payload["requestId"] = req_id
             await self._send_ws(ws, payload)
 
+        if cmd == "session.active.list":
+            await send_back({
+                "type": "ActiveRunsSnapshot",
+                "runs": [
+                    {"provider": provider, "sessionId": sid, "runId": stream.run_id,
+                     "streamId": stream.stream_id, "lastSeq": stream.sequence}
+                    for provider, sid in self._active_runs
+                    if (stream := self._session_streams.get((provider, sid))) and stream.run_id
+                ],
+            })
+            return
+
         if cmd in ("project.permissions.list", "project.permissions.set"):
             if cmd == "project.permissions.set":
                 try:
@@ -773,6 +785,19 @@ class AgentNodeDaemon:
                 # The confirmed model applies to every client viewing this session.
                 await self._send_ws(ws, {"type": "ContextUsage", "provider": provider, "sessionId": sid,
                                          "requestId": req_id, **fields})
+            elif cmd == "session.effort.set":
+                sid = frame.get("sessionId")
+                effort = frame.get("effort")
+                if not isinstance(sid, str) or not sid.strip() or not isinstance(effort, str) or not effort.strip():
+                    raise ValueError("缺少会话 ID 或思考强度")
+                key = (provider, sid)
+                if key in self._active_runs or key in self._compacting_sessions:
+                    raise ValueError("当前会话忙碌，请稍后切换思考强度")
+                if not isinstance(adapter, HermesAdapter):
+                    raise ValueError("当前适配器不支持直接切换思考强度")
+                fields = await adapter.set_session_effort(session_id=sid, effort=effort.strip().lower())
+                await self._send_ws(ws, {"type": "ContextUsage", "provider": provider, "sessionId": sid,
+                                         "requestId": req_id, **fields})
             elif cmd == "session.subscribe":
                 sid = str(frame.get("sessionId") or "")
                 key = (provider, sid)
@@ -781,11 +806,13 @@ class AgentNodeDaemon:
                 last_seq = raw_last_seq if type(raw_last_seq) is int and raw_last_seq > 0 else 0
                 stream = self._session_streams.get(key)
                 latest = stream.sequence if stream else 0
-                generation_matches = frame.get("streamId") in (None, stream.stream_id if stream else None)
-                incremental = bool(last_seq and generation_matches)
+                stream_id = frame.get("streamId")
+                generation_matches = stream_id in (None, stream.stream_id if stream else None)
+                has_cursor = bool(last_seq or (stream_id and raw_last_seq == 0))
+                incremental = has_cursor and generation_matches
                 cursor = last_seq if incremental else stream.turn_start if stream and is_active else latest
                 oldest = stream.events[0][1]["sequence"] if stream and stream.events else latest + 1
-                snapshot_required = bool((last_seq and not generation_matches) or cursor > latest or cursor < oldest - 1)
+                snapshot_required = bool((has_cursor and not generation_matches) or cursor > latest or cursor < oldest - 1)
                 buffered = [event for _, event in stream.events if event["sequence"] > cursor] if stream and not snapshot_required else []
                 await send_back(
                     {
