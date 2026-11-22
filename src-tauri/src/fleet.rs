@@ -9,7 +9,9 @@ use std::{
     },
     time::Duration,
 };
-use tauri::{ipc::Channel, AppHandle, Manager, State};
+#[cfg(desktop)]
+use tauri::Manager;
+use tauri::{ipc::Channel, AppHandle, State};
 use tokio::{
     net::TcpStream,
     sync::mpsc,

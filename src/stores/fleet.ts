@@ -759,8 +759,13 @@ export const useFleetStore = defineStore('fleet', () => {
     nativeConnectionId = id
     const events = new Channel<NativeFleetEvent>(message => {
       if (nativeConnectionId !== id || fleetRoute.value !== route) return
-      if (message.event === 'frame') handleWsEvent(message.frame)
-      else if (message.event === 'unauthorized') {
+      if (message.event === 'frame') {
+        try {
+          handleWsEvent(message.frame)
+        } catch {
+          // Keep the ordered IPC channel moving if a single frame cannot be applied.
+        }
+      } else if (message.event === 'unauthorized') {
         nativeConnectionId = null
         connectionLost(4401)
       } else {
