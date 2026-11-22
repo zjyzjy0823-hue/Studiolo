@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, useId, watch, watchEffect } from 'vue'
-import { isAndroidLocal } from '../../desktop/androidLocal'
+import { isTauri } from '@tauri-apps/api/core'
+import { AndroidLocalError, androidInvoke, isAndroidLocal } from '../../desktop/androidLocal'
+import { desktopPlatform } from '../../desktop/platform'
 import { useAuthStore } from '../../stores/auth'
 import { useDataStore } from '../../stores/data'
 import { sessionKey as buildSessionKey, useFleetStore } from '../../stores/fleet'
@@ -77,7 +79,10 @@ const fleet = useFleetStore()
 const { bubbleStyle } = useWorkbenchTheme()
 const sending = ref(false)
 const draggingFiles = ref(false)
+const isAndroid = isTauri() && desktopPlatform() === 'android'
 const fileInputRef = ref<HTMLInputElement | null>(null)
+const photoInputRef = ref<HTMLInputElement | null>(null)
+const nativeMediaPending = ref(false)
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const listEl = ref<HTMLElement | null>(null)
 const innerListEl = ref<HTMLElement | null>(null)
@@ -1657,9 +1662,80 @@ function triggerFilePick() {
   fileInputRef.value?.click()
 }
 
-function appendFiles(fileList: File[]) {
+function appendFiles(fileList: File[], targetDraft?: typeof buffer.value) {
   if (!fileList.length) return
-  queuedFiles.value = [...queuedFiles.value, ...fileList]
+  const destination = targetDraft ?? buffer.value
+  destination.files = [...destination.files, ...fileList]
+}
+
+interface PickedImage {
+  name: string
+  mime: string
+  base64: string
+  width: number
+  height: number
+}
+
+function base64ToFile(item: PickedImage): File {
+  const chunks: Uint8Array<ArrayBuffer>[] = []
+  const chunkSize = 32 * 1024 // Each chunk must contain complete Base64 groups.
+  for (let offset = 0; offset < item.base64.length; offset += chunkSize) {
+    const decoded = atob(item.base64.slice(offset, offset + chunkSize))
+    const bytes = new Uint8Array(decoded.length)
+    for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i)
+    chunks.push(bytes)
+  }
+  return new File(chunks, item.name, { type: item.mime })
+}
+
+function imageFilesOnly<T>(items: T[], mimeOf: (item: T) => string): T[] {
+  const images = items.filter(item => mimeOf(item).startsWith('image/'))
+  if (images.length !== items.length) emit('action', '已跳过非图片附件')
+  return images
+}
+
+async function attachNativePhotos(source: 'camera' | 'picker') {
+  if (nativeMediaPending.value) return
+  const key = settingsKey.value
+  const targetDraft = buffer.value
+  nativeMediaPending.value = true
+  try {
+    const items = source === 'camera'
+      ? [await androidInvoke<PickedImage>('android_capture_photo')]
+      : await androidInvoke<PickedImage[]>('android_pick_images')
+    if (fleet.composerDrafts[key] === targetDraft) {
+      appendFiles(imageFilesOnly(items, item => item.mime).map(base64ToFile), targetDraft)
+    }
+  } catch (error) {
+    const code = error instanceof AndroidLocalError ? error.code : ''
+    if (code === 'cancelled') return
+    const messages: Record<string, string> = {
+      too_large: '照片过大，请尝试选择尺寸较小的照片',
+      media_busy: '请先关闭已打开的相机或照片选择器',
+      camera_unavailable: '此设备没有可用的系统相机',
+      picker_unavailable: '无法打开系统照片选择器',
+    }
+    emit('action', messages[code] ?? (source === 'camera' ? '拍照失败，请重试' : '读取照片失败，请重试'))
+  } finally {
+    nativeMediaPending.value = false
+  }
+}
+
+async function captureNativePhoto() {
+  closeSettings()
+  await attachNativePhotos('camera')
+}
+
+async function pickNativeImages() {
+  closeSettings()
+  if (isAndroid) await attachNativePhotos('picker')
+  else photoInputRef.value?.click()
+}
+
+function handlePhotoSelect(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  appendFiles(imageFilesOnly(Array.from(input.files ?? []), file => file.type))
+  input.value = ''
 }
 
 const supportsFieldSizing = typeof CSS !== 'undefined' && typeof CSS.supports === 'function' && CSS.supports('field-sizing', 'content')
@@ -2811,6 +2887,7 @@ async function retryTurn(msg: ChatMessage) {
       </div>
 
       <input ref="fileInputRef" type="file" multiple hidden @change="handleFileSelect" />
+      <input v-if="!isAndroid" ref="photoInputRef" type="file" multiple accept="image/*" hidden @change="handlePhotoSelect" />
       <div
         :class="[
           mobile ? 'box' : 'composer-box',
@@ -3094,6 +3171,27 @@ async function retryTurn(msg: ChatMessage) {
               <OpusIcon name="clip" class="menu-lead" />
               <span class="option-title">上传加密文件</span>
               <span class="picker-effort">E2EE</span>
+            </button>
+            <button
+              v-if="isAndroid"
+              type="button"
+              class="picker-option"
+              :disabled="nativeMediaPending"
+              @pointerenter="closeSubmenu"
+              @click="captureNativePhoto"
+            >
+              <OpusIcon name="camera" class="menu-lead" />
+              <span class="option-title">拍照</span>
+            </button>
+            <button
+              type="button"
+              class="picker-option"
+              :disabled="nativeMediaPending"
+              @pointerenter="closeSubmenu"
+              @click="pickNativeImages"
+            >
+              <OpusIcon name="image" class="menu-lead" />
+              <span class="option-title">选择照片</span>
             </button>
             <button
               v-if="mobile"

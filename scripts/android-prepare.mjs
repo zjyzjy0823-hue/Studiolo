@@ -58,7 +58,7 @@ const copy = async (file, destination) => {
 }
 
 await copy('LocalCorePlugin.kt', join(android, 'java', ...config.identifier.split('.'), 'LocalCorePlugin.kt'))
-for (const file of ['AndroidNotifications.kt', 'AndroidDownloads.kt', 'FleetConnectionService.kt', 'MainActivity.kt']) {
+for (const file of ['AndroidNotifications.kt', 'AndroidDownloads.kt', 'AndroidMedia.kt', 'FleetConnectionService.kt', 'MainActivity.kt']) {
   await copy(file, join(android, 'java', ...config.identifier.split('.'), file))
 }
 for (const resource of ['studiolo_backup_rules.xml', 'studiolo_data_extraction_rules.xml', 'studiolo_network_security.xml']) {
