@@ -331,14 +331,14 @@ onUnmounted(() => { clearInterval(poll) })
       <div v-if="!mobile" class="tasks-table mat-solid"><table class="tbl">
         <thead><tr><th>任务</th><th>调度所有者</th><th>计划</th><th>下次运行</th><th>最近结果</th></tr></thead>
         <tbody>
-          <tr v-for="item in filtered" :key="item.id" :class="{ 'is-selected': selected?.id === item.id }" @click="chooseTask(item)">
+          <tr v-for="item in filtered" :key="item.id" :class="{ 'is-selected': selected?.id === item.id }" data-pressable @click="chooseTask(item)">
             <td><button class="task-name" type="button" style="text-align:left" @click.stop="chooseTask(item)"><b>{{ item.name }}</b><span>{{ actionLabel(item) }}</span></button></td>
             <td><span class="owner o-studiolo"><span class="mark"><OpusIcon name="studiolo" /></span>Studiolo</span></td>
             <td><div class="task-name"><span style="color:var(--text);font-size:13px">{{ triggers[item.triggerType as keyof typeof triggers] ?? '旧版配置' }}</span><span v-if="item.triggerType === 'schedule'">{{ scheduleValue(item, 'timezone') }}</span></div></td>
             <td class="muted">{{ date(store.runtimes[item.id]?.nextRunAt) }}</td>
             <td><div class="task-name"><span class="run" :class="jobState(item)">{{ jobLabels[jobState(item)] }}</span><span>{{ date(store.runtimes[item.id]?.lastRunAt) }}</span></div></td>
           </tr>
-          <tr v-for="rjob in filteredRemote" :key="jobRefKey(rjob.ref)" :class="{ 'is-selected': selectedRemoteKey === jobRefKey(rjob.ref) }" @click="chooseRemoteTask(rjob)">
+          <tr v-for="rjob in filteredRemote" :key="jobRefKey(rjob.ref)" :class="{ 'is-selected': selectedRemoteKey === jobRefKey(rjob.ref) }" data-pressable @click="chooseRemoteTask(rjob)">
             <td><button class="task-name" type="button" style="text-align:left" @click.stop="chooseRemoteTask(rjob)"><b>{{ rjob.name }}</b><span>{{ rjob.description || `Profile: ${rjob.ref.ownerProfile}` }}</span></button></td>
             <td><span class="owner" :class="'o-' + rjob.ref.ownerType"><span class="mark"><OpusIcon :name="rjob.ref.ownerType === 'openclaw' ? 'claw' : 'hermes'" /></span>{{ rjob.ownerLabel }}</span></td>
             <td><div class="task-name"><span class="mono" style="color:var(--text);font-size:12.5px">{{ rjob.scheduleExpression }}</span><span>{{ rjob.timezone }}</span></div></td>

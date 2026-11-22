@@ -426,9 +426,6 @@ const mobileDetailLabel = computed(() => sections.find(item => item.id === mobil
 .m-bubble-opt + .m-bubble-opt {
   border-top: 1px solid var(--line);
 }
-.m-bubble-opt:active {
-  background: var(--surface-3);
-}
 .m-bopt-main {
   flex: 1;
   min-width: 0;

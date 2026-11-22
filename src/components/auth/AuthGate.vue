@@ -257,7 +257,6 @@ async function submit() {
   white-space: normal;
   transition: background-color var(--dur-1), border-color var(--dur-1), box-shadow var(--dur-1), scale var(--dur-1) var(--ease-out);
 }
-.setup-option:active:not(:disabled) { scale: calc(1 - .02 * var(--move)); }
 .setup-option {
   border: 1px solid var(--line-strong);
   background: var(--solid);

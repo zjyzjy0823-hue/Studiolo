@@ -270,7 +270,7 @@ onUnmounted(() => {
         </div>
         <div style="overflow:auto;flex:1">
           <table class="tbl"><thead><tr><th>名称</th><th>状态</th><th>分类</th><th>更新时间</th></tr></thead>
-            <tbody><tr v-for="item in visibleRecords" :key="item.id" :class="{ 'is-selected': focusedRecord?.id === item.id, flash: flashRecordId === item.id }" @click="focusedRecord = item">
+            <tbody><tr v-for="item in visibleRecords" :key="item.id" :class="{ 'is-selected': focusedRecord?.id === item.id, flash: flashRecordId === item.id }" data-pressable @click="focusedRecord = item">
               <td style="font-weight:550"><button type="button" @click.stop="focusedRecord = item">{{ item.name }}</button></td><td class="muted">{{ item.status }}</td><td class="muted">{{ item.category || '未分类' }}</td><td class="muted">{{ item.updatedAt.slice(0, 10) }}</td>
             </tr></tbody>
           </table>

@@ -94,7 +94,6 @@
 }
 
 .workbench-button:hover:not(:disabled) { background: var(--surface-3); }
-.workbench-button:active:not(:disabled) { scale: calc(1 - .03 * var(--move)); }
 
 .workbench-button--primary {
   background: var(--accent);

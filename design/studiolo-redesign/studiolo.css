@@ -133,6 +133,7 @@
 /* ---------- 基础 ---------- */
 *, *::before, *::after { box-sizing: border-box; }
 html, body { margin: 0; }
+html { -webkit-tap-highlight-color: transparent; }
 body {
   font-family: var(--font-sans);
   font-size: 14px;
@@ -193,13 +194,27 @@ svg.i { width: 1em; height: 1em; flex: none; stroke: currentColor; fill: none; s
 .card-h .spacer { flex: 1; }
 
 /* ---------- 按钮 ---------- */
+:where(
+  button, a[href], summary, [role="button"], label.btn, [data-pressable],
+  input:is([type="button"], [type="submit"], [type="reset"], [type="image"], [type="checkbox"], [type="radio"])
+) {
+  transition: scale var(--dur-1) var(--ease-out);
+
+  @media (prefers-reduced-motion: no-preference) {
+    :where(:root:not([data-motion="reduced"])) &:is(
+      [data-touch-pressed],
+      :active:not(:has(:where(button, a[href], summary, input, [role="button"], [data-pressable]):active))
+    ):not(:disabled, [aria-disabled="true"]) {
+      scale: .97;
+    }
+  }
+}
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   height: 32px; padding: 0 12px; border-radius: var(--r-sm);
   font-size: 13px; font-weight: 550; white-space: nowrap;
   transition: background-color var(--dur-1), color var(--dur-1), box-shadow var(--dur-1), scale var(--dur-1) var(--ease-out);
 }
-.btn:active:not(:disabled) { scale: calc(1 - .03 * var(--move)); }
 .btn-primary { background: var(--accent); color: var(--accent-ink); }
 .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
 .btn-ghost { box-shadow: inset 0 0 0 1px var(--line-strong); }
@@ -211,7 +226,7 @@ svg.i { width: 1em; height: 1em; flex: none; stroke: currentColor; fill: none; s
 .btn-sm { height: 26px; padding: 0 9px; font-size: 12px; }
 .icon-btn {
   display: inline-grid; place-items: center; width: 32px; height: 32px; border-radius: var(--r-sm);
-  color: var(--text-2); transition: background-color var(--dur-1), color var(--dur-1);
+  color: var(--text-2); transition: background-color var(--dur-1), color var(--dur-1), scale var(--dur-1) var(--ease-out);
 }
 .icon-btn:hover:not(:disabled) { background: var(--surface-3); color: var(--text); }
 .icon-btn svg.i { width: 18px; height: 18px; }

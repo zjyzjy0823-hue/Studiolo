@@ -4027,7 +4027,6 @@ async function retryTurn(msg: ChatMessage) {
   cursor: pointer;
 }
 .m-add-btn .i { width: 18px; height: 18px; }
-.m-add-btn:active { background: var(--surface-3); color: var(--text); }
 .m-editor-field {
   flex: 1;
   min-width: 0;
@@ -4131,7 +4130,6 @@ async function retryTurn(msg: ChatMessage) {
   padding: 7px 10px;
 }
 .send .i { grid-area: 1 / 1; }
-.send:not(:disabled):active { scale: .94; }
 .send-icon-enter-active, .send-icon-leave-active,
 .attachment-enter-active, .attachment-leave-active {
   transition: opacity 120ms ease, transform 150ms var(--ease-out);

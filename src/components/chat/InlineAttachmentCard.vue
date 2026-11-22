@@ -163,6 +163,7 @@ async function handleDownload() {
     v-else
     class="inline-att-file-card"
     :class="{ 'is-clickable': Boolean(attachment.filePath) }"
+    :data-pressable="attachment.filePath ? '' : undefined"
     @click="handleCardClick"
   >
     <div class="inline-att-file-ic">

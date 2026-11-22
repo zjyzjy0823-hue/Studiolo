@@ -3,6 +3,7 @@ import { createPinia } from 'pinia'
 import { isTauri } from '@tauri-apps/api/core'
 import { installDesktopInteractions } from './desktop/desktopInteractions'
 import { initializeDesktopPlatform } from './desktop/platform'
+import { installTouchPressFeedback } from './utils/touchPressFeedback'
 import App from './App.vue'
 import './styles/main.css'
 import './desktop/desktop.css'
@@ -12,6 +13,7 @@ import './theme/tokens.css'
 
 async function mountApp() {
   const app = createApp(App).use(createPinia())
+  app.onUnmount(installTouchPressFeedback())
   if (isTauri()) {
     const platform = await initializeDesktopPlatform()
     document.documentElement.classList.add(`studiolo-${platform}`)

@@ -68,7 +68,6 @@ dialog.msheet-dlg::backdrop { overflow: hidden; overscroll-behavior: contain; ba
 }
 .opus-shell .tabbar {
   bottom: calc(14px + env(safe-area-inset-bottom));
-  -webkit-tap-highlight-color: transparent;
 }
 .opus-shell .tabbar .tab:focus-visible { outline: none; }
 .opus-shell .tabbar .tab:focus-visible .ico { outline: 2px solid var(--text); outline-offset: 1px; }
