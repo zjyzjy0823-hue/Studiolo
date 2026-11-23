@@ -1869,6 +1869,16 @@ export const useFleetStore = defineStore('fleet', () => {
 
     if (etype === 'TextDelta' && frame.text) {
       const deltaText = frame.text
+      if (frame.idle && frame.messageId) {
+        const lastAssistant = [...(messagesBySession.value[sKey] ?? [])].reverse().find(msg => msg.role === 'assistant')
+        if (lastAssistant?.id === frame.messageId || lastAssistant?.text.includes(deltaText)) return
+        cachedHistoryKeys.delete(sKey)
+        appendMessage(sKey, {
+          id: frame.messageId, role: 'assistant', nodeId, provider: effProvider,
+          text: deltaText, createdAt: Date.now(),
+        })
+        return
+      }
       updateAssistantMessage(sKey, nodeId, effProvider, frame.runId, frame.requestId, msg => ({
         ...msg,
         text: msg.text + deltaText,

@@ -649,6 +649,20 @@ class HermesWsAdapter(HermesAdapter):
             session.transcript = history
         return deepcopy(history[-limit:])
 
+    async def fetch_transcript(self, *, session_id: str, limit: int = 20) -> list[dict]:
+        """Read the latest persisted messages in chronological order for idle polling."""
+        try:
+            connection = await self._online()
+            async with self._history_lock:
+                if session_id in self._active:
+                    return []
+                session = await self._session(connection, session_id)
+            rows = await self._read_transcript(connection, session, max(1, min(limit, _HISTORY_LIMIT)))
+            return [{**row, "id": row.get("id"), "created_at": row.get("createdAt")} for row in rows]
+        except Exception as exc:
+            _LOG.debug("Hermes idle transcript unavailable: %s", type(exc).__name__)
+            return []
+
     async def list_models(self) -> list[dict[str, Any]]:
         connection = await self._online()
         result = await connection.call("model.options")

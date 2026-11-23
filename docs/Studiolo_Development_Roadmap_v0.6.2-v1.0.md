@@ -1,6 +1,6 @@
 # Studiolo 开发路线图 · v0.6.2–v1.0.0
 
-- **更新日期** 2026-11-19（`v0.8.0` Android 网站离线同步已实现，并通过 Android 真机与实际 Core 的 HTTPS 验收）
+- **更新日期** 2026-11-21（v0.8.1 调整为 Android 签名/分发版本，原「Android 全业务」顺延为 v0.8.2；v0.8.0 的 Android 网站离线同步已通过真机与 Core HTTPS 验收）
 - **v0.7 系列实现基线** `main @ c2fa3df`
 - **关联文档** [当前架构审计、详细设计、迁移与 TBD](architecture-plan-v0.6.2.md)
 
@@ -15,7 +15,8 @@ Studiolo 保留 Local-first 及多端同步。**先让常驻 Mac Core、多设�
 | **v0.7.1** | **Shared Space（`/space`）三档分级共享首版 & Theme Engine 标准化**：`standard`（随时查看/专用 Space Token API 直读）+ `protected`（UI 按次输密/细粒度 Vault Token 直读）+ `e2ee`（Argon2id/AES-256-GCM 零知识与 Epoch 轮换）；共用 Theme Registry 与可选 Liquid Glass | 本地全量单测、跨语言密码学向量与生产构建已通过，待远端 CI（含 PostgreSQL 0021 迁移）与真机验收（详单见 [v0.7.1 计划](v0.7.1-plan.md)） | ✅ 主体已落地 |
 | **v0.7.2** | **统一定时任务（Cron）管理 & macOS 桌面端回归**：Studiolo / OpenClaw / Hermes 单所有者 `JobRef` 视图、CronPort 远程适配、通知脱敏与丢确认防重调、PyInstaller 打包加固 | 本地前后端与 AgentNode 单测及构建已通过，待实机 OpenClaw/Hermes 上游联调与 macOS DMG 实装验收 | ✅ 主体已落地 |
 | **v0.8.0** | **Android Local-first MVP**。Rust `sqlx` SQLite 与事务 Outbox、Keystore 配对、网站双向 Sync v3、Studiolo 应用与通知图标 | 已配置 JDK 21、SDK 36 和 NDK r28c，待 GitHub Actions 出包及 Windows、macOS 桌面副本交叉同步验收 | ✅ 已实现，Android 与 Core HTTPS 真机验收通过 |
-| **v0.8.1** | **Android 全业务与移动完整体验闭环**：Ledger / Data / Conflict Center、Automation、Share to Studiolo、Android 本地密文块缓存与无障碍/低端机优化 | 跨端金额/时区语义、父子依赖同步、TalkBack 与 48dp 触控规范、Android 密文块接入 | 14–24 人日 |
+| **v0.8.1** | **Android 正式签名与 release 构建**：`signingConfigs.release` 注入、CI keystore 解码、release 裁剪（opt-level=z / LTO / strip）、`BuildTask.kt` 路径修正 | 签名密钥只存本机 secrets 与 GitHub secret，不入库 | ✅ 已发布（20 MB APK，CI 绿） |
+| **v0.8.2** | **Android 全业务与移动完整体验闭环**：Ledger / Data / Conflict Center、Automation、Share to Studiolo、Android 本地密文块缓存与无障碍/低端机优化 | 跨端金额/时区语义、父子依赖同步、TalkBack 与 48dp 触控规范、Android 密文块接入 | 14–24 人日 |
 | **v0.9.0** | **功能冻结、安全加固与发布工程**：长离线与密文恢复、桌面旧凭据安全存储迁移、Android WorkManager 后台同步、三端签名/公证候选包 | 跨版本升级与库/blob 一致性恢复、桌面凭据无损迁移、真机持久运行诊断 | 12–22 人日 |
 | **v1.0.0** | **三端正式发布**：Windows / macOS / Android 全量核心业务、Shared Space、Agent Fleet Chat、单所有者 Cron 与支持矩阵通过 | v0.9.0 候选验收、兼容矩阵、升级与故障回退演练 | 5–9 人日 |
 
@@ -68,13 +69,31 @@ Studiolo 保留 Local-first 及多端同步。**先让常驻 Mac Core、多设�
 
 **剩余验收** 确认 GitHub Actions 产出的 APK 在真机可安装。Windows 和 macOS 桌面副本连接同一 Core 后，确认桌面与 Android 的网站数据和 UUID 一致。
 
-## v0.8.1 · Android 全业务与移动离线完整闭环
+## v0.8.1 · Android 正式签名与 release 构建
+
+- **081-00** 打通 Android 分发链路：`signingConfigs.release` 按环境变量幂等注入、GitHub Actions 从 secret 解码 keystore（`umask 077` + `trap` 清理）、release 构建启用 `opt-level=z` / LTO / `codegen-units=1` / `panic=abort` / strip，APK 由 217 MB（debug DWARF）降到 20 MB。
+- 修正 `tauri android init` 生成的 `BuildTask.kt` 把 `tauri` 当相对路径的问题，`:app:rustBuild*Release` 不再 `MODULE_NOT_FOUND`；`studiolo_network_security.xml` 补 `includeSubdomains="false"` 通过 `lintVital`。
+- 补齐 `tauri.android.conf.json` 版本号，APK `versionName=0.8.1` / `versionCode=8001`。
+
+**独立验收** 签名 APK 可安装、版本号与 tag 一致、桌面三端包同版本产出。
+
+## v0.8.2 · Android 全业务与移动离线完整闭环
 
 - **081-01–08** 补齐 Android 离线 Dashboard、Ledger（严格遵循金额与 `Asia/Shanghai` 部署时区）、Websites 搜索标签、Data 有界读取、Automation 手动触发、Conflict Center 人工裁决、Devices/Settings 真实能力清理，以及底部「＋」快捷录入。
 - **081-09** 实现 **Share to Studiolo**（冷/热启动接收系统浏览器分享 URL 离线入库）。
 - **081-10–11** 接入 Android 本地 Shared Space 密文块缓存（复用桌面同套密码学与每次输密规则），并在真机完成安全区、≥48dp 触控、Android 返回栈、TalkBack、放大字体及低端机无模糊性能预算验收。
 
 **独立验收** 手机端所有核心业务与 Shared Space 在完全离线状态下均可读写并在联网后正确解决冲突或收敛；可及性与低端机降级符合支持门槛。
+
+## v0.8.7 · Agent 通道统一与主动消息
+
+- **087-01** Hermes adapter 从 ACP 切到 gateway `/api/ws`（已完成：`8ed0b41`），保留 `STUDIOLO_HERMES_TRANSPORT=acp` 回滚开关。
+- **087-02** agent-node 空闲会话轮询：Hermes 在无 prompt 时主动产生的消息推送到前端（解决「后台任务跑完不汇报」）。
+- **087-03** **Codex adapter 增加 `fetch_transcript`**：接 Codex app-server 的会话消息接口，纳入同一套空闲轮询。
+- **087-04** **OpenCode adapter 增加 `fetch_transcript`**：接 OpenCode server 的 session messages 接口，纳入同一套空闲轮询。
+- **087-05** 把三条通道的空闲转发收敛成统一接口（`IdleMessageSource` 协议：`fetch_transcript` + `last_message_id`），新增 provider 时只需实现该协议。
+
+**独立验收** 三个 provider 的会话在空闲时都能收到 agent 主动产生的消息；任一 provider 的连接故障不影响其它 provider 的轮询；Hermes 的 WS 与 ACP 两种 transport 下行为一致。
 
 ## v0.9.0 · 功能冻结、安全加固与发布工程
 

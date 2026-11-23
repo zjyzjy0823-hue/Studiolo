@@ -1,5 +1,7 @@
 import asyncio
 import json
+import time
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -7,7 +9,8 @@ import pytest
 from agent_node.adapters.hermes import HermesAdapter
 from agent_node.adapters.hermes_ws import HermesWsAdapter
 from agent_node.adapters.registry import build_adapter_registry
-from agent_node.config import load_node_config
+from agent_node.config import DirectTransferConfig, NodeConfig, load_node_config
+from agent_node.daemon import AgentNodeDaemon
 
 
 class GatewaySocket:
@@ -65,6 +68,73 @@ def wire_adapter(monkeypatch, tmp_path):
         return HermesWsAdapter((tmp_path,)), sockets
 
     return make
+
+
+def test_idle_transcript_relays_only_latest_new_assistant_once(tmp_path, wire_adapter):
+    async def run(*, canonical):
+        rows = [{"row_id": 1, "role": "assistant", "text": "old", "timestamp": time.time() - 60}]
+
+        def dispatch(socket, msg):
+            if msg["method"] == "session.create":
+                return {"result": {"session_id": "saved", "info": {"cwd": str(tmp_path)}}}
+            if msg["method"] == "session.transcript":
+                assert msg["params"] == {"session_id": "saved", "order": "latest", "limit": 20}
+                if not canonical:
+                    return {"error": {"code": -32601, "message": "Method not found"}}
+                return {"result": {"rows": rows}}
+            if msg["method"] == "session.history":
+                assert not canonical and msg["params"] == {"session_id": "saved"}
+                return {"result": {"messages": rows}}
+            return {"result": {}}
+
+        adapter, sockets = wire_adapter(dispatch, canonical=canonical)
+        config = NodeConfig("http://127.0.0.1:8000", "sn_live_test", (tmp_path,),
+                            direct=DirectTransferConfig(enabled=False))
+        daemon = AgentNodeDaemon(config, adapters={"hermes": adapter}, staging_dir=tmp_path)
+        ws = AsyncMock()
+        try:
+            await daemon.handle_command(ws, {"type": "session.open", "provider": "hermes"})
+            ws.send.reset_mock()
+            await daemon._poll_idle_transcripts(ws, "node")
+            ws.send.assert_not_awaited()
+            rows.extend([
+                {"row_id": 2, "role": "assistant", "text": "earlier report", "timestamp": time.time()},
+                {"row_id": 3, "role": "assistant", "text": "job finished", "timestamp": time.time()},
+                {"row_id": 4, "role": "user", "text": "user message", "timestamp": time.time()},
+            ])
+            await daemon._poll_idle_transcripts(ws, "node")
+            await daemon._poll_idle_transcripts(ws, "node")
+            assert len(sockets) == 1
+            ws.send.assert_awaited_once()
+            assert json.loads(ws.send.await_args.args[0]) == {
+                "type": "TextDelta", "nodeId": "node", "provider": "hermes", "sessionId": "saved",
+                "text": "job finished", "messageId": "3", "idle": True, "requestId": "idle-3",
+            }
+        finally:
+            await adapter.close()
+
+    asyncio.run(run(canonical=True))
+    asyncio.run(run(canonical=False))
+
+
+def test_idle_transcript_skips_active_run_and_recent_stream(tmp_path):
+    async def run():
+        adapter = AsyncMock(spec=HermesWsAdapter)
+        config = NodeConfig("http://127.0.0.1:8000", "sn_live_test", (tmp_path,),
+                            direct=DirectTransferConfig(enabled=False))
+        daemon = AgentNodeDaemon(config, adapters={"hermes": adapter}, staging_dir=tmp_path)
+        ws = AsyncMock()
+        await daemon.handle_command(ws, {"type": "session.subscribe", "provider": "hermes", "sessionId": "saved"})
+        ws.send.reset_mock()
+        daemon._active_runs.add(("hermes", "saved"))
+        await daemon._poll_idle_transcripts(ws, "node")
+        daemon._active_runs.clear()
+        daemon._idle_transcripts["saved"].last_event_at = time.monotonic()
+        await daemon._poll_idle_transcripts(ws, "node")
+        adapter.fetch_transcript.assert_not_awaited()
+        ws.send.assert_not_awaited()
+
+    asyncio.run(run())
 
 
 def test_replays_after_disconnect_and_preserves_approval(tmp_path, wire_adapter):

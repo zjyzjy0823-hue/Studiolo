@@ -588,6 +588,7 @@ export interface FleetWsEvent {
   projectDirectory?: string
   projectPermissions?: ProjectPermission[]
   messageId?: string
+  idle?: boolean
   scope?: 'turn' | 'cumulative'
   inputTokens?: number
   cachedInputTokens?: number

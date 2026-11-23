@@ -14,6 +14,7 @@ import re
 import socket
 import sqlite3
 import tempfile
+import time
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -58,6 +59,14 @@ from .worktree import current_session_ref, project_identity, recover_session_wor
 
 _LOG = logging.getLogger(__name__)
 _PROJECT_PERMISSION_MODES = ("default", "read", "deny")
+IDLE_TRANSCRIPT_INTERVAL_SECONDS = 2.0
+
+
+@dataclass
+class IdleTranscript:
+    opened_at: float = field(default_factory=lambda: time.time() * 1000)
+    last_event_at: float = float("-inf")
+    seen: deque[str] = field(default_factory=lambda: deque(maxlen=50))
 
 
 @dataclass
@@ -113,6 +122,7 @@ class AgentNodeDaemon:
         self._checkpoints: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._checkpoint_order: dict[tuple[str, str], list[str]] = {}
         self._active_runs: set[tuple[str, str]] = set()
+        self._idle_transcripts: dict[str, IdleTranscript] = {}
         self._compacting_sessions: set[tuple[str, str]] = set()
         self._session_streams: OrderedDict[tuple[str, str], SessionStream] = OrderedDict()
         self._command_db = (staging_dir or Path.home() / ".studiolo" / "agent-node") / "chat-commands.sqlite3"
@@ -492,6 +502,7 @@ class AgentNodeDaemon:
         client_conn_id = frame.get("_clientConnId")
         provider = str(frame.get("provider") or "mock")
         adapter = self.adapters.get(provider)
+        watch_idle = provider == "hermes" and hasattr(adapter, "fetch_transcript")
 
         async def send_back(payload: dict[str, Any]) -> None:
             if client_conn_id and "_clientConnId" not in payload:
@@ -828,6 +839,8 @@ class AgentNodeDaemon:
                                          "requestId": req_id, **fields})
             elif cmd == "session.subscribe":
                 sid = str(frame.get("sessionId") or "")
+                if watch_idle and sid:
+                    self._idle_transcripts.setdefault(sid, IdleTranscript())
                 key = (provider, sid)
                 is_active = key in self._active_runs
                 raw_last_seq = frame.get("afterSequence", frame.get("lastSeq"))
@@ -896,6 +909,8 @@ class AgentNodeDaemon:
                     use_worktree=bool(frame.get("useWorktree", False)),
                 )
                 meta = await asyncio.to_thread(self._remember_session_checkout, provider, meta, new=True)
+                if watch_idle:
+                    self._idle_transcripts.setdefault(meta["sessionId"], IdleTranscript())
                 await send_back({"type": "SessionOpened", **meta})
             elif cmd == "session.history":
                 sid = str(frame.get("sessionId") or "")
@@ -1230,6 +1245,8 @@ class AgentNodeDaemon:
                 if not sid:
                     raise ValueError("缺少会话 ID")
                 await adapter.delete_session(session_id=sid)
+                if watch_idle:
+                    self._idle_transcripts.pop(sid, None)
                 wt_pair = self._session_worktrees.pop((provider, sid), None)
                 if wt_pair is not None:
                     try:
@@ -1367,6 +1384,11 @@ class AgentNodeDaemon:
                                     }
                                 )
                     await base_emit(stream.append(evt))
+                    if watch_idle:
+                        if evt.get("type") == "Accepted":
+                            self._idle_transcripts.setdefault(sid, IdleTranscript())
+                        if idle := self._idle_transcripts.get(sid):
+                            idle.last_event_at = time.monotonic()
 
                 extra_kwargs = {"options": runtime} if runtime else {}
                 try:
@@ -1457,6 +1479,40 @@ class AgentNodeDaemon:
                 }
             )
 
+    async def _poll_idle_transcripts(self, ws: Any, node_id: str | None) -> None:
+        adapter = self.adapters.get("hermes")
+        if not hasattr(adapter, "fetch_transcript"):
+            return
+
+        def busy(sid: str, state: IdleTranscript) -> bool:
+            key = ("hermes", sid)
+            return (key in self._active_runs or key in self._compacting_sessions
+                    or time.monotonic() - state.last_event_at < 5)
+
+        for sid, state in list(self._idle_transcripts.items()):
+            if self._idle_transcripts.get(sid) is not state or busy(sid, state):
+                continue
+            rows = await adapter.fetch_transcript(session_id=sid)
+            if self._idle_transcripts.get(sid) is not state or busy(sid, state):
+                continue
+            unseen = [row for row in rows if row["id"] and row["id"] not in state.seen]
+            latest = next((row for row in reversed(unseen) if row["role"] == "assistant" and row["text"]
+                           and (state.seen or row["created_at"] is None or row["created_at"] >= state.opened_at)), None)
+            if latest is not None:
+                msg_id = latest["id"]
+                await self._send_ws(ws, {"type": "TextDelta", "nodeId": node_id, "provider": "hermes", "sessionId": sid,
+                                         "text": latest["text"], "messageId": msg_id, "idle": True,
+                                         "requestId": f"idle-{msg_id}"})
+            state.seen.extend(row["id"] for row in unseen)
+
+    async def _idle_transcript_watcher(self, ws: Any, node_id: str | None) -> None:
+        try:
+            while True:
+                await asyncio.sleep(IDLE_TRANSCRIPT_INTERVAL_SECONDS)
+                await self._poll_idle_transcripts(ws, node_id)
+        except websockets.ConnectionClosed:
+            return
+
     async def run_once(self) -> None:
         hello = await self.build_hello()
         async with websockets.connect(self.config.ws_url, open_timeout=10.0) as ws:
@@ -1483,6 +1539,7 @@ class AgentNodeDaemon:
                     await self._send_ws(ws, {"type": "NodeHeartbeat", "adapters": await self.probe_adapters()})
 
             hb_task = asyncio.create_task(heartbeat_loop())
+            idle_task = asyncio.create_task(self._idle_transcript_watcher(ws, ready.get("nodeId")))
             bg_tasks: set[asyncio.Task[None]] = set()
             try:
                 async for raw in ws:
@@ -1496,9 +1553,10 @@ class AgentNodeDaemon:
                 if isinstance(hermes, HermesAdapter):
                     hermes.on_effort_update = None
                 hb_task.cancel()
+                idle_task.cancel()
                 for t in list(bg_tasks):
                     t.cancel()
-                await asyncio.gather(*bg_tasks, return_exceptions=True)
+                await asyncio.gather(hb_task, idle_task, *bg_tasks, return_exceptions=True)
                 await self.port_previews.close()
 
     async def run_forever(self) -> None:
