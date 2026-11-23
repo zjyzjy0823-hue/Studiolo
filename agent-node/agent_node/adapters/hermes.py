@@ -643,6 +643,13 @@ class HermesAdapter(AgentAdapter):
         finally:
             self._context_waiters.pop(session_id, None)
 
+    async def steer(self, *, session_id: str, text: str) -> bool:
+        """将插话发给 ACP，确认文本随正在运行的回合流返回。"""
+        proc = await self._ensure_acp()
+        payload = {"sessionId": session_id, "prompt": [{"type": "text", "text": text}]}
+        resp = await proc.call("session/prompt", payload, timeout=None)
+        return str((resp or {}).get("stopReason") or "") == "end_turn"
+
     async def send_prompt(
         self,
         *,

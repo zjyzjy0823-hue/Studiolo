@@ -655,7 +655,7 @@ class AgentNodeDaemon:
                 await reply_cron({"ok": False, "code": "upstream_cron_error", "capabilities": caps, "error": str(err)})
             return
 
-        if adapter is None:
+        if adapter is None and cmd != "prompt.steer":
             await send_back({"type": "Failed", "code": "provider_unavailable", "message": f"Provider {provider} not enabled on node"})
             return
 
@@ -1378,6 +1378,28 @@ class AgentNodeDaemon:
                     })
                 finally:
                     self._active_runs.discard(run_key)
+            elif cmd == "prompt.steer":
+                sid = str(frame.get("sessionId") or "")
+                text = str(frame.get("text") or "").strip()
+                steer_fn = getattr(adapter, "steer", None)
+                if provider != "hermes" or not text or steer_fn is None:
+                    await send_back({"type": "SteerRejected", "sessionId": sid,
+                                     "code": "unsupported", "message": "当前 Agent 不支持插话"})
+                    return
+                if (provider, sid) not in self._active_runs:
+                    await send_back({"type": "SteerRejected", "sessionId": sid,
+                                     "code": "idle", "message": "当前没有运行中的回合"})
+                    return
+                try:
+                    ok = await steer_fn(session_id=sid, text=text)
+                except Exception as exc:  # noqa: BLE001
+                    await send_back({"type": "SteerRejected", "sessionId": sid,
+                                     "code": "failed", "message": str(exc)[:200]})
+                    return
+                await send_back({"type": "SteerAccepted" if ok else "SteerRejected",
+                                 "sessionId": sid, "code": "" if ok else "not_redirected",
+                                 "message": "" if ok else "上游未接受插话（可能已排队）"})
+                return
             elif cmd == "prompt.cancel":
                 sid = str(frame.get("sessionId") or "")
                 key = (provider, sid)

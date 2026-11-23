@@ -1289,6 +1289,7 @@ function handleExecutePlan() {
 
 // 待发队列内联编辑
 const editingQueueId = ref<string | null>(null)
+const steeringQueueKeys = ref(new Set<string>())
 const editingQueueText = ref('')
 
 async function handleRegenerate(msgIndex: number) {
@@ -1325,6 +1326,22 @@ function commitEditQueued(id: string) {
   }
   editingQueueId.value = null
   editingQueueText.value = ''
+}
+
+async function steerQueueItem(id: string, text: string) {
+  const key = effectiveKey.value
+  if (!key || steeringQueueKeys.value.has(key)) return
+  steeringQueueKeys.value.add(key)
+  try {
+    if (await fleet.steerPromptToSession(key, text)) {
+      fleet.removeQueuedPrompt(key, id)
+      emit('action', '已插话，当前回合会按新指令调整')
+    } else {
+      emit('action', '插话失败，可改用「打断重发」')
+    }
+  } finally {
+    steeringQueueKeys.value.delete(key)
+  }
 }
 
 // 内联 `@` 工作区文件/上下文 与 `/` 可执行指令自动补全
@@ -2806,10 +2823,18 @@ async function retryTurn(msg: ChatMessage) {
               ><OpusIcon name="arrowDown" /></button>
               <button
                 type="button"
-                class="btn btn-subtle btn-sm"
+                class="btn btn-subtle btn-sm queue-steer-btn"
+                title="向正在运行的回合补充指令"
+                :disabled="steeringQueueKeys.has(effectiveKey)"
+                @click="steerQueueItem(item.id, item.text)"
+              >插话</button>
+              <button
+                type="button"
+                class="btn btn-subtle btn-sm queue-steer-btn"
                 title="打断当前生成并立即优先发送这条指令"
+                :disabled="steeringQueueKeys.has(effectiveKey)"
                 @click="fleet.steerQueuedPrompt(effectiveKey, item.id)"
-              >立即插队</button>
+              >打断重发</button>
               <button
                 type="button"
                 class="icon-btn queue-icon-btn"
@@ -5051,6 +5076,9 @@ dialog.img-lightbox::backdrop {
   font-size: 12px;
 }
 .queue-icon-btn { width: 24px; height: 24px; flex: none; }
+.queue-steer-btn { flex: none; }
+.thread-mobile .queue-steer-btn,
+.thread-mobile .queue-icon-btn { min-height: 36px; }
 .queue-add-btn { height: 28px; padding: 0 9px; font-size: 11.5px; flex: none; }
 
 .composer-box, .mcomposer .box { position: relative; }

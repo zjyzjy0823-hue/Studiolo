@@ -323,6 +323,11 @@ export const useFleetStore = defineStore('fleet', () => {
   const checkpointsBySession = ref<Record<string, CheckpointInfo[]>>({})
   const filesCacheByTarget = ref<Record<string, string[]>>({})
   const queuedPromptsBySession = ref<Record<string, QueuedPromptItem[]>>({})
+  const pendingSteers = new Map<string, {
+    sessionKey: string
+    result: Promise<boolean>
+    finish: (accepted: boolean) => void
+  }>()
   const imagePreviewByArtifactId = ref<Record<string, string>>({})
   const pendingRunPrompts = new Map<string, { text: string; model?: string; startedAt?: number }>()
   const pendingMcpRequests = new Map<string, string>()
@@ -517,6 +522,7 @@ export const useFleetStore = defineStore('fleet', () => {
   }
 
   function disconnectSocket() {
+    for (const { finish } of pendingSteers.values()) finish(false)
     intentionalClose = true
     activeConnectRoute = null
     if (nativeConnectionId) {
@@ -732,6 +738,7 @@ export const useFleetStore = defineStore('fleet', () => {
 
   // ---------------- WebSocket 连接与首帧认证 ----------------
   function connectionLost(code?: number) {
+    for (const { finish } of pendingSteers.values()) finish(false)
     autoPulledProviders.clear()
     pendingStreamResync.clear()
     forcedHistoryRequests.clear()
@@ -856,6 +863,7 @@ export const useFleetStore = defineStore('fleet', () => {
       void invoke('fleet_send', { id, frame }).catch(() => {
         if (nativeConnectionId !== id || fleetRoute.value !== route || wsState.value !== 'online') return
         if (typeof frame.requestId === 'string') {
+          pendingSteers.get(frame.requestId)?.finish(false)
           pendingSessionWrites.get(frame.requestId)?.finish(new Error('Fleet 暂时无法发送请求'))
           projectPermissionWrites.get(frame.requestId)?.(new Error('Fleet 暂时无法发送请求'))
           transmittingOutbox.delete(frame.requestId)
@@ -1001,6 +1009,13 @@ export const useFleetStore = defineStore('fleet', () => {
 
   function handleWsEvent(frame: FleetWsEvent) {
     const etype = frame.type
+
+    const steer = frame.requestId ? pendingSteers.get(frame.requestId) : undefined
+    if (steer && (etype === 'SteerAccepted' || etype === 'SteerRejected' || etype === 'Error'
+      || etype === 'NodeUnavailable' || etype === 'Failed')) {
+      steer.finish(etype === 'SteerAccepted')
+      return
+    }
 
     if (etype === 'FleetSnapshot' && Array.isArray(frame.nodes)) {
       reconnectAttempt = 0
@@ -2183,7 +2198,20 @@ export const useFleetStore = defineStore('fleet', () => {
         false,
         sKey,
       )
-      void drainNextQueuedPrompt(sKey)
+      const pendingSteer = [...pendingSteers.values()].find(steer => steer.sessionKey === sKey)
+      if (pendingSteer) {
+        // 先让队列按钮处理插话结果，再唤醒下一条消息，避免自动重发同一条。
+        const route = fleetRoute.value
+        void pendingSteer.result.then(accepted => {
+          if (accepted) {
+            setTimeout(() => {
+              if (fleetRoute.value === route && wsState.value === 'online') void drainNextQueuedPrompt(sKey)
+            }, 0)
+          }
+        })
+      } else {
+        void drainNextQueuedPrompt(sKey)
+      }
       void flushOutbox()
       return
     }
@@ -2822,6 +2850,32 @@ export const useFleetStore = defineStore('fleet', () => {
       ...queuedPromptsBySession.value,
       [sKey]: list.filter(i => i.id !== queueId),
     }
+  }
+
+  function steerPromptToSession(sKey: string, text: string): Promise<boolean> {
+    const sess = sessionsByKey.value[sKey]
+    const clean = text.trim()
+    if (!sess || !clean || [...pendingSteers.values()].some(steer => steer.sessionKey === sKey)) {
+      return Promise.resolve(false)
+    }
+    const requestId = createRequestId()
+    let finish!: (accepted: boolean) => void
+    const result = new Promise<boolean>(resolve => { finish = resolve })
+    pendingSteers.set(requestId, { sessionKey: sKey, result, finish })
+    void result.then(() => pendingSteers.delete(requestId))
+    try {
+      if (!sendWsCommand({
+        type: 'prompt.steer',
+        nodeId: sess.nodeId,
+        provider: sess.provider,
+        sessionId: sess.sessionId,
+        text: clean,
+        requestId,
+      }, false)) finish(false)
+    } catch {
+      finish(false)
+    }
+    return result
   }
 
   function updateQueuedPrompt(sKey: string, queueId: string, nextText: string) {
@@ -4164,6 +4218,7 @@ export const useFleetStore = defineStore('fleet', () => {
     removeQueuedPrompt,
     updateQueuedPrompt,
     reorderQueuedPrompt,
+    steerPromptToSession,
     steerQueuedPrompt,
     continueInterruptedRun,
     addDiffAnnotation,
