@@ -1,5 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createPinia, disposePinia } from 'pinia'
+import { createServer } from 'vite'
 import { effectScope, ref } from 'vue'
 
 import {
@@ -199,6 +201,140 @@ test('会话快照保留历史、去重压缩事件，并将快照分界线留�
   ), [oldest, snapReply, compact, reconnect, next])
   assert.deepEqual(mergeHistoryBoundaries([reconnect], [next]), [next, reconnect])
   assert.equal(systemEventLabel(compact.systemEvents[0]), '上下文已压缩 · 保留最近 2 轮')
+})
+
+test('重连快照按会话恢复跟随意图', async t => {
+  const server = await createServer({
+    configFile: false,
+    server: { middlewareMode: true, ws: false, watch: null },
+    optimizeDeps: { noDiscovery: true },
+  })
+  t.after(() => server.close())
+  const { useFleetStore, sessionKey } = await server.ssrLoadModule('/src/stores/fleet.ts')
+  const sockets = []
+  class MockSocket {
+    static OPEN = 1
+    readyState = MockSocket.OPEN
+    sent = []
+    constructor() { sockets.push(this) }
+    send(raw) { this.sent.push(JSON.parse(raw)) }
+    close() { this.onclose?.({ code: 1006 }) }
+  }
+  const originalSocket = globalThis.WebSocket
+  const originalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  globalThis.WebSocket = MockSocket
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: { getItem: key => key === 'studiolo:access-token' ? 'test-token' : null, removeItem() {} },
+  })
+  t.after(() => {
+    globalThis.WebSocket = originalSocket
+    if (originalStorage) Object.defineProperty(globalThis, 'localStorage', originalStorage)
+    else delete globalThis.localStorage
+  })
+
+  function reconnect(t, followBefore) {
+    const pinia = createPinia()
+    const fleet = useFleetStore(pinia)
+    t.after(() => {
+      fleet.disconnectSocket()
+      disposePinia(pinia)
+    })
+    const session = { nodeId: 'node', provider: 'codex', sessionId: 'session' }
+    const key = sessionKey(session.nodeId, session.provider, session.sessionId)
+    const receive = frame => fleet.handleWsEvent({ ...session, ...frame })
+    fleet.sessionsByKey = { [key]: { ...session, title: '测试会话', cwd: '' } }
+    fleet.activeSessionKey = key
+    fleet.connectSocket()
+    receive({ type: 'FleetSnapshot', nodes: [] })
+    fleet.reportFollowIntent(key, followBefore)
+    sockets.at(-1).close()
+    assert.equal(fleet.wsState, 'reconnecting')
+    assert.equal(fleet.snapshotRestorePending(key), true)
+    fleet.connectSocket()
+    receive({ type: 'FleetSnapshot', nodes: [] })
+    const requests = type => sockets.at(-1).sent.filter(frame => frame.type === type)
+    const completeHistory = (requestId, messages = [], fields = {}) => {
+      receive({ type: 'SessionHistory', requestId, messages, ...fields })
+    }
+    const replay = ({ snapshotRequired = true } = {}) => receive({
+      type: 'SessionStreamReplay', snapshotRequired, events: [], requestId: requests('session.subscribe').at(-1).requestId,
+    })
+    const requestSnapshot = () => {
+      const [ordinary] = requests('session.history')
+      replay()
+      assert.equal(requests('session.history').length, 1)
+      completeHistory(ordinary.requestId)
+      assert.equal(fleet.snapshotRestoreVersion(key), 0)
+      const [, snapshot] = requests('session.history')
+      assert.notEqual(snapshot.requestId, ordinary.requestId)
+      return snapshot.requestId
+    }
+    return { fleet, key, completeHistory, replay, requestSnapshot, requests }
+  }
+
+  await t.test('跟随中的会话只在对应的最新页提交后发布一次信号', t => {
+    const { fleet, key, completeHistory, replay, requestSnapshot, requests } = reconnect(t, true)
+    const requestId = requestSnapshot()
+    completeHistory('older', [{ id: 'old', role: 'user', text: '旧消息' }], { beforeCursor: 'cursor' })
+    assert.equal(fleet.snapshotRestoreVersion(key), 0)
+    completeHistory(requestId, [{ id: 'latest', role: 'assistant', text: '快照回复' }])
+    assert.ok(fleet.messagesBySession[key].some(message => message.id === 'latest'))
+    assert.equal(fleet.snapshotRestoreVersion(key), 1)
+    assert.equal(fleet.snapshotRestorePending(key), false)
+    completeHistory(requestId)
+    assert.equal(fleet.snapshotRestoreVersion(key), 1)
+
+    fleet.nodes = [{ id: 'node', status: 'online', adapters: [] }]
+    const interruptedRequest = fleet.loadSessionHistory(key, true)
+    fleet.handleWsEvent({ type: 'NodePresence', nodeId: 'node', status: 'offline' })
+    assert.equal(fleet.wsState, 'online')
+    assert.equal(fleet.snapshotRestorePending(key), true)
+    fleet.handleWsEvent({ type: 'NodePresence', nodeId: 'node', status: 'online' })
+    replay()
+    const nodeSnapshot = requests('session.history').at(-1).requestId
+    assert.notEqual(nodeSnapshot, interruptedRequest)
+    completeHistory(interruptedRequest)
+    assert.equal(fleet.snapshotRestoreVersion(key), 0)
+    completeHistory(nodeSnapshot)
+    assert.equal(fleet.snapshotRestoreVersion(key), 2)
+  })
+
+  await t.test('重连前已上翻的会话在快照分支解除等待，不发布信号', t => {
+    const { fleet, key, completeHistory, requestSnapshot } = reconnect(t, false)
+    const requestId = requestSnapshot()
+    assert.equal(fleet.snapshotRestorePending(key), false)
+    completeHistory(requestId)
+    assert.equal(fleet.snapshotRestoreVersion(key), 0)
+  })
+
+  await t.test('取消后的空快照不发布信号，连续重连以本次请求为准', t => {
+    const { fleet, key, completeHistory, replay, requestSnapshot, requests } = reconnect(t, true)
+    const requestId = requestSnapshot()
+    fleet.cancelSnapshotFollow(key)
+    assert.equal(fleet.snapshotRestorePending(key), false)
+    completeHistory(requestId)
+    assert.equal(fleet.snapshotRestoreVersion(key), 0)
+
+    sockets.at(-1).close()
+    assert.equal(fleet.snapshotRestorePending(key), true)
+    fleet.connectSocket()
+    fleet.handleWsEvent({ type: 'FleetSnapshot', nodes: [] })
+    replay()
+    const [nextSnapshot] = requests('session.history')
+    completeHistory(requestId)
+    assert.equal(fleet.snapshotRestoreVersion(key), 0)
+    completeHistory(nextSnapshot.requestId)
+    assert.equal(fleet.snapshotRestoreVersion(key), 1)
+    assert.equal(fleet.snapshotRestorePending(key), false)
+
+    sockets.at(-1).close()
+    fleet.connectSocket()
+    fleet.handleWsEvent({ type: 'FleetSnapshot', nodes: [] })
+    replay({ snapshotRequired: false })
+    assert.equal(fleet.snapshotRestorePending(key), false)
+    assert.equal(fleet.snapshotRestoreVersion(key), 0)
+  })
 })
 
 test('首页实测用量按代理轮次去重并隔离本机记录', t => {

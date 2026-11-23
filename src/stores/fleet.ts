@@ -93,6 +93,14 @@ type NativeFleetEvent =
   | { event: 'frame'; frame: FleetWsEvent }
   | { event: 'reconnecting' | 'unauthorized' }
 
+type SnapshotFollowIntent = {
+  followBefore: boolean
+  cancelled: boolean
+  requestId: string | null
+  settled: boolean
+}
+const snapshotFollowIntent = new Map<string, SnapshotFollowIntent>()
+
 export function sessionKey(nodeId: string, provider: AdapterProvider, sessionId: string): string {
   return `${nodeId}::${provider}::${sessionId}`
 }
@@ -288,6 +296,10 @@ export const useFleetStore = defineStore('fleet', () => {
   const streamIdBySession = new Map<string, string>()
   const pendingStreamResync = new Map<string, string>()
   const forcedHistoryRequests = new Set<string>()
+  const followIntentBySession = new Map<string, boolean>()
+  const queuedSnapshotHistory = new Set<string>()
+  const snapshotRestoreVersions = shallowReactive(new Map<string, number>())
+  let snapshotRestoreTick = 0
   const forkSeedBySession = ref<Record<string, string>>({})
   const sideChatSessionKeyByParent = ref<Record<string, string>>({})
   const projectPermissionsByNode = ref<Record<string, ProjectPermission[]>>({})
@@ -444,6 +456,7 @@ export const useFleetStore = defineStore('fleet', () => {
   // ---------------- 内存清理（登出 / 切换工作区时必须彻底销毁正文与密钥） ----------------
   function clearSessionMemory() {
     disconnectSocket()
+    followIntentBySession.clear()
     sessionsByKey.value = {}
     messagesBySession.value = {}
     pendingApprovalsByCall.value = {}
@@ -542,6 +555,9 @@ export const useFleetStore = defineStore('fleet', () => {
       }
       socket = null
     }
+    snapshotFollowIntent.clear()
+    queuedSnapshotHistory.clear()
+    snapshotRestoreVersions.clear()
     wsState.value = 'disconnected'
   }
 
@@ -737,11 +753,83 @@ export const useFleetStore = defineStore('fleet', () => {
   }
 
   // ---------------- WebSocket 连接与首帧认证 ----------------
+  function reportFollowIntent(sKey: string, follow: boolean) {
+    if (sKey) followIntentBySession.set(sKey, follow)
+  }
+
+  function cancelSnapshotFollow(sKey: string) {
+    const intent = snapshotFollowIntent.get(sKey)
+    if (intent) {
+      intent.cancelled = true
+      intent.settled = true
+    }
+    snapshotRestoreVersions.delete(sKey)
+  }
+
+  function forgetFollowIntent(sKey: string) {
+    cancelSnapshotFollow(sKey)
+    snapshotFollowIntent.delete(sKey)
+    followIntentBySession.delete(sKey)
+  }
+
+  function snapshotRestorePending(sKey: string) {
+    const intent = snapshotFollowIntent.get(sKey)
+    return Boolean(intent && !intent.settled)
+  }
+
+  function snapshotRestoreVersion(sKey: string) {
+    return snapshotRestoreVersions.get(sKey) ?? 0
+  }
+
+  function captureSnapshotFollow(nodeId?: string) {
+    for (const key of new Set([activeSessionKey.value, ...followIntentBySession.keys()])) {
+      const session = sessionsByKey.value[key]
+      if (!session || (nodeId && session.nodeId !== nodeId)) continue
+      snapshotRestoreVersions.delete(key)
+      snapshotFollowIntent.set(key, {
+        followBefore: followIntentBySession.get(key) ?? true,
+        cancelled: false, requestId: null, settled: false,
+      })
+    }
+  }
+
+  function requestSnapshotHistory(sKey: string) {
+    const intent = snapshotFollowIntent.get(sKey)
+    if (intent && (!intent.followBefore || intent.settled)) {
+      intent.settled = true
+      snapshotFollowIntent.delete(sKey)
+    }
+    if (pendingHistoryPages.value[sKey]) {
+      // Wait for the existing page so only the request issued for this snapshot can restore follow.
+      queuedSnapshotHistory.add(sKey)
+      return
+    }
+    queuedSnapshotHistory.delete(sKey)
+    const requestId = loadSessionHistory(sKey, true)
+    if (!intent || intent.settled) return
+    if (requestId) intent.requestId = requestId
+    else snapshotFollowIntent.delete(sKey)
+  }
+
+  function finishSnapshotHistory(sKey: string, requestId: string | undefined, committed: boolean) {
+    const intent = snapshotFollowIntent.get(sKey)
+    if (!intent || !requestId || requestId !== intent.requestId) return
+    const restore = committed && !intent.settled && !intent.cancelled
+    intent.settled = true
+    snapshotFollowIntent.delete(sKey)
+    if (restore) snapshotRestoreVersions.set(sKey, ++snapshotRestoreTick)
+  }
+
   function connectionLost(code?: number) {
+    if (wsState.value !== 'reconnecting') {
+      snapshotFollowIntent.clear()
+      captureSnapshotFollow()
+    }
     for (const { finish } of pendingSteers.values()) finish(false)
     autoPulledProviders.clear()
     pendingStreamResync.clear()
     forcedHistoryRequests.clear()
+    queuedSnapshotHistory.clear()
     pendingHistoryPages.value = {}
     contextReads.value = {}
     contextCompactions.value = {}
@@ -807,7 +895,11 @@ export const useFleetStore = defineStore('fleet', () => {
       return
     }
 
-    if (socket || reconnectTimer) disconnectSocket()
+    if (socket) disconnectSocket()
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
     intentionalClose = false
     activeConnectRoute = route
     wsState.value = reconnectAttempt > 0 ? 'reconnecting' : 'connecting'
@@ -844,6 +936,7 @@ export const useFleetStore = defineStore('fleet', () => {
       const delay = RECONNECT_DELAYS_MS[Math.min(reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)]
       reconnectAttempt += 1
       reconnectTimer = setTimeout(() => {
+        reconnectTimer = null
         if (!intentionalClose && fleetRoute.value === route) connectSocket()
       }, delay)
     }
@@ -1037,11 +1130,8 @@ export const useFleetStore = defineStore('fleet', () => {
         }
       })
       nodes.value.forEach(initializeOnlineNode)
-      if (activeSessionKey.value) {
-        subscribeSession(activeSessionKey.value)
-      }
-      for (const key of Object.keys(runningBySession.value)) {
-        if (key !== activeSessionKey.value && runningBySession.value[key]) subscribeSession(key)
+      for (const key of new Set([activeSessionKey.value, ...Object.keys(runningBySession.value), ...snapshotFollowIntent.keys()])) {
+        if (key) subscribeSession(key)
       }
       if (activeSessionKey.value) loadSessionHistory(activeSessionKey.value, cachedHistoryKeys.has(activeSessionKey.value))
       void flushOutbox()
@@ -1051,6 +1141,17 @@ export const useFleetStore = defineStore('fleet', () => {
     if (etype === 'NodePresence' && frame.nodeId) {
       const liveStatus = (frame as unknown as { status?: string }).status ?? 'offline'
       if (liveStatus !== 'online') {
+        if (nodes.value.find(node => node.id === frame.nodeId)?.status === 'online') {
+          captureSnapshotFollow(frame.nodeId)
+          for (const key of snapshotFollowIntent.keys()) {
+            if (sessionsByKey.value[key]?.nodeId !== frame.nodeId) continue
+            pendingStreamResync.delete(key)
+            const requestId = pendingHistoryPages.value[key]
+            if (requestId) forcedHistoryRequests.delete(requestId)
+            delete pendingHistoryPages.value[key]
+            queuedSnapshotHistory.delete(key)
+          }
+        }
         autoPulledProviders.delete(frame.nodeId)
         for (const [requestId, target] of pendingSessionLists) {
           if (!target.startsWith(`${frame.nodeId}::`)) continue
@@ -1071,7 +1172,7 @@ export const useFleetStore = defineStore('fleet', () => {
       const liveNode = nodes.value.find(n => n.id === frame.nodeId)
       if (liveNode) initializeOnlineNode(liveNode)
       if (liveStatus === 'online') {
-        for (const key of new Set([activeSessionKey.value, ...Object.keys(runningBySession.value)])) {
+        for (const key of new Set([activeSessionKey.value, ...Object.keys(runningBySession.value), ...snapshotFollowIntent.keys()])) {
           if (sessionsByKey.value[key]?.nodeId === frame.nodeId) subscribeSession(key)
         }
         void flushOutbox()
@@ -1110,7 +1211,11 @@ export const useFleetStore = defineStore('fleet', () => {
       }
       const streamRequest = [...pendingStreamResync].find(([, requestId]) => requestId === frame.requestId)
       if (streamRequest) {
-        pendingStreamResync.delete(streamRequest[0])
+        const [key] = streamRequest
+        pendingStreamResync.delete(key)
+        if (etype !== 'NodeUnavailable' && snapshotFollowIntent.get(key)?.requestId === null && !queuedSnapshotHistory.has(key)) {
+          snapshotFollowIntent.delete(key)
+        }
         return
       }
       const forcedHistory = forcedHistoryRequests.delete(frame.requestId)
@@ -1118,6 +1223,8 @@ export const useFleetStore = defineStore('fleet', () => {
       if (historyRequest) {
         delete pendingHistoryPages.value[historyRequest]
         historyStateBySession.value[historyRequest] = { state: 'error', message: frame.message || '无法读取历史消息' }
+        finishSnapshotHistory(historyRequest, frame.requestId, false)
+        if (queuedSnapshotHistory.has(historyRequest)) requestSnapshotHistory(historyRequest)
         return
       }
       if (forcedHistory) return
@@ -1340,12 +1447,14 @@ export const useFleetStore = defineStore('fleet', () => {
     if (etype === 'SessionHistory' && nodeId && frame.sessionId && Array.isArray(frame.messages)) {
       const k = sessionKey(nodeId, provider, frame.sessionId)
       rememberSessionRuntime(k, frame)
-      if (pendingHistoryPages.value[k] === frame.requestId) delete pendingHistoryPages.value[k]
+      const releasedPage = Boolean(frame.requestId && pendingHistoryPages.value[k] === frame.requestId)
+      if (releasedPage) delete pendingHistoryPages.value[k]
       if (frame.cursorExpired) {
         delete historyCursorBySession.value[k]
         loadSessionHistory(k, true)
         return
       }
+      if (releasedPage && queuedSnapshotHistory.has(k)) requestSnapshotHistory(k)
       if (frame.historyCursor !== undefined) historyCursorBySession.value[k] = frame.historyCursor
       if (frame.messages.length) {
         const hasDetails = frame.messages.some(row => row.thought || row.toolCalls?.length || row.parts?.some(part => part.type !== 'text'))
@@ -1359,11 +1468,14 @@ export const useFleetStore = defineStore('fleet', () => {
       const liveRunId = runningBySession.value[k]
       const hasLiveHistory = frame.messages.some(m => m.runId || m.thought || m.toolCalls?.length)
       const forced = Boolean(frame.requestId && forcedHistoryRequests.delete(frame.requestId))
+      if (!frame.messages.length) {
+        if (!frame.beforeCursor) finishSnapshotHistory(k, frame.requestId, true)
+        return
+      }
       // 支持向上分页加载更早历史：当新拉取条数多于当前内存条数时允许替换刷新
       const hasSystemHistory = frame.messages.some(m => m.systemEvents?.length)
       if (!forced && !frame.beforeCursor && !hasLiveHistory && !hasSystemHistory && existing.some(m => m.role !== 'system') &&
         frame.messages.length <= existing.length) return
-      if (!frame.messages.length) return
       cachedHistoryKeys.delete(k)
       const hydrated: ChatMessage[] = frame.messages.map((m, idx) => {
         const live = (m.runId || m.requestId) && existing.find(row => row.role === m.role && (
@@ -1442,6 +1554,7 @@ export const useFleetStore = defineStore('fleet', () => {
         ...messagesBySession.value,
         [k]: mergeHistoryBoundaries(existing, hydrated).slice(-MAX_MESSAGES_PER_SESSION),
       }
+      finishSnapshotHistory(k, frame.requestId, true)
       const curSess = sessionsByKey.value[k]
       if (curSess && isGenericSessionTitle(curSess.title)) {
         const firstUser = hydrated.find(x => x.role === 'user' && x.text.trim())
@@ -1524,11 +1637,12 @@ export const useFleetStore = defineStore('fleet', () => {
           messagesBySession.value = { ...messagesBySession.value, [sKey]: (messagesBySession.value[sKey] ?? [])
             .map(message => message.streaming ? { ...message, streaming: false, liveProgress: undefined } : message) }
         }
-        loadSessionHistory(sKey, true)
+        requestSnapshotHistory(sKey)
         requestSessionDiff(sKey)
         refreshApprovals()
         return
       }
+      if (snapshotFollowIntent.get(sKey)?.requestId === null && !queuedSnapshotHistory.has(sKey)) snapshotFollowIntent.delete(sKey)
       if (frame.events.length) {
         // 仅在全量重放（非 lastSeq 增量模式）时清理半截占位，避免增量续传造成内容闪断
         if (!frame.incremental) {
@@ -1981,6 +2095,8 @@ export const useFleetStore = defineStore('fleet', () => {
     }
 
     if (etype === 'SessionDeleted') {
+      forgetFollowIntent(sKey)
+      queuedSnapshotHistory.delete(sKey)
       delete contextUsageBySession.value[sKey]
       delete contextReads.value[sKey]
       delete contextWaitingForModel.value[sKey]
@@ -2650,6 +2766,7 @@ export const useFleetStore = defineStore('fleet', () => {
       if (sent) {
         pendingHistoryPages.value[sKey] = requestId
         if (force) forcedHistoryRequests.add(requestId)
+        return requestId
       }
     }
   }
@@ -4212,6 +4329,11 @@ export const useFleetStore = defineStore('fleet', () => {
     openSession,
     activateSession,
     loadSessionHistory,
+    reportFollowIntent,
+    cancelSnapshotFollow,
+    forgetFollowIntent,
+    snapshotRestorePending,
+    snapshotRestoreVersion,
     sendPromptToSpecificSession,
     sendPrompt,
     enqueuePrompt,

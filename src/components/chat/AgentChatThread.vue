@@ -106,6 +106,18 @@ const settingsOpen = ref(false)
 const draftMeasure = ref<HTMLElement>()
 const editorHeight = ref<number>()
 const followLatest = ref(true)
+let userScrollIntentUntil = 0
+
+watch(effectiveKey, (key, previousKey) => {
+  if (previousKey) fleet.forgetFollowIntent(previousKey)
+  userScrollIntentUntil = 0
+  fleet.reportFollowIntent(key, true)
+}, { immediate: true, flush: 'sync' })
+
+watch(followLatest, follow => {
+  fleet.reportFollowIntent(effectiveKey.value, follow)
+}, { flush: 'sync' })
+
 type ComposerPanel = 'model' | 'permissions' | 'attach' | 'context'
 const panel = ref<ComposerPanel>('model')
 const adapter = computed(() => effectiveNode.value?.adapters.find(a => a.provider === effectiveProvider.value))
@@ -929,10 +941,38 @@ watch(
   { immediate: true },
 )
 
+watch(
+  () => [effectiveKey.value, fleet.snapshotRestoreVersion(effectiveKey.value)] as const,
+  async ([key, version], [previousKey, previousVersion]) => {
+    if (key !== previousKey || version <= previousVersion) return
+    const scrollIntent = userScrollIntentUntil
+    await nextTick()
+    if (key !== effectiveKey.value || fleet.snapshotRestoreVersion(key) !== version || !listEl.value) return
+    if (scrollIntent !== userScrollIntentUntil || Date.now() <= userScrollIntentUntil) return
+    void scrollToBottomInstant()
+  },
+)
+
+function markUserScrollIntent() {
+  userScrollIntentUntil = Date.now() + 1200
+}
+
+function trackUpwardWheel(event: WheelEvent) {
+  if (event.deltaY < 0 && !event.ctrlKey) markUserScrollIntent()
+}
+
+function trackUpwardKey(event: KeyboardEvent) {
+  if (!event.defaultPrevented && ['PageUp', 'ArrowUp', 'Home'].includes(event.key)) markUserScrollIntent()
+}
+
 function trackMessageScroll() {
   const list = listEl.value
   if (!list) return
   const atBottom = list.scrollHeight - list.clientHeight - list.scrollTop < 32
+  if (!atBottom && fleet.snapshotRestorePending(effectiveKey.value)) {
+    if (Date.now() > userScrollIntentUntil) return
+    fleet.cancelSnapshotFollow(effectiveKey.value)
+  }
   followLatest.value = atBottom
   if (atBottom) {
     unseenBelowCount.value = 0
@@ -1177,6 +1217,7 @@ const searchMatches = computed<SearchMatchEntry[]>(() => {
 })
 
 function scrollToMessage(msgId: string, workLog?: WorkLogMatch) {
+  fleet.cancelSnapshotFollow(effectiveKey.value)
   revealedWorkLog.value = workLog && { ...workLog }
   highlightedMsgId.value = msgId
   followLatest.value = false
@@ -2155,6 +2196,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  fleet.forgetFollowIntent(effectiveKey.value)
   if (speechInst && speechActive.value) {
     try { speechInst.stop() } catch { /* ignore */ }
   }
@@ -2354,6 +2396,9 @@ async function retryTurn(msg: ChatMessage) {
       tabindex="-1"
       :class="mobile ? 'mmsgs' : 'msgs'"
       @scroll.passive="trackMessageScroll"
+      @touchstart.passive="markUserScrollIntent"
+      @wheel.passive="trackUpwardWheel"
+      @keydown="trackUpwardKey"
       @mouseup="handleMessageSelection"
       @keyup="handleMessageSelection"
     >
