@@ -70,6 +70,7 @@ import {
   isGenericSessionTitle,
   mergeToolCallUpdate,
   mergeHistoryBoundaries,
+  sameTurnContent,
   switchMessageBranch,
 } from '../services/chatHelpers'
 import { loadSoundPref, playCueSound, saveSoundPref } from '../services/soundCue'
@@ -1849,9 +1850,12 @@ export const useFleetStore = defineStore('fleet', () => {
         frame.messages.length <= existing.length) return
       cachedHistoryKeys.delete(k)
       const hydrated: ChatMessage[] = frame.messages.map((m, idx) => {
-        const live = (m.runId || m.requestId) && existing.find(row => row.role === m.role && (
-          Boolean(m.runId && (row.runId === m.runId || row.requestId === m.runId)) || Boolean(m.requestId && row.requestId === m.requestId)
-        ))
+        const live = (m.runId || m.requestId)
+          ? existing.find(row => row.role === m.role && (
+              Boolean(m.runId && (row.runId === m.runId || row.requestId === m.runId)) || Boolean(m.requestId && row.requestId === m.requestId)
+            ))
+          // 历史回放没有 runId/requestId：退回内容指纹，从最近的消息往前找
+          : [...existing].reverse().find(row => sameTurnContent(row, m))
         if (!snapshot && live && live.text.length >= (m.text?.length ?? 0) && (live.thought?.length ?? 0) >= (m.thought?.length ?? 0) &&
           (live.toolCalls?.length ?? 0) >= (m.toolCalls?.length ?? 0)) {
           return live.delivery === 'sending' ? { ...live, delivery: 'sent' } : live

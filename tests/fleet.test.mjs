@@ -67,6 +67,7 @@ import {
   parseCodeBlockLang,
   readTurnTestResult,
   repliedUserMessageIds,
+  sameTurnContent,
   searchSessionsAndMessages,
   sessionInboxProject,
   shouldConvertToPastedBlock,
@@ -82,13 +83,18 @@ test('a delivery receipt advances only for the current user turn with actual rep
     { id: 'older-agent', role: 'assistant', text: 'legacy reply' },
     { id: 'sent-user', role: 'user', requestId: 'sent', delivery: 'sent', text: 'second' },
     { id: 'thinking', role: 'assistant', requestId: 'sent', text: '', thought: 'still working' },
+    { id: 'tool-user', role: 'user', requestId: 'tools', delivery: 'sent', text: 'run tests' },
+    { id: 'tool-agent', role: 'assistant', requestId: 'tools', text: '', toolCalls: [{ id: 'call-1', callId: 'call-1', name: 'shell', status: 'running' }] },
+    { id: 'empty-thought-user', role: 'user', requestId: 'blank', delivery: 'sent', text: 'blank' },
+    { id: 'blank-agent', role: 'assistant', requestId: 'blank', text: '', thought: '   ' },
     { id: 'replied-user', role: 'user', requestId: 'answered', delivery: 'sent', text: 'third' },
     { id: 'replied-agent', role: 'assistant', requestId: 'answered', text: 'reply' },
     { id: 'waiting-user', role: 'user', requestId: 'pending', delivery: 'sending', text: 'fourth' },
     { id: 'unrelated-agent', role: 'assistant', requestId: 'other', text: 'unrelated reply' },
     { id: 'unbound-agent', role: 'assistant', text: 'reply without a turn ID' },
   ]
-  assert.deepEqual([...repliedUserMessageIds(messages)], ['older-user', 'replied-user'])
+  // 思考或工具调用即算 Agent 已响应；空白思考不算。
+  assert.deepEqual([...repliedUserMessageIds(messages)], ['older-user', 'sent-user', 'tool-user', 'replied-user'])
 })
 
 test('工作记录按单步工具选用操作类别', () => {
@@ -132,7 +138,7 @@ test('工具图标区分命名空间工具、文件操作和单一用途的命�
     [{ name: 'view_image', toolKind: 'read' }, 'image'],
     [{ name: 'inspect_trace' }, 'trace'],
     [{ name: 'mcp__calendar__get_events' }, 'plug'],
-    [{ name: 'tool', title: 'config/file-write.json' }, 'api'],
+    [{ name: 'tool', title: 'config/file-write.json' }, 'wrench'],
   ]
   for (const [tool, icon] of examples) {
     assert.equal(describeToolCall(tool).icon, icon, tool.name)
@@ -1623,4 +1629,29 @@ test('hermes-mobile 风格正文内联媒体分段：MEDIA 指令、路径引用
   assert.equal(segments.length, 2)
   assert.equal(segments[0].type, 'text')
   assert.equal(segments[1].type, 'media')
+})
+
+test('历史消息内容指纹匹配角色、正文与工具调用顺序', async t => {
+  const toolCalls = [
+    { id: 'local-read', callId: 'read', name: 'read_file' },
+    { id: 'local-shell', callId: 'shell', name: 'shell' },
+  ]
+  const local = { role: 'assistant', text: '已完成', thought: '本地思考', toolCalls }
+  const remote = {
+    ...local,
+    toolCalls: toolCalls.map(call => ({ ...call, id: call.callId })),
+  }
+  const cases = [
+    ['角色、正文和工具调用顺序相同', local, remote, true],
+    ['正文只差首尾空白', local, { ...remote, text: '  已完成\n' }, true],
+    ['正文不同', local, { ...remote, text: '尚未完成' }, false],
+    ['工具调用数量不同', local, { ...remote, toolCalls: remote.toolCalls.slice(0, 1) }, false],
+    ['工具调用顺序不同', local, { ...remote, toolCalls: [...remote.toolCalls].reverse() }, false],
+    ['角色不同', local, { ...remote, role: 'user' }, false],
+    ['思考内容不同', local, { ...remote, thought: '回放思考' }, true],
+    ['两边正文和工具调用均为空', { role: 'assistant', text: '' }, { role: 'assistant', text: '', toolCalls: [] }, true],
+  ]
+  for (const [name, left, right, expected] of cases) {
+    await t.test(name, () => assert.equal(sameTurnContent(left, right), expected))
+  }
 })
