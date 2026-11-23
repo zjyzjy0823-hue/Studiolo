@@ -605,6 +605,12 @@ class HermesWsAdapter(HermesAdapter):
         for row in rows:
             if detail := metadata.get(row["sessionId"]):
                 row.update({key: detail[key] for key in ("cwd", "model") if key in detail})
+                # Legacy session.list only carries started_at, so a long-running session that was
+                # active minutes ago sorts as if it were a day old and sinks out of the client's
+                # preview list. Prefer the dashboard's authoritative last-active timestamp.
+                last_active = detail.get("last_active") or detail.get("last_active_at") or detail.get("updated_at")
+                if isinstance(last_active, (int, float)) and last_active > 0:
+                    row["updatedAt"] = last_active
 
     async def open_session(self, *, cwd: str, session_id: str | None = None,
                            use_worktree: bool = False) -> dict[str, Any]:
