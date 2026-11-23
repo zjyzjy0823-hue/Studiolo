@@ -16,6 +16,22 @@ import type {
   ToolCallStatus,
 } from '../types/fleet'
 
+/**
+ * 内容指纹：历史回放不带 runId/requestId 时，用内容判断是否为同一条消息。
+ * 只用于「保留本地计算字段」，不用于身份判定。
+ */
+export function sameTurnContent(
+  local: ChatMessage,
+  remote: Pick<ChatMessage, 'text' | 'toolCalls'> & { role: string },
+): boolean {
+  if (local.role !== remote.role) return false
+  if ((local.text ?? '').trim() !== (remote.text ?? '').trim()) return false
+  const localCalls = (local.toolCalls ?? []).map(call => call.callId || call.id).filter(Boolean)
+  const remoteCalls = (remote.toolCalls ?? []).map(call => call.callId || call.id).filter(Boolean)
+  if (localCalls.length !== remoteCalls.length) return false
+  return localCalls.every((id, index) => id === remoteCalls[index])
+}
+
 export function repliedUserMessageIds(messages: readonly ChatMessage[]): Set<string> {
   const replied = new Set<string>()
   let user: ChatMessage | undefined

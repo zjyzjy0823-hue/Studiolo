@@ -65,6 +65,7 @@ import {
   parseCodeBlockLang,
   readTurnTestResult,
   repliedUserMessageIds,
+  sameTurnContent,
   searchSessionsAndMessages,
   sessionInboxProject,
   shouldConvertToPastedBlock,
@@ -199,6 +200,31 @@ test('会话快照保留历史、去重压缩事件，并将快照分界线留�
   ), [oldest, snapReply, compact, reconnect, next])
   assert.deepEqual(mergeHistoryBoundaries([reconnect], [next]), [next, reconnect])
   assert.equal(systemEventLabel(compact.systemEvents[0]), '上下文已压缩 · 保留最近 2 轮')
+})
+
+test('历史消息内容指纹匹配角色、正文与工具调用顺序', async t => {
+  const toolCalls = [
+    { id: 'local-read', callId: 'read', name: 'read_file' },
+    { id: 'local-shell', callId: 'shell', name: 'shell' },
+  ]
+  const local = { role: 'assistant', text: '已完成', thought: '本地思考', toolCalls }
+  const remote = {
+    ...local,
+    toolCalls: toolCalls.map(call => ({ ...call, id: call.callId })),
+  }
+  const cases = [
+    ['角色、正文和工具调用顺序相同', local, remote, true],
+    ['正文只差首尾空白', local, { ...remote, text: '  已完成\n' }, true],
+    ['正文不同', local, { ...remote, text: '尚未完成' }, false],
+    ['工具调用数量不同', local, { ...remote, toolCalls: remote.toolCalls.slice(0, 1) }, false],
+    ['工具调用顺序不同', local, { ...remote, toolCalls: [...remote.toolCalls].reverse() }, false],
+    ['角色不同', local, { ...remote, role: 'user' }, false],
+    ['思考内容不同', local, { ...remote, thought: '回放思考' }, true],
+    ['两边正文和工具调用均为空', { role: 'assistant', text: '' }, { role: 'assistant', text: '', toolCalls: [] }, true],
+  ]
+  for (const [name, left, right, expected] of cases) {
+    await t.test(name, () => assert.equal(sameTurnContent(left, right), expected))
+  }
 })
 
 test('首页实测用量按代理轮次去重并隔离本机记录', t => {
