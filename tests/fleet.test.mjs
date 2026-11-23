@@ -80,13 +80,18 @@ test('a delivery receipt advances only for the current user turn with actual rep
     { id: 'older-agent', role: 'assistant', text: 'legacy reply' },
     { id: 'sent-user', role: 'user', requestId: 'sent', delivery: 'sent', text: 'second' },
     { id: 'thinking', role: 'assistant', requestId: 'sent', text: '', thought: 'still working' },
+    { id: 'tool-user', role: 'user', requestId: 'tools', delivery: 'sent', text: 'run tests' },
+    { id: 'tool-agent', role: 'assistant', requestId: 'tools', text: '', toolCalls: [{ id: 'call-1', callId: 'call-1', name: 'shell', status: 'running' }] },
+    { id: 'empty-thought-user', role: 'user', requestId: 'blank', delivery: 'sent', text: 'blank' },
+    { id: 'blank-agent', role: 'assistant', requestId: 'blank', text: '', thought: '   ' },
     { id: 'replied-user', role: 'user', requestId: 'answered', delivery: 'sent', text: 'third' },
     { id: 'replied-agent', role: 'assistant', requestId: 'answered', text: 'reply' },
     { id: 'waiting-user', role: 'user', requestId: 'pending', delivery: 'sending', text: 'fourth' },
     { id: 'unrelated-agent', role: 'assistant', requestId: 'other', text: 'unrelated reply' },
     { id: 'unbound-agent', role: 'assistant', text: 'reply without a turn ID' },
   ]
-  assert.deepEqual([...repliedUserMessageIds(messages)], ['older-user', 'replied-user'])
+  // 思考或工具调用即算 Agent 已响应；空白思考不算。
+  assert.deepEqual([...repliedUserMessageIds(messages)], ['older-user', 'sent-user', 'tool-user', 'replied-user'])
 })
 
 test('工作记录按单步工具选用操作类别', () => {

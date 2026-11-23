@@ -25,7 +25,14 @@ export function repliedUserMessageIds(messages: readonly ChatMessage[]): Set<str
       continue
     }
     if (message.role !== 'assistant' || !user || user.delivery === 'failed') continue
-    const hasReply = message.text.trim() || message.forms?.length || message.media?.length || message.artifacts?.length
+    const hasReply = Boolean(
+      message.text.trim()
+      || message.thought?.trim()
+      || message.toolCalls?.length
+      || message.forms?.length
+      || message.media?.length
+      || message.artifacts?.length,
+    )
     if (!hasReply) continue
     const userId = user.requestId || user.runId
     const assistantIds = [message.requestId, message.runId].filter(Boolean)
