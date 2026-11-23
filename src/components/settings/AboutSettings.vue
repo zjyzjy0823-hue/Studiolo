@@ -27,7 +27,7 @@ const emit = defineEmits<{ action: [message: string] }>()
       <button class="row about-row" type="button" @click="emit('action', '使用文档将在正式发布时提供。')"><BookOpen :size="16" /><span class="grow">Documentation</span><ArrowUpRight :size="14" /></button>
       <button class="row about-row" type="button" @click="emit('action', '许可证信息将在正式发布时提供。')"><FileText :size="16" /><span class="grow">Licenses</span><ArrowUpRight :size="14" /></button>
     </div>
-    <DiagnosticsSettings />
+    <DiagnosticsSettings @action="emit('action', $event)" />
   </SettingsSection>
 </template>
 

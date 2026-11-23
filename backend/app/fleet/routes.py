@@ -563,7 +563,7 @@ async def fleet_node_ws(websocket: WebSocket):
 
             target_client_id = frame.pop("_clientConnId", None)
             outbound = {**frame, "nodeId": node_id}
-            await fleet_hub.broadcast_workspace(
+            await fleet_hub.broadcast_node_event(
                 workspace_id,
                 outbound,
                 target_client_id=target_client_id if evt_type in (

@@ -8,6 +8,8 @@ from uuid import uuid4
 
 from fastapi import WebSocket
 
+from .audit import audit_event
+
 
 MAX_DEDUP_KEYS = 2048
 ALLOWED_CLIENT_COMMANDS = frozenset({
@@ -375,6 +377,25 @@ class FleetRelayHub:
             if key:
                 self._finish_forward(key, delivered)
         return None
+
+    async def broadcast_node_event(
+        self,
+        workspace_id: str,
+        frame: dict[str, Any],
+        *,
+        target_client_id: str | None = None,
+    ) -> None:
+        sequence = frame.get("seq")
+        audit_event(
+            "core",
+            session_id=frame.get("sessionId"),
+            run_id=frame.get("runId"),
+            stream_id=frame.get("streamId"),
+            seq=sequence if sequence is not None else frame.get("sequence"),
+            event_type=frame.get("type"),
+            call_id=frame.get("callId"),
+        )
+        await self.broadcast_workspace(workspace_id, frame, target_client_id=target_client_id)
 
     async def broadcast_workspace(
         self,

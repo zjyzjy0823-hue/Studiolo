@@ -93,6 +93,22 @@ type NativeFleetEvent =
   | { event: 'frame'; frame: FleetWsEvent }
   | { event: 'reconnecting' | 'unauthorized' }
 
+type AuditEntry = {
+  t: number
+  type: string
+  session: string
+  run: string
+  stream: string
+  seq: number | string
+  call: string
+}
+
+function auditField(value: unknown, limit?: number): string {
+  if (typeof value !== 'string' || !value) return '-'
+  const field = limit === undefined ? value : Array.from(value).slice(0, limit).join('')
+  return field.replace(/[\r\n]/g, '_')
+}
+
 type SnapshotFollowIntent = {
   followBefore: boolean
   cancelled: boolean
@@ -294,6 +310,7 @@ export const useFleetStore = defineStore('fleet', () => {
   const historyStateBySession = ref<Record<string, { state: 'empty' | 'ready' | 'body-only' | 'error'; message?: string }>>({})
   const lastSeqBySession = ref<Record<string, number>>({})
   const streamIdBySession = new Map<string, string>()
+  const auditRing: AuditEntry[] = []
   const pendingStreamResync = new Map<string, string>()
   const forcedHistoryRequests = new Set<string>()
   const followIntentBySession = new Map<string, boolean>()
@@ -456,6 +473,7 @@ export const useFleetStore = defineStore('fleet', () => {
   // ---------------- 内存清理（登出 / 切换工作区时必须彻底销毁正文与密钥） ----------------
   function clearSessionMemory() {
     disconnectSocket()
+    auditRing.length = 0
     followIntentBySession.clear()
     sessionsByKey.value = {}
     messagesBySession.value = {}
@@ -1100,8 +1118,27 @@ export const useFleetStore = defineStore('fleet', () => {
     }
   }
 
+  function pushAudit(entry: AuditEntry) {
+    auditRing.push(entry)
+    if (auditRing.length > 300) auditRing.shift()
+  }
+
+  function dumpAuditLog(): string {
+    return auditRing.map(e => `${new Date(e.t).toISOString()} [audit] side=client session=${e.session} run=${e.run} stream=${e.stream} seq=${e.seq} type=${e.type} call=${e.call}`).join('\n')
+  }
+
   function handleWsEvent(frame: FleetWsEvent) {
     const etype = frame.type
+    const seq = frame.seq ?? frame.sequence
+    pushAudit({
+      t: Date.now(),
+      type: auditField(etype),
+      session: auditField(frame.sessionId, 8),
+      run: auditField(frame.runId, 8),
+      stream: auditField(frame.streamId, 8),
+      seq: typeof seq === 'number' && Number.isInteger(seq) ? seq : auditField(seq),
+      call: auditField(frame.callId, 8),
+    })
 
     const steer = frame.requestId ? pendingSteers.get(frame.requestId) : undefined
     if (steer && (etype === 'SteerAccepted' || etype === 'SteerRejected' || etype === 'Error'
@@ -4236,6 +4273,7 @@ export const useFleetStore = defineStore('fleet', () => {
     connectSocket,
     disconnectSocket,
     handleWsEvent,
+    dumpAuditLog,
     selectNode,
     selectProvider,
     composerDrafts,

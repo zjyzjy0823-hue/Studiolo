@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useAuthStore } from '../../stores/auth'
+import { useFleetStore } from '../../stores/fleet'
 import { useCopyFeedback } from '../../composables/useCopyFeedback'
 import { getDiagnostics, diagnosticsRows, diagnosticsText, type Diagnostics } from '../../services/diagnostics'
 import SettingRow from './SettingRow.vue'
 import ActionButton from '../ui/ActionButton.vue'
 import OpusIcon from '../ui/OpusIcon.vue'
 
+const emit = defineEmits<{ action: [message: string] }>()
 const auth = useAuthStore()
+const fleet = useFleetStore()
 const { copy: copyWithFeedback, isCopied } = useCopyFeedback()
 const data = ref<Diagnostics | null>(null)
 const loading = ref(false)
@@ -30,6 +33,10 @@ async function copy() {
   const ok = await copyWithFeedback(diagnosticsText(data.value), 'diag')
   message.value = ok ? '诊断信息已复制。' : '复制失败，请重试。'
 }
+async function copyAudit() {
+  const ok = await copyWithFeedback(fleet.dumpAuditLog(), 'audit')
+  emit('action', ok ? '已复制' : '复制失败，请重试。')
+}
 watch(() => auth.token, refresh, { immediate: true, flush: 'sync' })
 </script>
 
@@ -39,6 +46,7 @@ watch(() => auth.token, refresh, { immediate: true, flush: 'sync' })
       <h3 id="diagnostics-title">Studiolo 诊断</h3>
       <ActionButton variant="secondary" size="sm" :disabled="loading" @click="refresh">刷新</ActionButton>
       <ActionButton variant="secondary" size="sm" :class="{ 'is-copied': isCopied('diag') }" :disabled="!data || loading" @click="copy"><OpusIcon :name="isCopied('diag') ? 'check' : 'copy'" />{{ isCopied('diag') ? '已复制' : '复制诊断' }}</ActionButton>
+      <ActionButton variant="secondary" size="sm" :class="{ 'is-copied': isCopied('audit') }" @click="copyAudit"><OpusIcon :name="isCopied('audit') ? 'check' : 'copy'" />复制事件审计日志</ActionButton>
     </div>
     <p v-if="loading" class="diagnostics-note" role="status">正在检查后端与 Core…</p>
     <p v-if="message" class="diagnostics-note" role="status">{{ message }}</p>

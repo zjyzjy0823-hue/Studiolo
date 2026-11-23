@@ -24,6 +24,7 @@ import websockets
 from .adapters.base import AgentAdapter, ApprovalCallback, EventEmitter
 from .adapters.hermes import HermesAdapter
 from .adapters.registry import build_adapter_registry
+from .audit import audit_event
 from .config import NodeConfig, PathOutsideAllowedRootsError, detect_lan_urls, ensure_allowed_path
 from .crypto_chunks import generate_file_key
 from .hermes_media import CAPABILITY as HERMES_MEDIA_CAPABILITY, MediaError, relay_hermes_attachment
@@ -324,6 +325,16 @@ class AgentNodeDaemon:
 
     async def _send_ws(self, ws: Any, frame: dict[str, Any]) -> None:
         async with self._send_lock:
+            sequence = frame.get("seq")
+            audit_event(
+                "node",
+                session_id=frame.get("sessionId"),
+                run_id=frame.get("runId"),
+                stream_id=frame.get("streamId"),
+                seq=sequence if sequence is not None else frame.get("sequence"),
+                event_type=frame.get("type"),
+                call_id=frame.get("callId"),
+            )
             await ws.send(json.dumps(frame, ensure_ascii=False))
 
     def _claim_prompt_command(self, command_id: str) -> bool:
