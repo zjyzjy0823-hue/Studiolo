@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, type ObjectDirective } from 'vue'
 import { describeToolCall } from '../../services/chatHelpers'
 import type { WorkLogProgress, WorkLogStep } from '../../services/messageSegments'
 import OpusIcon from '../ui/OpusIcon.vue'
@@ -25,6 +25,28 @@ watch(() => props.reveal, reveal => {
 
 function onToggle(event: Event) {
   isOpen.value = (event.currentTarget as HTMLDetailsElement).open
+}
+
+function updateThoughtFade(element: HTMLElement) {
+  element.classList.toggle('thought-fade', Math.ceil(element.scrollTop) + element.clientHeight < element.scrollHeight)
+}
+
+let thoughtResizeObserver: ResizeObserver | undefined
+const vThoughtFade: ObjectDirective<HTMLParagraphElement> = {
+  mounted(element) {
+    thoughtResizeObserver ??= new ResizeObserver(entries => {
+      for (const { target } of entries) updateThoughtFade(target as HTMLParagraphElement)
+    })
+    thoughtResizeObserver.observe(element)
+  },
+  updated: updateThoughtFade,
+  unmounted(element) {
+    thoughtResizeObserver?.unobserve(element)
+  },
+}
+
+function onThoughtScroll(event: Event) {
+  updateThoughtFade(event.currentTarget as HTMLParagraphElement)
 }
 
 function formatTime(ms?: number): string {
@@ -77,7 +99,7 @@ const label = computed(() => {
             <ThoughtPulseIcon :active="isThinking && step.id === steps.at(-1)?.id" />
             思考过程<OpusIcon name="chevD" class="thought-chevron" />
           </summary>
-          <p>{{ step.text }}</p>
+          <p v-thought-fade @scroll="onThoughtScroll">{{ step.text }}</p>
         </details>
         <ToolCallCard
           v-else
@@ -167,7 +189,27 @@ const label = computed(() => {
 .thought-label .i { width: 13px; height: 13px; color: var(--accent); }
 .thought-label .thought-chevron { width: 10px; height: 10px; color: var(--text-3); }
 .work-log-thought[open] .thought-chevron { transform: rotate(180deg); }
-.work-log-thought p { margin: 2px 0 6px; color: var(--text-2); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.work-log-thought p {
+  margin: 2px 0 6px;
+  color: var(--text-2);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 40vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.work-log-thought p.thought-fade {
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 18px), transparent);
+}
+@keyframes thought-reveal {
+  from { max-height: 0; opacity: 0; }
+  to { max-height: 40vh; opacity: 1; }
+}
+.work-log-thought[open] p { animation: thought-reveal 0.18s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .work-log-thought[open] p { animation: none; }
+}
 @keyframes work-log-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: no-preference) {
   .work-log-spinner { animation: work-log-spin .85s linear infinite; }

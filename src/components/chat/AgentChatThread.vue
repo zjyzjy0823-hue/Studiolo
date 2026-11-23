@@ -1007,8 +1007,12 @@ const assistantTurns = computed(() => {
   const previews = fleet.imagePreviewByArtifactId
   return new Map(effectiveMessages.value.filter(msg => msg.role === 'assistant').map(msg => {
     const items = buildThreadRenderItems(msg, previews)
-    return [msg.id, { items, singleLog: items.filter(item => item.type === 'work-log').length === 1,
-      testResult: msg.streaming ? undefined : readTurnTestResult(msg.toolCalls) }]
+    const workLogs = items.filter(item => item.type === 'work-log')
+    return [msg.id, {
+      items,
+      lastWorkLogId: workLogs.at(-1)?.id,
+      testResult: msg.streaming ? undefined : readTurnTestResult(msg.toolCalls),
+    }]
   }))
 })
 const isStreaming = computed(() =>
@@ -2519,7 +2523,7 @@ async function retryTurn(msg: ChatMessage) {
                           v-if="item.type === 'work-log'"
                           :steps="item.steps"
                           :progress="item.progress"
-                          :duration-ms="assistantTurns.get(msg.id)?.singleLog ? msg.durationMs : undefined"
+                          :duration-ms="assistantTurns.get(msg.id)?.lastWorkLogId === item.id ? msg.durationMs : undefined"
                           :reveal="revealedWorkLog?.logId === item.id ? revealedWorkLog : undefined"
                           @open-file="fp => emit('openFile', fp)"
                           @open-subagent="sid => emit('openSubagent', sid)"

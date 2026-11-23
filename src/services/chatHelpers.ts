@@ -16,6 +16,22 @@ import type {
   ToolCallStatus,
 } from '../types/fleet'
 
+/**
+ * 内容指纹：历史回放不带 runId/requestId 时，用内容判断是否为同一条消息。
+ * 只用于「保留本地计算字段」，不用于身份判定。
+ */
+export function sameTurnContent(
+  local: ChatMessage,
+  remote: Pick<ChatMessage, 'text' | 'toolCalls'> & { role: string },
+): boolean {
+  if (local.role !== remote.role) return false
+  if ((local.text ?? '').trim() !== (remote.text ?? '').trim()) return false
+  const localCalls = (local.toolCalls ?? []).map(call => call.callId || call.id).filter(Boolean)
+  const remoteCalls = (remote.toolCalls ?? []).map(call => call.callId || call.id).filter(Boolean)
+  if (localCalls.length !== remoteCalls.length) return false
+  return localCalls.every((id, index) => id === remoteCalls[index])
+}
+
 export function repliedUserMessageIds(messages: readonly ChatMessage[]): Set<string> {
   const replied = new Set<string>()
   let user: ChatMessage | undefined
@@ -25,7 +41,14 @@ export function repliedUserMessageIds(messages: readonly ChatMessage[]): Set<str
       continue
     }
     if (message.role !== 'assistant' || !user || user.delivery === 'failed') continue
-    const hasReply = message.text.trim() || message.forms?.length || message.media?.length || message.artifacts?.length
+    const hasReply = Boolean(
+      message.text.trim()
+      || message.thought?.trim()
+      || message.toolCalls?.length
+      || message.forms?.length
+      || message.media?.length
+      || message.artifacts?.length,
+    )
     if (!hasReply) continue
     const userId = user.requestId || user.runId
     const assistantIds = [message.requestId, message.runId].filter(Boolean)
@@ -502,7 +525,7 @@ const toolOperations = {
   memory: { icon: 'data', action: '访问记忆', summary: '记忆' },
   trace: { icon: 'trace', action: '检查运行记录', summary: '运行记录' },
   mcp: { icon: 'plug', action: '调用集成', summary: '集成' },
-  other: { icon: 'api', action: '调用工具', summary: '工具' },
+  other: { icon: 'wrench', action: '调用工具', summary: '工具' },
 } as const
 
 type ToolKind = keyof typeof toolOperations
