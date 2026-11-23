@@ -26,6 +26,7 @@ export default {
     trace: '<path d="M4 4v16h16m-13-6 4-4 3 2 5-6"/><circle cx="7" cy="14" r=".8"/><circle cx="19" cy="6" r=".8"/>',
     zap: '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
     api: '<path d="M8 5 3 12l5 7M16 5l5 7-5 7M14 4l-4 16"/>',
+    wrench: '<path d="M17.4 3.3a5.5 5.5 0 0 0-7.1 7.1l-6.8 6.8a2.35 2.35 0 0 0 3.3 3.3l6.8-6.8a5.5 5.5 0 0 0 7.1-7.1L17.3 10 14 6.7z"/>',
     settings: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',

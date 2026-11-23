@@ -502,7 +502,7 @@ const toolOperations = {
   memory: { icon: 'data', action: '访问记忆', summary: '记忆' },
   trace: { icon: 'trace', action: '检查运行记录', summary: '运行记录' },
   mcp: { icon: 'plug', action: '调用集成', summary: '集成' },
-  other: { icon: 'api', action: '调用工具', summary: '工具' },
+  other: { icon: 'wrench', action: '调用工具', summary: '工具' },
 } as const
 
 type ToolKind = keyof typeof toolOperations

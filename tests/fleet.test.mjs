@@ -130,7 +130,7 @@ test('工具图标区分命名空间工具、文件操作和单一用途的命�
     [{ name: 'view_image', toolKind: 'read' }, 'image'],
     [{ name: 'inspect_trace' }, 'trace'],
     [{ name: 'mcp__calendar__get_events' }, 'plug'],
-    [{ name: 'tool', title: 'config/file-write.json' }, 'api'],
+    [{ name: 'tool', title: 'config/file-write.json' }, 'wrench'],
   ]
   for (const [tool, icon] of examples) {
     assert.equal(describeToolCall(tool).icon, icon, tool.name)
