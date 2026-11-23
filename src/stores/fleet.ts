@@ -248,6 +248,7 @@ export const useFleetStore = defineStore('fleet', () => {
   const outbox = ref<FleetOutboxItem[]>([])
   const pendingOutboxWrites = new Set<string>()
   const transmittingOutbox = shallowReactive(new Map<string, object>())
+  const attemptedOutboxSteers = new WeakMap<FleetOutboxItem, object>()
   const deliveredOutbox = new Map<string, FleetOutboxItem>()
   const cachedHistoryKeys = new Set<string>()
   const cachedHistoryTimes = new Map<string, number>()
@@ -2940,6 +2941,20 @@ export const useFleetStore = defineStore('fleet', () => {
     return true
   }
 
+  function appendSteerUserMessage(item: FleetOutboxItem) {
+    const sKey = item.sessionKey
+    const id = `user-${item.id}`
+    if (messagesBySession.value[sKey]?.some(row => row.id === id)) return
+    appendMessage(sKey, {
+      id,
+      role: 'user',
+      nodeId: item.session.nodeId,
+      provider: item.session.provider,
+      text: item.text,
+      createdAt: item.createdAt,
+    })
+  }
+
   async function flushOutbox() {
     const route = fleetRoute.value
     if (!route || wsState.value !== 'online') return
@@ -2947,9 +2962,40 @@ export const useFleetStore = defineStore('fleet', () => {
     for (const item of outbox.value) {
       const session = sessionsByKey.value[item.sessionKey]
       if (busySessions.has(item.sessionKey)) continue
+      const running = runningBySession.value[item.sessionKey]
+      const transmission = transmittingOutbox.get(item.id)
+      const steerAttempt = attemptedOutboxSteers.get(item)
+      // 插话回执未到时，让下一条消息进入现有的 pendingSteers 检查。
+      if (running && transmission && transmission === steerAttempt) continue
       busySessions.add(item.sessionKey)
       if (!session || nodes.value.find(node => node.id === session.nodeId)?.status !== 'online'
-        || runningBySession.value[item.sessionKey] || transmittingOutbox.has(item.id)) continue
+        || transmission) continue
+
+      if (running) {
+        if (session.provider === 'hermes' && item.files.length === 0 && !steerAttempt) {
+          const attempt = {}
+          attemptedOutboxSteers.set(item, attempt)
+          transmittingOutbox.set(item.id, attempt)
+          void (async () => {
+            let accepted = false
+            try {
+              accepted = await steerPromptToSession(item.sessionKey, item.text)
+            } catch { accepted = false }
+            if (fleetRoute.value !== route || transmittingOutbox.get(item.id) !== attempt) return
+            if (accepted) {
+              await removeOutboxPrompt(item)
+              if (fleetRoute.value !== route) return
+              appendSteerUserMessage(item)
+            } else {
+              transmittingOutbox.delete(item.id)
+            }
+            // 回合可能已在插话回执前结束，本次处理完后补一次常规发送。
+            if (!runningBySession.value[item.sessionKey]) void flushOutbox()
+          })()
+        }
+        continue
+      }
+
       const attempt = {}
       transmittingOutbox.set(item.id, attempt)
       void (async () => {

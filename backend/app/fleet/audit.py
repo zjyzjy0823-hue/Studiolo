@@ -11,7 +11,7 @@ _AUDIT_LOGGER: logging.Logger | None = None
 
 def audit_logger() -> logging.Logger | None:
     global _AUDIT_LOGGER
-    if os.environ.get("STUDIOLO_AUDIT", "1") == "0":
+    if "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("STUDIOLO_AUDIT", "1") == "0":
         return None
     if _AUDIT_LOGGER is None:
         path = os.path.expanduser("~/.hermes/logs/studiolo-audit-core.log")
