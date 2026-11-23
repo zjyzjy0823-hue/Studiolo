@@ -4,7 +4,7 @@
 
 import { defineStore } from 'pinia'
 import { Channel, invoke } from '@tauri-apps/api/core'
-import { computed, nextTick, ref, shallowReactive, watch } from 'vue'
+import { computed, nextTick, onScopeDispose, ref, shallowReactive, watch } from 'vue'
 import { apiRequest, ApiError } from '../api/client'
 import { androidInvoke, isAndroidLocal } from '../desktop/androidLocal'
 import { desktopPlatform } from '../desktop/platform'
@@ -88,6 +88,21 @@ import { useAuthStore } from './auth'
 
 const MAX_MESSAGES_PER_SESSION = 500
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 15000]
+const STREAM_BUFFER_CAP = 1000
+const SUBSCRIBE_TIMEOUT_MS = 5000
+const HISTORY_TIMEOUT_MS = 10000
+const SUBSCRIBE_RETRY_DELAYS_MS = [500, 1000]
+type StreamPhase = 'live' | 'gap' | 'resyncing'
+type StreamState = {
+  phase: StreamPhase
+  buffer: FleetWsEvent[]
+  retries: number
+  timer?: ReturnType<typeof setTimeout>
+  snapshotTimer?: ReturnType<typeof setTimeout>
+  // Sequence numbers belong to a stream generation, while lastSeqBySession is a monotonic watermark.
+  cursors: Map<string, number>
+  snapshot?: { requestId?: string; streamId?: string; lastSeq: number }
+}
 const DESKTOP_NOTIFICATION_PREF = 'studiolo:fleet-system-notifications'
 type NativeFleetEvent =
   | { event: 'frame'; frame: FleetWsEvent }
@@ -101,6 +116,7 @@ type AuditEntry = {
   stream: string
   seq: number | string
   call: string
+  error?: string
 }
 
 function auditField(value: unknown, limit?: number): string {
@@ -313,9 +329,11 @@ export const useFleetStore = defineStore('fleet', () => {
   const streamIdBySession = new Map<string, string>()
   const auditRing: AuditEntry[] = []
   const pendingStreamResync = new Map<string, string>()
+  const streamStateBySession = shallowReactive(new Map<string, StreamState>())
+  const historyTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  const retiredStreamRequests = new Set<string>()
   const forcedHistoryRequests = new Set<string>()
   const followIntentBySession = new Map<string, boolean>()
-  const queuedSnapshotHistory = new Set<string>()
   const snapshotRestoreVersions = shallowReactive(new Map<string, number>())
   let snapshotRestoreTick = 0
   const forkSeedBySession = ref<Record<string, string>>({})
@@ -442,9 +460,10 @@ export const useFleetStore = defineStore('fleet', () => {
     return set
   })
 
-  const currentIsStreaming = computed<boolean>(
-    () => Boolean(activeSessionKey.value && runningBySession.value[activeSessionKey.value]),
-  )
+  function isSessionStreaming(sKey: string) {
+    return (messagesBySession.value[sKey] ?? []).some(message => message.streaming)
+  }
+  const currentIsStreaming = computed<boolean>(() => isSessionStreaming(activeSessionKey.value))
 
   const tokenUsageBySession = computed<Record<string, SessionTokenUsage>>(() => {
     const out: Record<string, SessionTokenUsage> = {}
@@ -524,7 +543,9 @@ export const useFleetStore = defineStore('fleet', () => {
     historyStateBySession.value = {}
     lastSeqBySession.value = {}
     streamIdBySession.clear()
-    pendingStreamResync.clear()
+    clearTransportRequests()
+    streamStateBySession.clear()
+    retiredStreamRequests.clear()
     forcedHistoryRequests.clear()
     forkSeedBySession.value = {}
     sideChatSessionKeyByParent.value = {}
@@ -575,10 +596,12 @@ export const useFleetStore = defineStore('fleet', () => {
       socket = null
     }
     snapshotFollowIntent.clear()
-    queuedSnapshotHistory.clear()
+    clearTransportRequests()
     snapshotRestoreVersions.clear()
     wsState.value = 'disconnected'
   }
+
+  onScopeDispose(disconnectSocket)
 
   // 当用户登出或 JWT 变更时立即清空所有内存会话与 E2EE 密钥
   watch(
@@ -812,31 +835,168 @@ export const useFleetStore = defineStore('fleet', () => {
     }
   }
 
-  function requestSnapshotHistory(sKey: string) {
+  function streamState(sKey: string): StreamState {
+    let state = streamStateBySession.get(sKey)
+    if (!state) {
+      state = { phase: 'live', buffer: [], retries: 0, cursors: new Map() }
+      streamStateBySession.set(sKey, state)
+    }
+    return state
+  }
+
+  function clearSubscribe(sKey: string) {
+    const state = streamStateBySession.get(sKey)
+    clearTimeout(state?.timer)
+    if (state) state.timer = undefined
+    retireStreamRequest(pendingStreamResync.get(sKey))
+    pendingStreamResync.delete(sKey)
+  }
+
+  function retireStreamRequest(requestId: string | undefined) {
+    if (!requestId) return
+    retiredStreamRequests.add(requestId)
+    if (retiredStreamRequests.size > 1000) retiredStreamRequests.delete(retiredStreamRequests.values().next().value!)
+  }
+
+  function clearHistory(sKey: string) {
+    const requestId = pendingHistoryPages.value[sKey]
+    retireStreamRequest(requestId)
+    if (requestId) forcedHistoryRequests.delete(requestId)
+    delete pendingHistoryPages.value[sKey]
+    clearTimeout(historyTimers.get(sKey))
+    historyTimers.delete(sKey)
+  }
+
+  function reconcileRunMessages(sKey: string, runId = runningBySession.value[sKey]) {
+    messagesBySession.value = { ...messagesBySession.value, [sKey]: (messagesBySession.value[sKey] ?? [])
+      .map(message => {
+        const streaming = Boolean(runId && message.role === 'assistant' && message.runId === runId)
+        return Boolean(message.streaming) === streaming ? message
+          : { ...message, streaming, ...(!streaming ? { liveProgress: undefined } : {}) }
+      }) }
+  }
+
+  function reconcileRuntime(sKey: string, frame: FleetWsEvent) {
+    if (frame.active && frame.runId) runningBySession.value = { ...runningBySession.value, [sKey]: frame.runId }
+    else delete runningBySession.value[sKey]
+    reconcileRunMessages(sKey)
+  }
+
+  function failRecovery(sKey: string, message: string) {
+    clearSubscribe(sKey)
+    clearHistory(sKey)
+    const state = streamStateBySession.get(sKey)
+    if (state) {
+      clearTimeout(state.snapshotTimer)
+      state.snapshotTimer = undefined
+      state.phase = state.buffer.length ? 'gap' : 'live'
+      state.snapshot = undefined
+      state.retries = 0
+    }
+    snapshotFollowIntent.delete(sKey)
+    delete runningBySession.value[sKey]
+    reconcileRunMessages(sKey)
+    historyStateBySession.value[sKey] = { state: 'error', message }
+    lastError.value = message
+  }
+
+  function clearTransportRequests() {
+    for (const key of new Set([...streamStateBySession.keys(), ...historyTimers.keys(), ...Object.keys(pendingHistoryPages.value), ...Object.keys(runningBySession.value)])) {
+      clearSubscribe(key)
+      clearHistory(key)
+      const state = streamStateBySession.get(key)
+      if (state) {
+        clearTimeout(state.snapshotTimer)
+        state.snapshotTimer = undefined
+        state.phase = 'gap'
+        state.snapshot = undefined
+        state.retries = 0
+      }
+      delete runningBySession.value[key]
+      reconcileRunMessages(key)
+    }
+  }
+
+  function trackHistory(sKey: string, requestId: string) {
+    pendingHistoryPages.value[sKey] = requestId
+    historyTimers.set(sKey, setTimeout(() => {
+      if (pendingHistoryPages.value[sKey] !== requestId) return
+      if (streamStateBySession.get(sKey)?.snapshot?.requestId === requestId) failRecovery(sKey, '读取会话历史超时，请重试')
+      else {
+        clearHistory(sKey)
+        delete runningBySession.value[sKey]
+        reconcileRunMessages(sKey)
+        historyStateBySession.value[sKey] = { state: 'error', message: '读取会话历史超时，请重试' }
+        lastError.value = '读取会话历史超时，请重试'
+      }
+    }, HISTORY_TIMEOUT_MS))
+  }
+
+  function commitCursor(sKey: string, streamId: string | undefined, sequence: number) {
+    if (streamId) {
+      const state = streamState(sKey)
+      state.cursors.set(streamId, Math.max(state.cursors.get(streamId) ?? 0, sequence))
+    }
+    lastSeqBySession.value = { ...lastSeqBySession.value, [sKey]: Math.max(lastSeqBySession.value[sKey] ?? 0, sequence) }
+  }
+
+  function requestSnapshotHistory(sKey: string, anchor?: { streamId?: string; lastSeq: number }) {
+    const state = streamState(sKey)
+    if (state.snapshot?.requestId && pendingHistoryPages.value[sKey] === state.snapshot.requestId) return
+    clearSubscribe(sKey)
+    // A snapshot must preempt pagination; late responses are rejected by requestId.
+    clearHistory(sKey)
     const intent = snapshotFollowIntent.get(sKey)
     if (intent && (!intent.followBefore || intent.settled)) {
       intent.settled = true
       snapshotFollowIntent.delete(sKey)
     }
-    if (pendingHistoryPages.value[sKey]) {
-      // Wait for the existing page so only the request issued for this snapshot can restore follow.
-      queuedSnapshotHistory.add(sKey)
+    const streamId = anchor?.streamId ?? state.buffer.at(-1)?.streamId ?? streamIdBySession.get(sKey)
+    if (!anchor) {
+      // No replay could confirm this runtime; a successful history read alone cannot confirm it either.
+      delete runningBySession.value[sKey]
+      reconcileRunMessages(sKey)
+    }
+    state.phase = 'resyncing'
+    state.snapshot = anchor ?? { streamId, lastSeq: Math.max(state.cursors.get(streamId ?? '') ?? 0,
+      ...state.buffer.filter(frame => frame.streamId === streamId).map(frame => frame.sequence ?? 0)) }
+    // Preemption must not extend recovery forever under sustained buffer overflow or cursor expiry.
+    state.snapshotTimer ??= setTimeout(() => failRecovery(sKey, '读取会话快照超时，请重试'), HISTORY_TIMEOUT_MS)
+    const requestId = loadSessionHistory(sKey, true)
+    if (!requestId) {
+      failRecovery(sKey, '无法请求会话快照，请重试')
       return
     }
-    queuedSnapshotHistory.delete(sKey)
-    const requestId = loadSessionHistory(sKey, true)
-    if (!intent || intent.settled) return
-    if (requestId) intent.requestId = requestId
-    else snapshotFollowIntent.delete(sKey)
+    state.snapshot.requestId = requestId
+    if (intent && !intent.settled) intent.requestId = requestId
   }
 
   function finishSnapshotHistory(sKey: string, requestId: string | undefined, committed: boolean) {
+    const state = streamStateBySession.get(sKey)
+    if (!requestId || state?.snapshot?.requestId !== requestId) return
+    if (!committed) {
+      failRecovery(sKey, '无法应用会话快照，请重试')
+      return
+    }
+    const { streamId, lastSeq } = state.snapshot
+    reconcileRunMessages(sKey)
+    // The committed full history supersedes buffered events from older stream generations.
+    state.buffer = state.buffer.filter(frame => !streamId || frame.streamId === streamId)
+    if (streamId) streamIdBySession.set(sKey, streamId)
+    commitCursor(sKey, streamId, lastSeq)
+    state.snapshot = undefined
+    clearTimeout(state.snapshotTimer)
+    state.snapshotTimer = undefined
+    state.retries = 0
     const intent = snapshotFollowIntent.get(sKey)
-    if (!intent || !requestId || requestId !== intent.requestId) return
-    const restore = committed && !intent.settled && !intent.cancelled
-    intent.settled = true
-    snapshotFollowIntent.delete(sKey)
-    if (restore) snapshotRestoreVersions.set(sKey, ++snapshotRestoreTick)
+    if (intent && requestId && requestId === intent.requestId) {
+      const restore = committed && !intent.settled && !intent.cancelled
+      intent.settled = true
+      snapshotFollowIntent.delete(sKey)
+      if (restore) snapshotRestoreVersions.set(sKey, ++snapshotRestoreTick)
+    }
+    state.phase = 'live'
+    flushStreamBuffer(sKey)
   }
 
   function connectionLost(code?: number) {
@@ -846,10 +1006,8 @@ export const useFleetStore = defineStore('fleet', () => {
     }
     for (const { finish } of pendingSteers.values()) finish(false)
     autoPulledProviders.clear()
-    pendingStreamResync.clear()
+    clearTransportRequests()
     forcedHistoryRequests.clear()
-    queuedSnapshotHistory.clear()
-    pendingHistoryPages.value = {}
     contextReads.value = {}
     contextCompactions.value = {}
     transmittingOutbox.clear()
@@ -858,6 +1016,7 @@ export const useFleetStore = defineStore('fleet', () => {
     for (const target of pendingSessionLists.values()) sessionListStates.value[target] = {}
     pendingSessionLists.clear()
     if (code === 4401) {
+      snapshotFollowIntent.clear()
       wsState.value = 'disconnected'
       if (linkedCore.value) coreSession.value = null
       lastError.value = 'Fleet 会话认证失败或登录已过期'
@@ -878,8 +1037,8 @@ export const useFleetStore = defineStore('fleet', () => {
       if (message.event === 'frame') {
         try {
           handleWsEvent(message.frame)
-        } catch {
-          // Keep the ordered IPC channel moving if a single frame cannot be applied.
+        } catch (error) {
+          reportFrameFailure(message.frame, error)
         }
       } else if (message.event === 'unauthorized') {
         nativeConnectionId = null
@@ -935,11 +1094,12 @@ export const useFleetStore = defineStore('fleet', () => {
 
     ws.onmessage = event => {
       if (socket !== ws || fleetRoute.value !== route) return
+      let frame: FleetWsEvent | undefined
       try {
-        const frame = JSON.parse(String(event.data)) as FleetWsEvent
+        frame = JSON.parse(String(event.data)) as FleetWsEvent
         handleWsEvent(frame)
-      } catch {
-        // 忽略非法 JSON 帧
+      } catch (error) {
+        reportFrameFailure(frame, error)
       }
     }
 
@@ -989,8 +1149,13 @@ export const useFleetStore = defineStore('fleet', () => {
       if (reportError) lastError.value = '正在建立到 Core Relay 的连接，请稍候重试'
       return false
     }
-    socket.send(JSON.stringify(frame))
-    return true
+    try {
+      socket.send(JSON.stringify(frame))
+      return true
+    } catch {
+      if (reportError) lastError.value = 'Fleet 暂时无法发送请求'
+      return false
+    }
   }
 
   function appendMessage(sKey: string, msg: ChatMessage) {
@@ -1029,7 +1194,7 @@ export const useFleetStore = defineStore('fleet', () => {
   ): ChatMessage {
     const list = [...(messagesBySession.value[sKey] ?? [])]
     let idx = list.findIndex(
-      m => m.role === 'assistant' && m.streaming && (!runId || m.runId === runId),
+      m => m.role === 'assistant' && (runId ? m.runId === runId : m.streaming),
     )
     if (idx === -1 && requestId) {
       idx = list.findIndex(m => m.role === 'assistant' && m.requestId === requestId)
@@ -1068,7 +1233,7 @@ export const useFleetStore = defineStore('fleet', () => {
     ensureStreamingAssistantMessage(sKey, nodeId, provider, runId, requestId)
     const list = [...(messagesBySession.value[sKey] ?? [])]
     let idx = list.findIndex(
-      m => m.role === 'assistant' && m.streaming && (!runId || m.runId === runId),
+      m => m.role === 'assistant' && (runId ? m.runId === runId : m.streaming),
     )
     if (idx === -1 && requestId) {
       idx = list.findIndex(m => m.role === 'assistant' && m.requestId === requestId)
@@ -1125,10 +1290,165 @@ export const useFleetStore = defineStore('fleet', () => {
   }
 
   function dumpAuditLog(): string {
-    return auditRing.map(e => `${new Date(e.t).toISOString()} [audit] side=client session=${e.session} run=${e.run} stream=${e.stream} seq=${e.seq} type=${e.type} call=${e.call}`).join('\n')
+    return auditRing.map(e => `${new Date(e.t).toISOString()} [audit] side=client session=${e.session} run=${e.run} stream=${e.stream} seq=${e.seq} type=${e.type} call=${e.call}${e.error ? ` error=${e.error}` : ''}`).join('\n')
+  }
+
+  function frameSessionKey(frame: FleetWsEvent) {
+    const nodeId = frame.nodeId ?? selectedNode.value?.id ?? ''
+    if (!frame.sessionId) return activeSessionKey.value
+    return frame.provider ? sessionKey(nodeId, frame.provider, frame.sessionId)
+      : Object.keys(sessionsByKey.value).find(key => key.endsWith(`::${frame.sessionId}`) && key.startsWith(`${nodeId}::`))
+        ?? sessionKey(nodeId, selectedProvider.value, frame.sessionId)
+  }
+
+  function reportFrameFailure(frame: FleetWsEvent | undefined, error: unknown) {
+    const key = frame ? frameSessionKey(frame) : ''
+    pushAudit({ t: Date.now(), type: 'ApplyError', session: auditField(frame?.sessionId, 8),
+      run: auditField(frame?.runId, 8), stream: auditField(frame?.streamId, 8),
+      seq: frame?.sequence ?? frame?.seq ?? '-', call: auditField(frame?.callId, 8),
+      error: auditField(error instanceof Error ? `${error.name}: ${error.message}` : String(error), 200) })
+    lastError.value = '会话事件应用失败，正在请求快照'
+    if (!key || !sessionsByKey.value[key]) return
+    const state = streamState(key)
+    if (frame?.sequence !== undefined && !state.buffer.some(row => row.streamId === frame.streamId && row.sequence === frame.sequence)) {
+      state.buffer.push(frame)
+      if (state.buffer.length > STREAM_BUFFER_CAP) state.buffer.shift()
+    }
+    // A failed snapshot must terminate, rather than starting an unbounded recovery loop.
+    if (state.snapshot) failRecovery(key, '会话快照应用失败，请重试')
+    else requestSnapshotHistory(key)
+  }
+
+  function bufferStreamFrame(sKey: string, frame: FleetWsEvent) {
+    const state = streamState(sKey)
+    if (!state.buffer.some(row => row.streamId === frame.streamId && row.sequence === frame.sequence)) state.buffer.push(frame)
+    if (state.buffer.length > STREAM_BUFFER_CAP) {
+      pushAudit({ t: Date.now(), type: 'BufferOverflow', session: auditField(frame.sessionId, 8),
+        run: '-', stream: auditField(frame.streamId, 8), seq: frame.sequence ?? '-', call: '-' })
+      const covered = state.snapshot && state.buffer.findIndex(row => row.streamId === state.snapshot!.streamId
+        && row.sequence! <= state.snapshot!.lastSeq)
+      if (typeof covered === 'number' && covered >= 0) {
+        state.buffer.splice(covered, 1)
+        return
+      }
+      // The requested authoritative snapshot covers the discarded incrementals.
+      clearHistory(sKey)
+      state.snapshot = undefined
+      requestSnapshotHistory(sKey)
+      state.buffer.splice(0, state.buffer.length - STREAM_BUFFER_CAP)
+    } else if (state.phase !== 'resyncing') {
+      state.phase = 'gap'
+      subscribeSession(sKey)
+    }
+  }
+
+  function applyStreamFrame(sKey: string, frame: FleetWsEvent) {
+    applyWsEvent(frame)
+    const sequence = frame.sequence ?? frame.seq
+    if (typeof sequence === 'number') commitCursor(sKey, frame.streamId, sequence)
+  }
+
+  function flushStreamBuffer(sKey: string) {
+    const state = streamState(sKey)
+    const streamId = streamIdBySession.get(sKey)
+    state.buffer.sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))
+    while (state.buffer.length) {
+      const frame = state.buffer[0]
+      const cursor = state.cursors.get(frame.streamId ?? '') ?? 0
+      if (frame.streamId !== streamId) break
+      if (frame.sequence! <= cursor) { state.buffer.shift(); continue }
+      if (frame.sequence! !== cursor + 1) break
+      try { applyStreamFrame(sKey, frame) }
+      catch (error) { reportFrameFailure(frame, error); return }
+      state.buffer.shift()
+    }
+    state.phase = state.buffer.length ? 'gap' : 'live'
+    if (state.phase === 'gap') subscribeSession(sKey)
+  }
+
+  function applyStreamReplay(sKey: string, frame: FleetWsEvent) {
+    if (frame.requestId && pendingStreamResync.get(sKey) !== frame.requestId) return
+    const state = streamState(sKey)
+    if (state.snapshot) return
+    clearSubscribe(sKey)
+    state.retries = 0
+    const session = sessionsByKey.value[sKey]
+    const nodeId = frame.nodeId ?? session?.nodeId
+    const provider = frame.provider ?? session?.provider
+    if (!nodeId || !provider || !frame.sessionId) return
+    if (frame.streamId) streamIdBySession.set(sKey, frame.streamId)
+    const refreshApprovals = () => {
+      if (!Array.isArray(frame.pendingApprovals)) return
+      dismissSessionApprovals(sKey, new Set(frame.pendingApprovals.map(event => event.callId)))
+      for (const approval of frame.pendingApprovals) applyWsEvent({ ...approval, nodeId, provider, sessionId: frame.sessionId })
+    }
+    if (frame.snapshotRequired) {
+      rememberSessionRuntime(sKey, frame)
+      reconcileRuntime(sKey, frame)
+      appendSystemEvent(sKey, nodeId, provider, `sys-reconnect-${frame.requestId ?? createRequestId()}`, {
+        kind: 'reconnected', at: Date.now(), detail: { summary: '实时记录无法接续，已请求节点返回会话快照。' },
+      })
+      requestSnapshotHistory(sKey, { streamId: frame.streamId, lastSeq: frame.lastSeq ?? 0 })
+      requestSessionDiff(sKey)
+      refreshApprovals()
+      return
+    }
+    state.phase = 'gap'
+    const events = [...(frame.events ?? [])].sort((a, b) => (a.sequence ?? a.seq ?? 0) - (b.sequence ?? b.seq ?? 0))
+    const initialCursor = state.cursors.get(frame.streamId ?? '') ?? 0
+    if (!frame.incremental && !initialCursor && events.length) {
+      const runIds = new Set(events.map(event => event.runId || event.requestId).filter(Boolean))
+      messagesBySession.value = { ...messagesBySession.value, [sKey]: (messagesBySession.value[sKey] ?? [])
+        .filter(message => !(message.role === 'assistant' && (message.streaming || (message.runId && runIds.has(message.runId))))) }
+    }
+    for (const event of events) {
+      const sub = { ...event, nodeId, provider, sessionId: frame.sessionId }
+      const cursor = state.cursors.get(sub.streamId ?? '') ?? 0
+      if (typeof sub.sequence === 'number' && sub.streamId && sub.sequence <= cursor) continue
+      if (frame.incremental && typeof sub.sequence === 'number' && sub.sequence > cursor + 1) {
+        bufferStreamFrame(sKey, sub)
+        requestSnapshotHistory(sKey)
+        return
+      }
+      try { applyStreamFrame(sKey, sub) }
+      catch (error) { reportFrameFailure(sub, error); return }
+    }
+    rememberSessionRuntime(sKey, frame)
+    reconcileRuntime(sKey, frame)
+    refreshApprovals()
+    if (typeof frame.lastSeq === 'number') commitCursor(sKey, frame.streamId, frame.lastSeq)
+    if (snapshotFollowIntent.get(sKey)?.requestId === null) snapshotFollowIntent.delete(sKey)
+    state.phase = 'live'
+    flushStreamBuffer(sKey)
+    void flushOutbox()
   }
 
   function handleWsEvent(frame: FleetWsEvent) {
+    const sKey = frameSessionKey(frame)
+    try {
+      if (frame.requestId && retiredStreamRequests.has(frame.requestId) && ['Failed', 'NodeUnavailable', 'Error'].includes(frame.type)) return
+      if (frame.type === 'SessionStreamReplay' && sKey && Array.isArray(frame.events)) {
+        applyStreamReplay(sKey, frame)
+        return
+      }
+      if (sKey && typeof frame.sequence === 'number' && frame.streamId) {
+        const state = streamState(sKey)
+        const prior = streamIdBySession.get(sKey)
+        const cursor = state.cursors.get(frame.streamId) ?? 0
+        if (frame.sequence <= cursor) return // Already committed in this stream generation.
+        if (!prior) streamIdBySession.set(sKey, frame.streamId)
+        if (state.phase !== 'live' || (prior && prior !== frame.streamId) || frame.sequence > cursor + 1) {
+          bufferStreamFrame(sKey, frame)
+          return
+        }
+      }
+      applyStreamFrame(sKey, frame)
+    } catch (error) {
+      reportFrameFailure(frame, error)
+    }
+  }
+
+  function applyWsEvent(frame: FleetWsEvent) {
     const etype = frame.type
     const seq = frame.seq ?? frame.sequence
     pushAudit({
@@ -1168,7 +1488,7 @@ export const useFleetStore = defineStore('fleet', () => {
         }
       })
       nodes.value.forEach(initializeOnlineNode)
-      for (const key of new Set([activeSessionKey.value, ...Object.keys(runningBySession.value), ...snapshotFollowIntent.keys()])) {
+      for (const key of new Set([activeSessionKey.value, ...Object.keys(runningBySession.value), ...snapshotFollowIntent.keys(), ...[...streamStateBySession].filter(([, state]) => state.phase !== 'live').map(([key]) => key)])) {
         if (key) subscribeSession(key)
       }
       if (activeSessionKey.value) loadSessionHistory(activeSessionKey.value, cachedHistoryKeys.has(activeSessionKey.value))
@@ -1181,13 +1501,19 @@ export const useFleetStore = defineStore('fleet', () => {
       if (liveStatus !== 'online') {
         if (nodes.value.find(node => node.id === frame.nodeId)?.status === 'online') {
           captureSnapshotFollow(frame.nodeId)
-          for (const key of snapshotFollowIntent.keys()) {
+          for (const key of new Set([...snapshotFollowIntent.keys(), ...streamStateBySession.keys(), ...Object.keys(pendingHistoryPages.value), ...Object.keys(runningBySession.value)])) {
             if (sessionsByKey.value[key]?.nodeId !== frame.nodeId) continue
-            pendingStreamResync.delete(key)
-            const requestId = pendingHistoryPages.value[key]
-            if (requestId) forcedHistoryRequests.delete(requestId)
-            delete pendingHistoryPages.value[key]
-            queuedSnapshotHistory.delete(key)
+            clearSubscribe(key)
+            clearHistory(key)
+            const state = streamStateBySession.get(key)
+            if (state) {
+              clearTimeout(state.snapshotTimer)
+              state.snapshotTimer = undefined
+              state.phase = 'gap'
+              state.snapshot = undefined
+            }
+            delete runningBySession.value[key]
+            reconcileRunMessages(key)
           }
         }
         autoPulledProviders.delete(frame.nodeId)
@@ -1210,7 +1536,7 @@ export const useFleetStore = defineStore('fleet', () => {
       const liveNode = nodes.value.find(n => n.id === frame.nodeId)
       if (liveNode) initializeOnlineNode(liveNode)
       if (liveStatus === 'online') {
-        for (const key of new Set([activeSessionKey.value, ...Object.keys(runningBySession.value), ...snapshotFollowIntent.keys()])) {
+        for (const key of new Set([activeSessionKey.value, ...Object.keys(runningBySession.value), ...snapshotFollowIntent.keys(), ...[...streamStateBySession].filter(([, state]) => state.phase !== 'live').map(([key]) => key)])) {
           if (sessionsByKey.value[key]?.nodeId === frame.nodeId) subscribeSession(key)
         }
         void flushOutbox()
@@ -1250,19 +1576,16 @@ export const useFleetStore = defineStore('fleet', () => {
       const streamRequest = [...pendingStreamResync].find(([, requestId]) => requestId === frame.requestId)
       if (streamRequest) {
         const [key] = streamRequest
-        pendingStreamResync.delete(key)
-        if (etype !== 'NodeUnavailable' && snapshotFollowIntent.get(key)?.requestId === null && !queuedSnapshotHistory.has(key)) {
-          snapshotFollowIntent.delete(key)
-        }
+        retrySubscribe(key)
         return
       }
       const forcedHistory = forcedHistoryRequests.delete(frame.requestId)
       const historyRequest = Object.keys(pendingHistoryPages.value).find(key => pendingHistoryPages.value[key] === frame.requestId)
       if (historyRequest) {
-        delete pendingHistoryPages.value[historyRequest]
+        clearHistory(historyRequest)
         historyStateBySession.value[historyRequest] = { state: 'error', message: frame.message || '无法读取历史消息' }
         finishSnapshotHistory(historyRequest, frame.requestId, false)
-        if (queuedSnapshotHistory.has(historyRequest)) requestSnapshotHistory(historyRequest)
+        if (streamStateBySession.get(historyRequest)?.phase !== 'live') failRecovery(historyRequest, frame.message || '无法读取历史消息')
         return
       }
       if (forcedHistory) return
@@ -1484,15 +1807,22 @@ export const useFleetStore = defineStore('fleet', () => {
 
     if (etype === 'SessionHistory' && nodeId && frame.sessionId && Array.isArray(frame.messages)) {
       const k = sessionKey(nodeId, provider, frame.sessionId)
+      if (frame.requestId && pendingHistoryPages.value[k] !== frame.requestId) return
       rememberSessionRuntime(k, frame)
       const releasedPage = Boolean(frame.requestId && pendingHistoryPages.value[k] === frame.requestId)
-      if (releasedPage) delete pendingHistoryPages.value[k]
+      const forced = Boolean(frame.requestId && forcedHistoryRequests.has(frame.requestId))
+      const snapshot = streamStateBySession.get(k)?.snapshot?.requestId === frame.requestId && Boolean(frame.requestId)
+      if (releasedPage) clearHistory(k)
       if (frame.cursorExpired) {
         delete historyCursorBySession.value[k]
-        loadSessionHistory(k, true)
+        const state = streamStateBySession.get(k)
+        const anchor = state?.snapshot
+        if (state && anchor) {
+          state.snapshot = undefined
+          requestSnapshotHistory(k, anchor)
+        } else loadSessionHistory(k, true)
         return
       }
-      if (releasedPage && queuedSnapshotHistory.has(k)) requestSnapshotHistory(k)
       if (frame.historyCursor !== undefined) historyCursorBySession.value[k] = frame.historyCursor
       if (frame.messages.length) {
         const hasDetails = frame.messages.some(row => row.thought || row.toolCalls?.length || row.parts?.some(part => part.type !== 'text'))
@@ -1505,9 +1835,12 @@ export const useFleetStore = defineStore('fleet', () => {
       const existing = messagesBySession.value[k] ?? []
       const liveRunId = runningBySession.value[k]
       const hasLiveHistory = frame.messages.some(m => m.runId || m.thought || m.toolCalls?.length)
-      const forced = Boolean(frame.requestId && forcedHistoryRequests.delete(frame.requestId))
       if (!frame.messages.length) {
-        if (!frame.beforeCursor) finishSnapshotHistory(k, frame.requestId, true)
+        if (!frame.beforeCursor) {
+          if (snapshot) messagesBySession.value = { ...messagesBySession.value,
+            [k]: existing.filter(message => message.role === 'system' || Boolean(liveRunId && message.runId === liveRunId)) }
+          finishSnapshotHistory(k, frame.requestId, true)
+        }
         return
       }
       // 支持向上分页加载更早历史：当新拉取条数多于当前内存条数时允许替换刷新
@@ -1519,7 +1852,7 @@ export const useFleetStore = defineStore('fleet', () => {
         const live = (m.runId || m.requestId) && existing.find(row => row.role === m.role && (
           Boolean(m.runId && (row.runId === m.runId || row.requestId === m.runId)) || Boolean(m.requestId && row.requestId === m.requestId)
         ))
-        if (live && live.text.length >= (m.text?.length ?? 0) && (live.thought?.length ?? 0) >= (m.thought?.length ?? 0) &&
+        if (!snapshot && live && live.text.length >= (m.text?.length ?? 0) && (live.thought?.length ?? 0) >= (m.thought?.length ?? 0) &&
           (live.toolCalls?.length ?? 0) >= (m.toolCalls?.length ?? 0)) {
           return live.delivery === 'sending' ? { ...live, delivery: 'sent' } : live
         }
@@ -1592,7 +1925,6 @@ export const useFleetStore = defineStore('fleet', () => {
         ...messagesBySession.value,
         [k]: mergeHistoryBoundaries(existing, hydrated).slice(-MAX_MESSAGES_PER_SESSION),
       }
-      finishSnapshotHistory(k, frame.requestId, true)
       const curSess = sessionsByKey.value[k]
       if (curSess && isGenericSessionTitle(curSess.title)) {
         const firstUser = hydrated.find(x => x.role === 'user' && x.text.trim())
@@ -1604,6 +1936,7 @@ export const useFleetStore = defineStore('fleet', () => {
           }
         }
       }
+      finishSnapshotHistory(k, frame.requestId, true)
       return
     }
 
@@ -1624,17 +1957,6 @@ export const useFleetStore = defineStore('fleet', () => {
 
     const effProvider = sessionsByKey.value[sKey]?.provider ?? provider
 
-    if (typeof frame.sequence === 'number' && frame.streamId) {
-      const prior = streamIdBySession.get(sKey)
-      const cursor = lastSeqBySession.value[sKey] ?? 0
-      if (prior === frame.streamId && frame.sequence <= cursor) return
-      if (prior === frame.streamId && frame.sequence > cursor + 1 && subscribeSession(sKey)) return
-      streamIdBySession.set(sKey, frame.streamId)
-      lastSeqBySession.value = { ...lastSeqBySession.value, [sKey]: frame.sequence }
-    } else if (typeof frame.seq === 'number' && frame.seq > (lastSeqBySession.value[sKey] ?? 0)) {
-      lastSeqBySession.value = { ...lastSeqBySession.value, [sKey]: frame.seq }
-    }
-
     if (etype !== 'SessionStreamReplay') rememberSessionRuntime(sKey, frame)
 
     if (etype === 'ContextUsage' && frame.requestId) {
@@ -1648,67 +1970,6 @@ export const useFleetStore = defineStore('fleet', () => {
         }
         return
       }
-    }
-
-    if (etype === 'SessionStreamReplay' && sid && Array.isArray(frame.events)) {
-      pendingStreamResync.delete(sKey)
-      const refreshApprovals = () => {
-        if (!Array.isArray(frame.pendingApprovals)) return
-        dismissSessionApprovals(sKey, new Set(frame.pendingApprovals.map(evt => evt.callId)))
-        for (const approval of frame.pendingApprovals) handleWsEvent({ ...approval, nodeId, provider: effProvider, sessionId: sid })
-      }
-      if (frame.snapshotRequired) {
-        rememberSessionRuntime(sKey, frame)
-        const at = Date.now()
-        appendSystemEvent(sKey, nodeId, effProvider, `sys-reconnect-${frame.requestId ?? createRequestId()}`, {
-          kind: 'reconnected', at, detail: { summary: '实时记录无法接续，已请求节点返回会话快照。' },
-        })
-        if (frame.streamId) streamIdBySession.set(sKey, frame.streamId)
-        else streamIdBySession.delete(sKey)
-        lastSeqBySession.value = { ...lastSeqBySession.value, [sKey]: frame.lastSeq ?? 0 }
-        if (frame.active && frame.runId) {
-          runningBySession.value = { ...runningBySession.value, [sKey]: frame.runId }
-        } else if (!frame.active) {
-          const runs = { ...runningBySession.value }
-          delete runs[sKey]
-          runningBySession.value = runs
-          messagesBySession.value = { ...messagesBySession.value, [sKey]: (messagesBySession.value[sKey] ?? [])
-            .map(message => message.streaming ? { ...message, streaming: false, liveProgress: undefined } : message) }
-        }
-        requestSnapshotHistory(sKey)
-        requestSessionDiff(sKey)
-        refreshApprovals()
-        return
-      }
-      if (snapshotFollowIntent.get(sKey)?.requestId === null && !queuedSnapshotHistory.has(sKey)) snapshotFollowIntent.delete(sKey)
-      if (frame.events.length) {
-        // 仅在全量重放（非 lastSeq 增量模式）时清理半截占位，避免增量续传造成内容闪断
-        if (!frame.incremental) {
-          const prevMsgs = messagesBySession.value[sKey] ?? []
-          const replayRunIds = new Set(frame.events.map(event => event.runId || event.requestId).filter(Boolean))
-          const trimmed = prevMsgs.filter(m => !(m.role === 'assistant' && (m.streaming || (m.runId && replayRunIds.has(m.runId)))))
-          if (trimmed.length !== prevMsgs.length) {
-            messagesBySession.value = { ...messagesBySession.value, [sKey]: trimmed }
-          }
-          if (frame.streamId && typeof frame.events[0].sequence === 'number') {
-            streamIdBySession.set(sKey, frame.streamId)
-            lastSeqBySession.value = { ...lastSeqBySession.value, [sKey]: frame.events[0].sequence - 1 }
-          }
-        }
-        for (const sub of frame.events) {
-          handleWsEvent({ ...sub, nodeId, provider: effProvider, sessionId: sid })
-        }
-      }
-      rememberSessionRuntime(sKey, frame)
-      if (typeof frame.lastSeq === 'number') {
-        const sameStream = streamIdBySession.get(sKey) === frame.streamId
-        if (frame.streamId) streamIdBySession.set(sKey, frame.streamId)
-        const cursor = sameStream ? Math.max(lastSeqBySession.value[sKey] ?? 0, frame.lastSeq) : frame.lastSeq
-        lastSeqBySession.value = { ...lastSeqBySession.value, [sKey]: cursor }
-      }
-      refreshApprovals()
-      void flushOutbox()
-      return
     }
 
     if (etype === 'FileWritten' && frame.path) {
@@ -1833,7 +2094,6 @@ export const useFleetStore = defineStore('fleet', () => {
         delete nextInt[sKey]
         interruptedBySession.value = nextInt
       }
-      lastSeqBySession.value = { ...lastSeqBySession.value, [sKey]: typeof frame.seq === 'number' ? frame.seq : 0 }
       ensureStreamingAssistantMessage(sKey, nodeId, effProvider, rid, frame.requestId)
       return
     }
@@ -2144,7 +2404,11 @@ export const useFleetStore = defineStore('fleet', () => {
 
     if (etype === 'SessionDeleted') {
       forgetFollowIntent(sKey)
-      queuedSnapshotHistory.delete(sKey)
+      clearSubscribe(sKey)
+      clearHistory(sKey)
+      clearTimeout(streamStateBySession.get(sKey)?.snapshotTimer)
+      streamStateBySession.delete(sKey)
+      streamIdBySession.delete(sKey)
       delete contextUsageBySession.value[sKey]
       delete contextReads.value[sKey]
       delete contextWaitingForModel.value[sKey]
@@ -2760,19 +3024,53 @@ export const useFleetStore = defineStore('fleet', () => {
   function subscribeSession(sKey: string) {
     const sess = sessionsByKey.value[sKey]
     if (!sess || wsState.value !== 'online') return false
-    if (pendingStreamResync.has(sKey)) return true
-    const lastSeq = lastSeqBySession.value[sKey] ?? 0
+    const state = streamState(sKey)
+    if (pendingStreamResync.has(sKey) || state.timer || state.snapshot) return true
+    state.retries = 0
+    return sendSubscribe(sKey)
+  }
+
+  function retrySubscribe(sKey: string) {
+    const state = streamState(sKey)
+    clearSubscribe(sKey)
+    if (state.retries >= SUBSCRIBE_RETRY_DELAYS_MS.length) {
+      requestSnapshotHistory(sKey)
+      return
+    }
+    const delay = SUBSCRIBE_RETRY_DELAYS_MS[state.retries++]
+    state.phase = 'gap'
+    state.timer = setTimeout(() => {
+      state.timer = undefined
+      sendSubscribe(sKey)
+    }, delay)
+  }
+
+  function sendSubscribe(sKey: string) {
+    const sess = sessionsByKey.value[sKey]
+    if (!sess || wsState.value !== 'online') {
+      failRecovery(sKey, '会话连接不可用，请重试')
+      return false
+    }
+    const state = streamState(sKey)
+    const streamId = streamIdBySession.get(sKey)
+    const lastSeq = streamId ? state.cursors.get(streamId) ?? 0 : lastSeqBySession.value[sKey] ?? 0
     const requestId = createRequestId()
     const sent = sendWsCommand({
       type: 'session.subscribe',
       nodeId: sess.nodeId,
       provider: sess.provider,
       sessionId: sess.sessionId,
-      ...(lastSeq > 0 ? { lastSeq, afterSequence: lastSeq } : {}),
-      streamId: streamIdBySession.get(sKey),
+      lastSeq, afterSequence: lastSeq,
+      streamId,
       requestId,
     })
-    if (sent) pendingStreamResync.set(sKey, requestId)
+    if (sent) {
+      state.phase = 'gap'
+      pendingStreamResync.set(sKey, requestId)
+      state.timer = setTimeout(() => {
+        if (pendingStreamResync.get(sKey) === requestId) retrySubscribe(sKey)
+      }, SUBSCRIBE_TIMEOUT_MS)
+    } else failRecovery(sKey, '无法订阅会话，请重试')
     return sent
   }
 
@@ -2812,7 +3110,7 @@ export const useFleetStore = defineStore('fleet', () => {
         requestId,
       })
       if (sent) {
-        pendingHistoryPages.value[sKey] = requestId
+        trackHistory(sKey, requestId)
         if (force) forcedHistoryRequests.add(requestId)
         return requestId
       }
@@ -2838,7 +3136,7 @@ export const useFleetStore = defineStore('fleet', () => {
     })
     if (sent) {
       historyLimitBySession.value[sKey] = nextLimit
-      pendingHistoryPages.value[sKey] = requestId
+      trackHistory(sKey, requestId)
     }
     return sent
   }
@@ -4410,6 +4708,10 @@ export const useFleetStore = defineStore('fleet', () => {
     historyStateBySession,
     deviceSessionScope: localCacheScope,
     pendingHistoryPages,
+    pendingStreamResync,
+    lastSeqBySession,
+    streamStateBySession,
+    isSessionStreaming,
     contextUsageBySession,
     contextCompactions,
     requestContextUsage,

@@ -1052,7 +1052,7 @@ const assistantTurns = computed(() => {
   }))
 })
 const isStreaming = computed(() =>
-  Boolean(effectiveKey.value && fleet.runningBySession[effectiveKey.value]),
+  fleet.isSessionStreaming(effectiveKey.value),
 )
 const effectiveTodos = computed(() =>
   effectiveKey.value ? fleet.todosBySession[effectiveKey.value] ?? [] : [],

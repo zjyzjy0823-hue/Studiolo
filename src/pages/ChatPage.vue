@@ -702,7 +702,7 @@ function searchSnippetFor(sess: ChatSession): string | undefined {
 function sessionMatchesStateFilter(sess: ChatSession): boolean {
   if (treeFilterMode.value === 'all') return true
   const k = sessionKey(sess.nodeId, sess.provider, sess.sessionId)
-  if (treeFilterMode.value === 'running') return Boolean(fleet.runningBySession[k])
+  if (treeFilterMode.value === 'running') return fleet.isSessionStreaming(k)
   if (treeFilterMode.value === 'approval') {
     return fleet.pendingApprovalsList.some(c => sessionKey(c.nodeId, c.provider, c.sessionId) === k)
   }
@@ -735,7 +735,7 @@ const sessionStatus = computed(() => {
   return (key: string) => {
     if (approvals.has(key)) return { key: 'approval', label: '待审批', rank: 0 }
     if (inputs.has(key)) return { key: 'input', label: '待回复', rank: 1 }
-    if (fleet.runningBySession[key]) return { key: 'running', label: '运行中', rank: 2 }
+    if (fleet.isSessionStreaming(key)) return { key: 'running', label: '运行中', rank: 2 }
     if (waiting.has(key)) return { key: 'waiting', label: '待发送', rank: 3 }
     return { key: 'done', label: '', rank: 4 }
   }

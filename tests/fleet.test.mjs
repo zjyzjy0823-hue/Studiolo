@@ -263,7 +263,7 @@ test('重连快照按会话恢复跟随意图', async t => {
     const requestSnapshot = () => {
       const [ordinary] = requests('session.history')
       replay()
-      assert.equal(requests('session.history').length, 1)
+      assert.equal(requests('session.history').length, 2)
       completeHistory(ordinary.requestId)
       assert.equal(fleet.snapshotRestoreVersion(key), 0)
       const [, snapshot] = requests('session.history')
@@ -335,6 +335,518 @@ test('重连快照按会话恢复跟随意图', async t => {
     assert.equal(fleet.snapshotRestorePending(key), false)
     assert.equal(fleet.snapshotRestoreVersion(key), 0)
   })
+})
+
+test('客户端续传状态机按 SPEC 恢复并释放请求', async t => {
+  const server = await createServer({
+    configFile: false,
+    server: { middlewareMode: true, ws: false, watch: null },
+    optimizeDeps: { noDiscovery: true },
+  })
+  t.after(() => server.close())
+  const { useFleetStore, sessionKey } = await server.ssrLoadModule('/src/stores/fleet.ts')
+  const sockets = []
+  class MockSocket {
+    static OPEN = 1
+    readyState = MockSocket.OPEN
+    sent = []
+    constructor() { sockets.push(this) }
+    send(raw) { this.sent.push(JSON.parse(raw)) }
+    close() { this.readyState = 3; this.onclose?.({ code: 1006 }) }
+  }
+  const originalSocket = globalThis.WebSocket
+  const originalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  globalThis.WebSocket = MockSocket
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: { getItem: key => key === 'studiolo:access-token' ? 'test-token' : null, removeItem() {} },
+  })
+  t.after(() => {
+    globalThis.WebSocket = originalSocket
+    if (originalStorage) Object.defineProperty(globalThis, 'localStorage', originalStorage)
+    else delete globalThis.localStorage
+  })
+
+  function fixture(t) {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const pinia = createPinia()
+    const fleet = useFleetStore(pinia)
+    t.after(() => { fleet.disconnectSocket(); disposePinia(pinia) })
+    const session = { nodeId: 'node', provider: 'codex', sessionId: 'resync' }
+    const key = sessionKey(session.nodeId, session.provider, session.sessionId)
+    const receive = frame => fleet.handleWsEvent({ ...session, ...frame })
+    fleet.sessionsByKey = { [key]: { ...session, title: '测试续传', cwd: '' } }
+    fleet.activeSessionKey = key
+    fleet.connectSocket()
+    receive({ type: 'FleetSnapshot', nodes: [] })
+    const requests = type => sockets.at(-1).sent.filter(frame => frame.type === type)
+    const history = (messages = [], fields = {}) => receive({
+      type: 'SessionHistory', requestId: requests('session.history').at(-1)?.requestId, messages, ...fields,
+    })
+    const replay = (events = [], fields = {}) => receive({
+      type: 'SessionStreamReplay', requestId: requests('session.subscribe').at(-1)?.requestId,
+      streamId: 'stream', incremental: true, active: false, lastSeq: 0, events, ...fields,
+    })
+    history()
+    replay()
+    sockets.at(-1).sent.length = 0
+    const event = (sequence, fields = {}) => ({
+      type: 'TextDelta', streamId: 'stream', sequence, runId: 'run', requestId: 'run',
+      text: String(sequence), ...fields,
+    })
+    const state = () => fleet.streamStateBySession.get(key)
+    const text = () => (fleet.messagesBySession[key] ?? []).filter(row => row.role === 'assistant').map(row => row.text)
+    const clean = () => {
+      assert.equal(fleet.pendingStreamResync.size, 0)
+      assert.deepEqual(fleet.pendingHistoryPages, {})
+      assert.equal(state().timer, undefined)
+      assert.equal(state().snapshotTimer, undefined)
+      assert.equal(state().snapshot, undefined)
+    }
+    return { fleet, key, receive, requests, history, replay, event, state, text, clean,
+      socket: () => sockets.at(-1) }
+  }
+
+  await t.test('丢帧 1,2,4,5：缓冲当前及后续帧，replay 后集合一致且只应用一次', t => {
+    const f = fixture(t)
+    const events = [f.event(1, { type: 'Accepted' }), f.event(2, { text: 'A' }),
+      f.event(3, { text: 'B' }), f.event(4, { text: 'C' }), f.event(5, { type: 'Completed' })]
+    for (const index of [0, 1, 3, 4, 3]) f.receive(events[index])
+    assert.deepEqual(f.text(), ['A'])
+    assert.deepEqual(f.state().buffer.map(frame => frame.sequence), [4, 5])
+    assert.equal(f.requests('session.subscribe').length, 1)
+    assert.equal(f.requests('session.subscribe')[0].afterSequence, 2)
+    assert.equal(f.requests('session.subscribe')[0].streamId, 'stream')
+    f.replay(events.slice(2), { lastSeq: 5 })
+    assert.deepEqual(f.text(), ['ABC'])
+    assert.equal(f.fleet.lastSeqBySession[f.key], 5)
+    assert.equal(f.state().phase, 'live')
+    assert.equal(f.state().buffer.length, 0)
+    assert.equal(f.fleet.currentIsStreaming, false)
+    f.receive(events[3])
+    assert.deepEqual(f.text(), ['ABC'])
+    f.clean()
+  })
+
+  await t.test('乱序 3,1,2,4：等待 replay，按 sequence 冲刷，不乱序渲染', t => {
+    const f = fixture(t)
+    for (const sequence of [3, 1, 2, 4]) f.receive(f.event(sequence))
+    assert.deepEqual(f.text(), [])
+    assert.equal(f.fleet.lastSeqBySession[f.key], 0)
+    assert.equal(f.requests('session.subscribe')[0].afterSequence, 0)
+    f.replay([], { active: true, runId: 'run', lastSeq: 0 })
+    assert.deepEqual(f.text(), ['1234'])
+    assert.equal(f.fleet.lastSeqBySession[f.key], 4)
+    assert.equal(f.state().phase, 'live')
+    f.clean()
+  })
+
+  await t.test('冲刷后仍有缺口：只提交连续部分，剩余帧继续缓冲并续订', t => {
+    const f = fixture(t)
+    f.receive(f.event(3))
+    f.receive(f.event(5))
+    f.replay([f.event(1), f.event(2)], { lastSeq: 2, active: true, runId: 'run' })
+    assert.deepEqual(f.text(), ['123'])
+    assert.equal(f.fleet.lastSeqBySession[f.key], 3)
+    assert.equal(f.state().phase, 'gap')
+    assert.deepEqual(f.state().buffer.map(frame => frame.sequence), [5])
+    assert.equal(f.requests('session.subscribe').length, 2)
+    assert.equal(f.requests('session.subscribe').at(-1).afterSequence, 3)
+    f.replay([f.event(4)], { lastSeq: 4, active: true, runId: 'run' })
+    assert.deepEqual(f.text(), ['12345'])
+    assert.equal(f.state().phase, 'live')
+    f.clean()
+  })
+
+  await t.test('中途断开保留缺口缓冲，重连 replay 与实时尾部最终一致', t => {
+    const f = fixture(t)
+    f.receive(f.event(1, { type: 'Accepted' }))
+    f.receive(f.event(2, { text: 'A' }))
+    f.receive(f.event(4, { text: 'C' }))
+    f.socket().close()
+    assert.equal(f.fleet.currentIsStreaming, false)
+    assert.equal(f.fleet.pendingStreamResync.size, 0)
+    assert.deepEqual(f.state().buffer.map(frame => frame.sequence), [4])
+    f.fleet.connectSocket()
+    f.receive({ type: 'FleetSnapshot', nodes: [] })
+    f.receive(f.event(5, { type: 'Completed' }))
+    f.replay([f.event(3, { text: 'B' })], { lastSeq: 3, active: true, runId: 'run' })
+    assert.deepEqual(f.text(), ['ABC'])
+    assert.equal(f.fleet.currentIsStreaming, false)
+    assert.equal(f.state().phase, 'live')
+    f.clean()
+  })
+
+  await t.test('subscribe 超时两次，按 0.5s / 1s 退避，第三次成功；迟到响应无效', t => {
+    const f = fixture(t)
+    f.receive(f.event(2))
+    const first = f.requests('session.subscribe')[0].requestId
+    t.mock.timers.tick(4999)
+    assert.equal(f.requests('session.subscribe').length, 1)
+    t.mock.timers.tick(1)
+    assert.equal(f.fleet.pendingStreamResync.size, 0)
+    t.mock.timers.tick(499)
+    assert.equal(f.requests('session.subscribe').length, 1)
+    t.mock.timers.tick(1)
+    assert.equal(f.requests('session.subscribe').length, 2)
+    t.mock.timers.tick(5000)
+    t.mock.timers.tick(999)
+    assert.equal(f.requests('session.subscribe').length, 2)
+    t.mock.timers.tick(1)
+    assert.equal(f.requests('session.subscribe').length, 3)
+    f.replay([f.event(1)], { lastSeq: 1, requestId: first })
+    assert.deepEqual(f.text(), [])
+    f.replay([f.event(1)], { lastSeq: 1, active: true, runId: 'run' })
+    assert.deepEqual(f.text(), ['12'])
+    assert.equal(f.state().retries, 0)
+    assert.equal(f.state().phase, 'live')
+    t.mock.timers.tick(20000)
+    assert.equal(f.requests('session.subscribe').length, 3)
+    f.clean()
+  })
+
+  await t.test('永不完成的 subscribe / snapshot：有限重试后超时退出运行态和 resyncing', t => {
+    const f = fixture(t)
+    f.receive(f.event(1, { type: 'Accepted' }))
+    f.receive(f.event(3))
+    for (const ms of [5000, 500, 5000, 1000, 5000]) t.mock.timers.tick(ms)
+    assert.equal(f.requests('session.subscribe').length, 3)
+    assert.equal(f.requests('session.history').length, 1)
+    assert.equal(f.state().phase, 'resyncing')
+    assert.equal(f.fleet.pendingStreamResync.size, 0)
+    t.mock.timers.tick(9999)
+    assert.equal(Object.keys(f.fleet.pendingHistoryPages).length, 1)
+    t.mock.timers.tick(1)
+    assert.equal(f.fleet.historyStateBySession[f.key].state, 'error')
+    assert.notEqual(f.state().phase, 'resyncing')
+    assert.equal(f.fleet.runningBySession[f.key], undefined)
+    assert.equal(f.fleet.currentIsStreaming, false)
+    assert.equal(f.fleet.snapshotRestorePending(f.key), false)
+    f.clean()
+    f.fleet.subscribeSession(f.key)
+    f.replay([f.event(2)], { lastSeq: 2, active: false })
+    assert.deepEqual(f.text(), ['23'])
+    f.clean()
+  })
+
+  await t.test('subscribe 永不响应但空快照成功：运行态按未知清理，不保留假 running', t => {
+    const f = fixture(t)
+    f.receive(f.event(1, { type: 'Accepted' }))
+    f.receive(f.event(3))
+    for (const ms of [5000, 500, 5000, 1000, 5000]) t.mock.timers.tick(ms)
+    f.history([])
+    assert.deepEqual(f.text(), [])
+    assert.equal(f.fleet.currentIsStreaming, false)
+    assert.equal(f.fleet.runningBySession[f.key], undefined)
+    assert.equal(f.state().phase, 'live')
+    t.mock.timers.tick(30000)
+    f.clean()
+  })
+
+  await t.test('持续溢出和连续 cursorExpired 不能延长快照恢复的 10s 上限', t => {
+    const f = fixture(t)
+    for (let seq = 2; seq <= 1002; seq++) f.receive(f.event(seq))
+    const first = f.requests('session.history').at(-1).requestId
+    t.mock.timers.tick(9000)
+    for (let seq = 1003; seq <= 2004; seq++) f.receive(f.event(seq))
+    assert.equal(f.state().buffer.length, 1000)
+    assert.notEqual(f.requests('session.history').at(-1).requestId, first)
+    f.history([], { cursorExpired: true })
+    assert.equal(f.state().phase, 'resyncing')
+    t.mock.timers.tick(1000)
+    assert.equal(f.fleet.historyStateBySession[f.key].state, 'error')
+    assert.notEqual(f.state().phase, 'resyncing')
+    assert.equal(f.fleet.currentIsStreaming, false)
+    f.clean()
+  })
+
+  await t.test('快照抢占后的迟到 Error 不终止新 run；发送失败不泄漏请求', t => {
+    const f = fixture(t)
+    const old = f.fleet.loadSessionHistory(f.key, true)
+    f.fleet.subscribeSession(f.key)
+    f.replay([], { snapshotRequired: true, lastSeq: 1, active: true, runId: 'run' })
+    f.receive({ type: 'Failed', requestId: old, message: 'late history failure' })
+    assert.equal(f.fleet.runningBySession[f.key], 'run')
+    assert.equal(f.state().phase, 'resyncing')
+    f.history([{ role: 'assistant', runId: 'run', text: 'live' }])
+    assert.equal(f.fleet.currentIsStreaming, true)
+    f.clean()
+    f.socket().send = () => { throw new Error('socket closed during send') }
+    assert.equal(f.fleet.subscribeSession(f.key), false)
+    assert.equal(f.fleet.currentIsStreaming, false)
+    assert.equal(f.fleet.historyStateBySession[f.key].state, 'error')
+    f.clean()
+  })
+
+  await t.test('快照抢占挂起的旧 history；迟到旧页、重复 replay 均不影响快照', t => {
+    const f = fixture(t)
+    f.receive(f.event(1, { type: 'Accepted' }))
+    const oldId = f.fleet.loadSessionHistory(f.key, true)
+    f.fleet.subscribeSession(f.key)
+    f.replay([], { snapshotRequired: true, lastSeq: 4, active: false })
+    const snapshotId = f.requests('session.history').at(-1).requestId
+    assert.equal(f.requests('session.history').length, 2)
+    assert.notEqual(snapshotId, oldId)
+    assert.equal(f.fleet.pendingHistoryPages[f.key], snapshotId)
+    assert.equal(f.fleet.lastSeqBySession[f.key], 1)
+    f.history([{ id: 'stale', role: 'assistant', text: 'stale' }], { requestId: oldId })
+    assert.equal(f.fleet.pendingHistoryPages[f.key], snapshotId)
+    f.replay([], { snapshotRequired: true, lastSeq: 500 })
+    assert.equal(f.requests('session.history').length, 2)
+    f.receive(f.event(5, { text: 'tail' }))
+    f.history([{ id: 'snapshot', role: 'assistant', text: 'full' }])
+    assert.deepEqual(f.text(), ['full', 'tail'])
+    assert.equal(f.fleet.lastSeqBySession[f.key], 5)
+    assert.equal(f.state().phase, 'live')
+    f.clean()
+  })
+
+  await t.test('1000 帧上限：溢出放弃增量发快照，提交前不推进 cursor', t => {
+    const f = fixture(t)
+    for (let seq = 2; seq <= 1002; seq++) f.receive(f.event(seq))
+    assert.equal(f.state().buffer.length, 1000)
+    assert.equal(f.requests('session.subscribe').length, 1)
+    assert.equal(f.requests('session.history').length, 1)
+    assert.match(f.fleet.dumpAuditLog(), /BufferOverflow/)
+    assert.equal(f.fleet.lastSeqBySession[f.key], 0)
+    f.history([{ id: 'all', role: 'assistant', text: Array.from({ length: 1002 }, (_, i) => String(i + 1)).join('') }])
+    assert.deepEqual(f.text(), [Array.from({ length: 1002 }, (_, i) => String(i + 1)).join('')])
+    assert.equal(f.fleet.lastSeqBySession[f.key], 1002)
+    assert.equal(f.state().buffer.length, 0)
+    assert.equal(f.state().phase, 'live')
+    f.clean()
+  })
+
+  await t.test('history 最新页和旧分页都有 10s 超时，可重试，迟到页不覆盖', t => {
+    const f = fixture(t)
+    const oldId = f.fleet.loadSessionHistory(f.key, true)
+    t.mock.timers.tick(10000)
+    assert.equal(f.fleet.historyStateBySession[f.key].state, 'error')
+    f.clean()
+    const newId = f.fleet.loadSessionHistory(f.key, true)
+    assert.notEqual(oldId, newId)
+    f.history([{ id: 'bad', role: 'user', text: 'late' }], { requestId: oldId })
+    assert.equal(f.fleet.pendingHistoryPages[f.key], newId)
+    f.history([{ id: 'new', role: 'user', text: 'new' }], { historyCursor: 'older-cursor' })
+    assert.deepEqual(f.fleet.messagesBySession[f.key].map(row => row.id), ['new'])
+    assert.equal(f.fleet.requestOlderHistory(f.key), true)
+    assert.equal(f.requests('session.history').at(-1).beforeCursor, 'older-cursor')
+    t.mock.timers.tick(10000)
+    assert.equal(f.fleet.historyStateBySession[f.key].state, 'error')
+    assert.equal(f.fleet.requestOlderHistory(f.key), true)
+    f.history([{ id: 'older', role: 'user', text: 'older' }], { beforeCursor: 'older-cursor' })
+    assert.deepEqual(f.fleet.messagesBySession[f.key].map(row => row.id), ['older', 'new'])
+    f.clean()
+  })
+
+  await t.test('非 snapshotRequired replay 的 active/runId 也对账；UI 只看 streaming', t => {
+    const f = fixture(t)
+    f.fleet.runningBySession[f.key] = 'metadata-only'
+    assert.equal(f.fleet.currentIsStreaming, false)
+    f.receive(f.event(1, { type: 'Accepted' }))
+    assert.equal(f.fleet.currentIsStreaming, true)
+    f.fleet.subscribeSession(f.key)
+    f.replay([], { lastSeq: 1, active: false })
+    assert.equal(f.fleet.runningBySession[f.key], undefined)
+    assert.equal(f.fleet.currentIsStreaming, false)
+    f.fleet.subscribeSession(f.key)
+    f.replay([], { lastSeq: 1, active: true, runId: 'different-run' })
+    assert.equal(f.fleet.runningBySession[f.key], 'different-run')
+    assert.equal(f.fleet.currentIsStreaming, false)
+    assert.ok(f.fleet.messagesBySession[f.key].every(message => !message.streaming))
+    f.clean()
+  })
+
+  await t.test('快照后仅当前 active run 的消息 streaming；stream 更换不降 session 水位', t => {
+    const f = fixture(t)
+    f.receive(f.event(1, { type: 'Accepted' }))
+    f.fleet.subscribeSession(f.key)
+    f.replay([], { snapshotRequired: true, lastSeq: 10, active: true, runId: 'next' })
+    f.history([{ id: 'old-run', role: 'assistant', runId: 'run', text: 'old' },
+      { id: 'new-run', role: 'assistant', runId: 'next', text: 'new' }])
+    assert.deepEqual(f.fleet.messagesBySession[f.key].filter(message => message.streaming).map(message => message.runId), ['next'])
+    assert.equal(f.fleet.lastSeqBySession[f.key], 10)
+    f.receive(f.event(1, { streamId: 'replacement', text: 'generation' }))
+    f.replay([], { streamId: 'replacement', snapshotRequired: true, lastSeq: 1, active: false })
+    f.history([{ id: 'replaced', role: 'assistant', text: 'generation' }])
+    assert.equal(f.fleet.lastSeqBySession[f.key], 10)
+    f.receive(f.event(2, { streamId: 'replacement', text: '2' }))
+    assert.deepEqual(f.text(), ['generation', '2'])
+    f.fleet.subscribeSession(f.key)
+    assert.equal(f.requests('session.subscribe').at(-1).afterSequence, 2)
+    f.replay([], { streamId: 'replacement', lastSeq: 2 })
+    assert.equal(f.fleet.lastSeqBySession[f.key], 10)
+    f.clean()
+  })
+
+  await t.test('Web 事件应用抛异常：审计可见、不推进 cursor，只触发一次 resync', t => {
+    const f = fixture(t)
+    f.receive(f.event(1, { type: 'Accepted' }))
+    // The native channel can also deliver objects with failing getters; Web uses a throwing state accessor.
+    const messages = f.fleet.messagesBySession[f.key]
+    messages[0].parts = { map() { throw new Error('injected apply failure') } }
+    const frame = f.event(2, { text: 'broken' })
+    f.socket().onmessage({ data: JSON.stringify({ nodeId: 'node', provider: 'codex', sessionId: 'resync', ...frame }) })
+    assert.equal(f.fleet.lastSeqBySession[f.key], 1)
+    assert.match(f.fleet.dumpAuditLog(), /seq=2.*ApplyError.*injected apply failure/)
+    assert.equal(f.requests('session.history').length, 1)
+    f.receive(f.event(3))
+    assert.equal(f.requests('session.history').length, 1)
+    messages[0].parts = []
+    f.history([{ id: 'fixed', role: 'assistant', runId: 'run', text: 'recovered' }])
+    assert.deepEqual(f.text(), ['recovered3'])
+    assert.equal(f.fleet.lastSeqBySession[f.key], 3)
+    f.clean()
+  })
+
+  await t.test('快照应用异常不提交 lastSeq；结束为错误态，可重新订阅恢复', t => {
+    const f = fixture(t)
+    f.receive(f.event(1, { type: 'Accepted' }))
+    f.fleet.subscribeSession(f.key)
+    f.replay([], { snapshotRequired: true, lastSeq: 50 })
+    f.history([{ role: 'assistant', text: 'bad', parts: [null] }])
+    assert.equal(f.fleet.lastSeqBySession[f.key], 1)
+    assert.equal(f.fleet.historyStateBySession[f.key].state, 'error')
+    assert.notEqual(f.state().phase, 'resyncing')
+    assert.match(f.fleet.dumpAuditLog(), /ApplyError/)
+    assert.equal(f.requests('session.history').length, 1)
+    f.clean()
+    f.fleet.subscribeSession(f.key)
+    f.replay([], { snapshotRequired: true, lastSeq: 50 })
+    f.history([{ id: 'fixed', role: 'assistant', text: 'fixed' }])
+    assert.equal(f.fleet.lastSeqBySession[f.key], 50)
+    assert.equal(f.state().phase, 'live')
+    f.clean()
+  })
+
+  await t.test('普通 history 超时不会取消 subscribe 的独立重试', t => {
+    const f = fixture(t)
+    f.fleet.loadSessionHistory(f.key, true)
+    f.receive(f.event(2))
+    for (const ms of [5000, 500, 4500]) t.mock.timers.tick(ms)
+    assert.deepEqual(f.fleet.pendingHistoryPages, {})
+    assert.equal(f.fleet.pendingStreamResync.size, 1)
+    t.mock.timers.tick(500)
+    t.mock.timers.tick(1000)
+    assert.equal(f.requests('session.subscribe').length, 3)
+    f.replay([f.event(1)], { lastSeq: 1, active: true, runId: 'run' })
+    assert.deepEqual(f.text(), ['12'])
+    f.clean()
+  })
+
+  await t.test('快照 cursorExpired 重新发最新页并保持快照对账，空快照也清理旧 streaming', t => {
+    const f = fixture(t)
+    f.receive(f.event(1, { type: 'Accepted' }))
+    f.fleet.subscribeSession(f.key)
+    f.replay([], { snapshotRequired: true, lastSeq: 20, active: false })
+    const expiredId = f.requests('session.history').at(-1).requestId
+    f.history([], { cursorExpired: true })
+    assert.equal(f.requests('session.history').length, 2)
+    assert.notEqual(f.requests('session.history').at(-1).requestId, expiredId)
+    assert.equal(f.fleet.lastSeqBySession[f.key], 1)
+    f.history([])
+    assert.equal(f.fleet.lastSeqBySession[f.key], 20)
+    assert.equal(f.fleet.currentIsStreaming, false)
+    assert.deepEqual(f.text(), [])
+    assert.equal(f.state().phase, 'live')
+    f.clean()
+  })
+
+  await t.test('失败响应、节点掉线、删除和主动断开均释放 pending 及 timer', t => {
+    const f = fixture(t)
+    f.receive(f.event(2))
+    f.receive({ type: 'Error', requestId: f.requests('session.subscribe').at(-1).requestId, message: 'retry' })
+    assert.equal(f.fleet.pendingStreamResync.size, 0)
+    t.mock.timers.tick(500)
+    f.replay([], { snapshotRequired: true, lastSeq: 2 })
+    f.receive({ type: 'Failed', requestId: f.requests('session.history').at(-1).requestId, message: 'history failed' })
+    assert.equal(f.fleet.historyStateBySession[f.key].state, 'error')
+    f.clean()
+    f.fleet.nodes = [{ id: 'node', status: 'online', adapters: [] }]
+    f.fleet.subscribeSession(f.key)
+    f.fleet.loadSessionHistory(f.key, true)
+    f.receive({ type: 'NodePresence', nodeId: 'node', status: 'offline' })
+    f.clean()
+    f.receive({ type: 'NodePresence', nodeId: 'node', status: 'online' })
+    assert.equal(f.fleet.pendingStreamResync.size, 1)
+    f.receive({ type: 'SessionDeleted' })
+    assert.equal(f.fleet.streamStateBySession.has(f.key), false)
+    assert.equal(f.fleet.pendingStreamResync.size, 0)
+    assert.deepEqual(f.fleet.pendingHistoryPages, {})
+    f.fleet.disconnectSocket()
+    t.mock.timers.tick(30000)
+    assert.equal(f.fleet.wsState, 'disconnected')
+    assert.equal(f.fleet.pendingStreamResync.size, 0)
+    assert.deepEqual(f.fleet.pendingHistoryPages, {})
+  })
+  await t.test('Native Tauri 入口应用异常同样进入诊断并 resync，后续 channel 帧继续处理', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const previousWindow = globalThis.window
+    const previousIsTauri = globalThis.isTauri
+    const sent = []
+    let channel
+    globalThis.isTauri = true
+    globalThis.window = {
+      addEventListener() {},
+      removeEventListener() {},
+      localStorage: globalThis.localStorage,
+      sessionStorage: { removeItem() {} },
+      __TAURI_INTERNALS__: {
+        transformCallback() { return 1 },
+        unregisterCallback() {},
+        async invoke(command, args) {
+          if (command === 'desktop_platform') return 'macos'
+          if (command === 'fleet_connect') channel = args.events
+          if (command === 'fleet_send') sent.push(args.frame)
+        },
+      },
+    }
+    const { initializeDesktopPlatform } = await server.ssrLoadModule('/src/desktop/platform.ts')
+    await initializeDesktopPlatform()
+    const pinia = createPinia()
+    let fleet
+    t.after(async () => {
+      fleet?.disconnectSocket()
+      disposePinia(pinia)
+      if (previousWindow === undefined) delete globalThis.window
+      else globalThis.window = previousWindow
+      if (previousIsTauri === undefined) delete globalThis.isTauri
+      else globalThis.isTauri = previousIsTauri
+      await initializeDesktopPlatform()
+    })
+    fleet = useFleetStore(pinia)
+    const session = { nodeId: 'native-node', provider: 'codex', sessionId: 'native-session' }
+    const key = sessionKey(session.nodeId, session.provider, session.sessionId)
+    fleet.sessionsByKey = { [key]: { ...session, title: 'native', cwd: '' } }
+    fleet.activeSessionKey = key
+    fleet.connectSocket()
+    assert.ok(channel)
+    const receive = frame => channel.onmessage({ event: 'frame', frame: { ...session, ...frame } })
+    receive({ type: 'FleetSnapshot', nodes: [] })
+    receive({ type: 'SessionHistory', requestId: sent.find(frame => frame.type === 'session.history').requestId, messages: [] })
+    receive({ type: 'SessionStreamReplay', requestId: sent.find(frame => frame.type === 'session.subscribe').requestId,
+      events: [], streamId: 'native-stream', lastSeq: 0, active: false, incremental: true })
+    receive({ type: 'Accepted', runId: 'run', requestId: 'run', streamId: 'native-stream', sequence: 1 })
+    const frame = { ...session, type: 'TextDelta', streamId: 'native-stream', sequence: 2, runId: 'run', requestId: 'run' }
+    Object.defineProperty(frame, 'text', { get() { throw new Error('native injected failure') } })
+    channel.onmessage({ event: 'frame', frame })
+    assert.equal(fleet.lastSeqBySession[key], 1)
+    assert.match(fleet.dumpAuditLog(), /seq=2.*ApplyError.*native injected failure/)
+    assert.equal(sent.filter(frame => frame.type === 'session.history').length, 2)
+    receive({ type: 'TextDelta', streamId: 'native-stream', sequence: 3, runId: 'run', requestId: 'run', text: 'C' })
+    receive({ type: 'SessionHistory', requestId: sent.filter(frame => frame.type === 'session.history').at(-1).requestId,
+      messages: [{ id: 'recovered', role: 'assistant', runId: 'run', text: 'AB' }] })
+    assert.deepEqual(fleet.messagesBySession[key].filter(message => message.role === 'assistant').map(message => message.text), ['ABC'])
+    assert.equal(fleet.lastSeqBySession[key], 3)
+    assert.equal(fleet.pendingStreamResync.size, 0)
+    assert.deepEqual(fleet.pendingHistoryPages, {})
+    assert.equal(fleet.streamStateBySession.get(key).phase, 'live')
+    channel.onmessage({ event: 'reconnecting' })
+    assert.equal(fleet.currentIsStreaming, false)
+    assert.equal(fleet.pendingStreamResync.size, 0)
+    assert.deepEqual(fleet.pendingHistoryPages, {})
+  })
+
 })
 
 test('首页实测用量按代理轮次去重并隔离本机记录', t => {
