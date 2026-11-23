@@ -630,7 +630,7 @@ async def fleet_client_ws(websocket: WebSocket):
                 continue
             error_reply = await fleet_hub.forward_client_command(workspace_id, conn_id, frame)
             if error_reply is not None:
-                await websocket.send_json(error_reply)
+                await fleet_hub.broadcast_workspace(workspace_id, error_reply, target_client_id=conn_id)
     except WebSocketDisconnect:
         pass
     finally:

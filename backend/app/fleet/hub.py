@@ -2,7 +2,9 @@
 
 import asyncio
 from collections import OrderedDict
+from contextlib import suppress
 from dataclasses import dataclass, field
+import logging
 from typing import Any
 from uuid import uuid4
 
@@ -12,6 +14,9 @@ from .audit import audit_event
 
 
 MAX_DEDUP_KEYS = 2048
+CLIENT_OUTBOUND_QUEUE_SIZE = 256
+CLIENT_SEND_TIMEOUT = 10.0
+logger = logging.getLogger(__name__)
 ALLOWED_CLIENT_COMMANDS = frozenset({
     "sessions.list",
     "models.list",
@@ -137,13 +142,25 @@ class ConnectedNode:
     transfer_endpoints: list[dict[str, Any]] = field(default_factory=list)
 
 
+@dataclass
+class ConnectedClient:
+    websocket: WebSocket
+    outbound: asyncio.Queue[dict[str, Any]] = field(
+        default_factory=lambda: asyncio.Queue(maxsize=CLIENT_OUTBOUND_QUEUE_SIZE),
+    )
+    writer_task: asyncio.Task[None] | None = None
+    disconnect_task: asyncio.Task[None] | None = None
+    closing: bool = False
+    in_flight: bool = False
+
+
 class FleetRelayHub:
     """维护活跃 AgentNode 与客户端 WebSocket 连接，无磁盘消息落库。"""
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._nodes: dict[tuple[str, str], ConnectedNode] = {}
-        self._clients: dict[str, dict[str, WebSocket]] = {}
+        self._clients: dict[str, dict[str, ConnectedClient]] = {}
         self._seen_requests: OrderedDict[tuple[str, str, str], bool] = OrderedDict()
         self._forwarding_requests: dict[tuple[str, str, str], asyncio.Future[bool]] = {}
         # Core REST -> AgentNode 同步 RPC 挂起表（纯内存，不落盘）
@@ -208,8 +225,8 @@ class FleetRelayHub:
 
     async def register_client(self, workspace_id: str, websocket: WebSocket) -> str:
         conn_id = str(uuid4())
+        client = ConnectedClient(websocket=websocket)
         async with self._lock:
-            self._clients.setdefault(workspace_id, {})[conn_id] = websocket
             online_snapshot = [
                 {
                     "nodeId": n.node_id,
@@ -223,18 +240,119 @@ class FleetRelayHub:
                 for (ws_id, _), n in self._nodes.items()
                 if ws_id == workspace_id
             ]
-        await websocket.send_json({
-            "type": "FleetSnapshot", "nodes": online_snapshot, "capabilities": ["active-runs"],
-        })
+            # 首帧先入队再公开连接，保证快照先于后续事件，且所有写操作由同一个 writer 串行执行。
+            client.outbound.put_nowait({
+                "type": "FleetSnapshot", "nodes": online_snapshot, "capabilities": ["active-runs"],
+            })
+            self._clients.setdefault(workspace_id, {})[conn_id] = client
+            client.writer_task = asyncio.create_task(self._write_client(workspace_id, conn_id, client))
         return conn_id
 
     async def unregister_client(self, workspace_id: str, conn_id: str) -> None:
         async with self._lock:
             clients = self._clients.get(workspace_id)
-            if clients:
+            client = clients.get(conn_id) if clients else None
+            if client is None:
+                return
+            if client.disconnect_task is None:
+                client.closing = True
                 clients.pop(conn_id, None)
                 if not clients:
                     self._clients.pop(workspace_id, None)
+        if client.disconnect_task is not None:
+            # 读循环可能在 close 后立刻退出；让故障清理完成，避免重复关闭或取消它自己。
+            await asyncio.shield(client.disconnect_task)
+        else:
+            dropped = client.outbound.qsize() + int(client.in_flight)
+            if dropped:
+                logger.warning(
+                    "Fleet client frame dropped client_id=%s reason=client_disconnected dropped_frames=%d",
+                    conn_id, dropped,
+                )
+            await self._stop_client_writer(client)
+            self._drain_client_queue(client)
+
+    @staticmethod
+    async def _stop_client_writer(client: ConnectedClient) -> None:
+        if client.writer_task is not None:
+            client.writer_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await client.writer_task
+
+    @staticmethod
+    def _drain_client_queue(client: ConnectedClient) -> None:
+        while not client.outbound.empty():
+            client.outbound.get_nowait()
+            client.outbound.task_done()
+
+    def _fail_client(
+        self, workspace_id: str, conn_id: str, client: ConnectedClient, reason: str,
+        *, rejected_frames: int = 0,
+    ) -> None:
+        if client.closing:
+            return
+        client.closing = True
+        logger.warning(
+            "Fleet client outbound failure client_id=%s reason=%s dropped_frames=%d",
+            conn_id, reason, rejected_frames + client.outbound.qsize() + int(client.in_flight),
+        )
+        if client.writer_task is not None and client.writer_task is not asyncio.current_task():
+            client.writer_task.cancel()
+        # 不在生产者中等待取消或 close；即使 writer 尚未启动，独立清理任务也一定会执行。
+        client.disconnect_task = asyncio.create_task(self._disconnect_client(workspace_id, conn_id, client))
+
+    async def _disconnect_client(self, workspace_id: str, conn_id: str, client: ConnectedClient) -> None:
+        try:
+            await self._stop_client_writer(client)
+            try:
+                # close 本身也可能阻塞，不能让注销与内存释放无限等待。
+                async with asyncio.timeout(CLIENT_SEND_TIMEOUT):
+                    await client.websocket.close(code=1011)
+            except Exception as exc:
+                logger.warning(
+                    "Fleet client close failed client_id=%s reason=%s dropped_frames=0",
+                    conn_id, type(exc).__name__,
+                )
+        finally:
+            async with self._lock:
+                clients = self._clients.get(workspace_id)
+                if clients and clients.get(conn_id) is client:
+                    clients.pop(conn_id)
+                    if not clients:
+                        self._clients.pop(workspace_id, None)
+            self._drain_client_queue(client)
+
+    async def _write_client(self, workspace_id: str, conn_id: str, client: ConnectedClient) -> None:
+        while not client.closing:
+            frame = await client.outbound.get()
+            client.in_flight = True
+            try:
+                async with asyncio.timeout(CLIENT_SEND_TIMEOUT):
+                    await client.websocket.send_json(frame)
+            except TimeoutError:
+                self._fail_client(workspace_id, conn_id, client, "send_timeout")
+                return
+            except Exception as exc:
+                self._fail_client(workspace_id, conn_id, client, f"send_error:{type(exc).__name__}")
+                return
+            finally:
+                client.in_flight = False
+                client.outbound.task_done()
+
+    def _queue_client_frame(
+        self, workspace_id: str, conn_id: str, client: ConnectedClient, frame: dict[str, Any],
+    ) -> bool:
+        if client.closing:
+            logger.warning(
+                "Fleet client frame dropped client_id=%s reason=client_closing dropped_frames=1", conn_id,
+            )
+            return False
+        try:
+            client.outbound.put_nowait(frame)
+            return True
+        except asyncio.QueueFull:
+            self._fail_client(workspace_id, conn_id, client, "queue_full", rejected_frames=1)
+            return False
 
     async def get_online_node(self, workspace_id: str, node_id: str) -> ConnectedNode | None:
         async with self._lock:
@@ -385,6 +503,8 @@ class FleetRelayHub:
         *,
         target_client_id: str | None = None,
     ) -> None:
+        queued = await self.broadcast_workspace(workspace_id, frame, target_client_id=target_client_id)
+        # 每帧都审计；queued 表示成功入队的客户端数，不代表 socket 已送达。
         sequence = frame.get("seq")
         audit_event(
             "core",
@@ -394,8 +514,8 @@ class FleetRelayHub:
             seq=sequence if sequence is not None else frame.get("sequence"),
             event_type=frame.get("type"),
             call_id=frame.get("callId"),
+            queued=queued,
         )
-        await self.broadcast_workspace(workspace_id, frame, target_client_id=target_client_id)
 
     async def broadcast_workspace(
         self,
@@ -403,27 +523,22 @@ class FleetRelayHub:
         frame: dict[str, Any],
         *,
         target_client_id: str | None = None,
-    ) -> None:
+    ) -> int:
+        """只做非阻塞入队，返回成功入队的客户端数；禁止在节点收帧路径执行 socket 写操作。"""
         async with self._lock:
             clients = dict(self._clients.get(workspace_id, {}))
-        if not clients:
-            return
-        targets = (
-            [(target_client_id, clients[target_client_id])]
-            if target_client_id and target_client_id in clients
-            else list(clients.items())
-        )
-        stale: list[str] = []
-        for cid, ws in targets:
-            try:
-                await ws.send_json(frame)
-            except Exception:
-                stale.append(cid)
-        if stale:
-            async with self._lock:
-                bucket = self._clients.get(workspace_id, {})
-                for cid in stale:
-                    bucket.pop(cid, None)
+        if target_client_id is not None:
+            client = clients.get(target_client_id)
+            if client is None:
+                logger.warning(
+                    "Fleet client frame dropped client_id=%s reason=target_missing dropped_frames=1",
+                    target_client_id,
+                )
+                return 0
+            targets = [(target_client_id, client)]
+        else:
+            targets = list(clients.items())
+        return sum(self._queue_client_frame(workspace_id, cid, client, frame) for cid, client in targets)
 
 
 fleet_hub = FleetRelayHub()

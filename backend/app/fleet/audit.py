@@ -43,12 +43,14 @@ def audit_event(
     seq: int | str | None = "-",
     event_type: str | None = "",
     call_id: str | None = "",
+    queued: int | None = None,
 ) -> None:
     try:
         logger = audit_logger()
         if logger is not None:
             logger.info(
-                "side=%s session=%s run=%s stream=%s seq=%s type=%s call=%s",
+                "side=%s session=%s run=%s stream=%s seq=%s type=%s call=%s"
+                + (f" queued={queued}" if queued is not None else ""),
                 side, _field(session_id, 8), _field(run_id, 8), _field(stream_id, 8),
                 seq if type(seq) is int else _field(seq), _field(event_type), _field(call_id, 8),
             )
