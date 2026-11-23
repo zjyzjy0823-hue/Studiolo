@@ -11,6 +11,7 @@
     "port": 18910,
     "advertiseUrls": []
   },
+  "hermes": { "transport": "ws" },
   "hermesMedia": {
     "baseUrl": "",
     "tokenFile": "",

@@ -6,6 +6,7 @@ from .base import AgentAdapter
 from .codex import CodexAdapter
 from .dsh import DshAdapter
 from .hermes import HermesAdapter
+from .hermes_ws import HermesWsAdapter
 from .mock import MockAdapter
 from .openclaw import OpenClawAdapter
 from .opencode import OpenCodeAdapter
@@ -30,13 +31,18 @@ def build_adapter_registry(config: NodeConfig) -> dict[str, AgentAdapter]:
         )
     if p.get("hermes", {}).get("enabled", True):
         hm = p.get("hermes", {})
-        registry["hermes"] = HermesAdapter(
-            roots,
+        common = dict(
             command=str(hm.get("command") or "hermes"),
-            mode=str(hm.get("mode") or "acp"),
             serve_url=hm.get("serveUrl"),
             api_key=hm.get("apiKey"),
         )
+        if hm.get("transport", "ws") == "ws":
+            registry["hermes"] = HermesWsAdapter(
+                roots, **common, ws_url=hm.get("wsUrl"), ws_port=hm.get("wsPort"),
+                token_file=hm.get("wsTokenFile"), token=hm.get("wsToken"), media=config.hermes_media,
+            )
+        else:
+            registry["hermes"] = HermesAdapter(roots, **common, mode=str(hm.get("mode") or "acp"))
     if p.get("antigravity", {}).get("enabled", True):
         registry["antigravity"] = AntigravityAdapter(roots, command=str(p.get("antigravity", {}).get("command") or "agy"))
     if p.get("dsh", {}).get("enabled", True):

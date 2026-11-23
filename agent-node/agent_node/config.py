@@ -159,6 +159,15 @@ def load_node_config(config_path: str | Path | None = None, environ: dict[str, s
         advertise_urls=tuple(direct_raw.get("advertiseUrls") or ()),
     )
     providers = dict(raw.get("providers") or {})
+    hermes = {**(providers.get("hermes") or {}), **(raw.get("hermes") or {})}
+    hermes["transport"] = str(env.get("STUDIOLO_HERMES_TRANSPORT") or hermes.get("transport") or "ws").strip().lower()
+    if hermes["transport"] not in ("ws", "acp"):
+        raise ValueError("Hermes transport must be ws or acp")
+    for key, suffix in (("wsPort", "WS_PORT"), ("wsUrl", "WS_URL"), ("wsTokenFile", "WS_TOKEN_FILE"),
+                        ("wsToken", "WS_TOKEN")):
+        if value := env.get(f"STUDIOLO_HERMES_{suffix}"):
+            hermes[key] = value
+    providers["hermes"] = hermes
     return NodeConfig(
         core_url=core_url,
         node_token=token,
