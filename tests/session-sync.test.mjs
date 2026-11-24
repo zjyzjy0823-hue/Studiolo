@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import vue from '@vitejs/plugin-vue'
 import { createPinia, disposePinia } from 'pinia'
 import { createServer } from 'vite'
+import { createSSRApp } from 'vue'
+import { renderToString } from 'vue/server-renderer'
+import { formatWorkLogDuration, readTurnTestResult } from '../src/services/chatHelpers.ts'
+import { mapEpochSnapshotMessage } from '../src/services/epochSnapshot.ts'
+import { buildThreadRenderItems } from '../src/services/messageSegments.ts'
 import { createSessionSync, readSyncMode } from '../src/services/sessionSync.ts'
 
 const snapshot = { messages: [{ role: 'assistant', text: '回答' }] }
@@ -10,6 +16,43 @@ const opened = (epoch = 'one', lastSeq = 2) => ({ epoch, lastSeq, snapshot })
 const page = (events, hasMore = false, epoch = 'one') => ({ epoch, events, hasMore })
 const openRequest = sessionKey => ['session.snapshot', { sessionKey }]
 const since = (sessionKey, lastSeq, epoch = 'one') => ['session.events.since', { sessionKey, epoch, lastSeq, limit: 500 }]
+
+test('epoch snapshots preserve every tool in the existing work log with client statuses', () => {
+  const toolCalls = [
+    { callId: 'one', name: 'bash', status: 'completed', durationMs: 1234, input: 'node --test', output: '# pass 2\n# fail 0' },
+    { callId: 'two', name: 'write', status: 'error', durationMs: null, output: 'permission denied' },
+    { callId: 'three', name: 'read', status: 'failed' },
+    { callId: 'four', name: 'bash', status: 'running' },
+    { callId: 'five', name: 'search', status: 'queued' },
+  ]
+  const context = { session: { nodeId: 'node', provider: 'hermes' }, fallbackId: 'history-1', fallbackCreatedAt: 123 }
+  const row = { role: 'assistant', text: '回答', turnId: 'turn', durationMs: null, toolCalls }
+  for (const parts of [undefined, [{ type: 'tool', callId: 'one' }, { type: 'text', text: row.text }]]) {
+    const message = mapEpochSnapshotMessage({ ...row, parts }, context)
+    assert.equal(message.epochSnapshot, true)
+    assert.equal(message.runId, 'turn')
+    assert.equal(Object.hasOwn(message, 'durationMs'), false)
+    assert.equal(message.toolCalls.length, toolCalls.length)
+    assert.deepEqual(message.toolCalls.map(tool => tool.status), ['success', 'error', 'error', 'running', 'running'])
+    assert.equal(message.toolCalls[0].durationMs, 1234)
+    assert.equal(message.toolCalls[1].output, 'permission denied')
+    assert.equal(Object.hasOwn(message.toolCalls[1], 'durationMs'), false)
+    assert.deepEqual(readTurnTestResult(message.toolCalls), { passed: 2, failed: 0, successful: true })
+    const steps = buildThreadRenderItems(message).flatMap(item => item.type === 'work-log' ? item.steps : [])
+    assert.deepEqual(steps.filter(step => step.type === 'tool').map(step => step.callId), toolCalls.map(tool => tool.callId))
+  }
+  assert.equal(mapEpochSnapshotMessage({ ...row, durationMs: 1234 }, context).durationMs, 1234)
+})
+
+test('epoch message duration omits missing or nonpositive values and keeps the existing format', () => {
+  for (const durationMs of [undefined, null, 0, -1, NaN, Infinity]) {
+    assert.equal(formatWorkLogDuration(durationMs), '')
+  }
+  assert.equal(formatWorkLogDuration(300), '用时 300 毫秒')
+  assert.equal(formatWorkLogDuration(1234), '用时 1.2 秒')
+  assert.equal(formatWorkLogDuration(60_000), '用时 1 分钟')
+  assert.equal(formatWorkLogDuration(62_000), '用时 1 分钟 2 秒')
+})
 
 function fixture(responses, mode = 'epoch') {
   const calls = []
@@ -128,11 +171,13 @@ test('the sync mode defaults to legacy and accepts explicit storage or URL opt-i
 test('Fleet opts in on its auth frame and falls back for only the incomplete session', async t => {
   const server = await createServer({
     configFile: false,
+    plugins: [vue()],
     server: { middlewareMode: true, ws: false, watch: null },
     optimizeDeps: { noDiscovery: true },
   })
   t.after(() => server.close())
   const { useFleetStore, sessionKey } = await server.ssrLoadModule('/src/stores/fleet.ts')
+  const { default: WorkLog } = await server.ssrLoadModule('/src/components/chat/WorkLog.vue')
   const pinia = createPinia()
   const requests = []
   const sent = []
@@ -147,7 +192,14 @@ test('Fleet opts in on its auth frame and falls back for only the incomplete ses
   t.mock.method(globalThis, 'fetch', async (url, { body }) => {
     const params = JSON.parse(body)
     requests.push([url, params])
-    return Response.json(params.sessionId === 'incomplete' ? { code: 'replay_incomplete' } : opened())
+    if (params.sessionId === 'incomplete') return Response.json({ code: 'replay_incomplete' })
+    return Response.json({ ...opened('one', 0), snapshot: { lastSeq: 0, messages: [{
+      ...snapshot.messages[0], durationMs: null,
+      toolCalls: [
+        { callId: 'one', name: 'bash', status: 'completed', output: 'fixture output', durationMs: null },
+        { callId: 'two', name: 'bash', status: 'failed', output: 'fixture error', durationMs: 1234 },
+      ],
+    }] } })
   })
   for (const [name, value] of Object.entries({
     WebSocket: MockSocket,
@@ -181,7 +233,24 @@ test('Fleet opts in on its auth frame and falls back for only the incomplete ses
   assert.deepEqual(requests, ['incomplete', 'complete'].map(sessionId => [
     '/api/v1/fleet/nodes/node/session/snapshot', { sessionId, provider: 'hermes' },
   ]))
-  assert.equal(fleet.messagesBySession[complete][0].text, '回答')
+  const [message] = fleet.messagesBySession[complete]
+  assert.equal(message.text, '回答')
+  assert.equal(message.durationMs, undefined)
+  assert.deepEqual(message.toolCalls.map(tool => [tool.status, tool.durationMs]), [['success', undefined], ['error', 1234]])
+  const log = buildThreadRenderItems(message).find(item => item.type === 'work-log')
+  const renderLog = (durationMs, reveal) => renderToString(createSSRApp(WorkLog, {
+    steps: log.steps, epochSnapshot: message.epochSnapshot, durationMs, reveal,
+  }).use(pinia))
+  const html = await renderLog(message.durationMs)
+  assert.equal((html.match(/class="tool-card is-/g) ?? []).length, 2)
+  assert.match(html, /工作步骤/)
+  assert.doesNotMatch(html, /用时/)
+  const withoutToolDuration = await renderLog(undefined, { stepId: log.steps[0].id })
+  assert.match(withoutToolDuration, /fixture output/)
+  assert.doesNotMatch(withoutToolDuration, /class="num"/)
+  const withDurations = await renderLog(1500, { stepId: log.steps[1].id })
+  assert.match(withDurations, /用时 1\.5 秒/)
+  assert.match(withDurations, /1\.2s/)
   assert.deepEqual(sent.filter(frame => frame.type === 'session.subscribe'), [])
   const history = sent.find(frame => frame.type === 'session.history')
   assert.equal(history.sessionId, 'incomplete')

@@ -618,9 +618,25 @@ export function describeToolCall(tool: ToolCallBadge) {
   return { icon: operation.icon, filePath, label: excerpt ? `${label} · ${excerpt}` : label }
 }
 
+export function formatElapsedTime(ms?: number | null): string {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return ''
+  if (ms < 1000) return `${Math.round(ms)} 毫秒`
+  if (ms < 60000) return `${Number((ms / 1000).toFixed(1))} 秒`
+  const minutes = Math.floor(ms / 60000)
+  const seconds = Math.floor(ms / 1000) % 60
+  return seconds ? `${minutes} 分钟 ${seconds} 秒` : `${minutes} 分钟`
+}
+
+export function formatWorkLogDuration(ms?: number | null): string {
+  if (ms == null || ms <= 0) return ''
+  const elapsed = formatElapsedTime(ms)
+  return elapsed ? `用时 ${elapsed}` : ''
+}
+
 export function readTurnTestResult(tools: ToolCallBadge[] = []) {
   for (const tool of [...tools].reverse()) {
-    if (!tool.output || (tool.status !== 'completed' && tool.status !== 'error')) continue
+    const successful = tool.status === 'completed' || tool.status === 'success'
+    if (!tool.output || (!successful && tool.status !== 'error')) continue
     const command = typeof tool.input === 'string' ? tool.input
       : (tool.input as { command?: string } | undefined)?.command || tool.title || ''
     if (!/\b(?:pytest|vitest|jest|cargo\s+test|node\s+--test|(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test)\b/i.test(command)) continue
@@ -634,13 +650,13 @@ export function readTurnTestResult(tools: ToolCallBadge[] = []) {
       const passed = summary.match(/\b(\d+)\s+passed\b/i)?.[1]
       const failed = summary.match(/\b(\d+)\s+failed\b/i)?.[1]
       if (passed !== undefined || failed !== undefined) {
-        return { passed: Number(passed ?? 0), failed: Number(failed ?? 0), successful: tool.status === 'completed' }
+        return { passed: Number(passed ?? 0), failed: Number(failed ?? 0), successful }
       }
     }
     const passed = output.match(/^\s*[#ℹ]\s*pass\s+(\d+)\s*$/m)?.[1]
     const failed = output.match(/^\s*[#ℹ]\s*fail\s+(\d+)\s*$/m)?.[1]
     if (passed !== undefined && failed !== undefined) {
-      return { passed: Number(passed), failed: Number(failed), successful: tool.status === 'completed' }
+      return { passed: Number(passed), failed: Number(failed), successful }
     }
   }
   return undefined

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch, type ObjectDirective } from 'vue'
-import { describeToolCall } from '../../services/chatHelpers'
+import { describeToolCall, formatElapsedTime, formatWorkLogDuration } from '../../services/chatHelpers'
 import type { WorkLogProgress, WorkLogStep } from '../../services/messageSegments'
 import OpusIcon from '../ui/OpusIcon.vue'
 import ThoughtPulseIcon from './ThoughtPulseIcon.vue'
@@ -10,6 +10,7 @@ const props = defineProps<{
   steps: WorkLogStep[]
   progress?: WorkLogProgress
   durationMs?: number
+  epochSnapshot?: boolean
   reveal?: { stepId: string }
 }>()
 
@@ -19,6 +20,9 @@ const emit = defineEmits<{
 }>()
 
 const isOpen = ref(false)
+watch(() => props.epochSnapshot && props.steps.some(step => step.type === 'tool'), showTools => {
+  if (showTools) isOpen.value = true
+}, { immediate: true })
 watch(() => props.reveal, reveal => {
   if (reveal) isOpen.value = true
 }, { immediate: true })
@@ -49,15 +53,6 @@ function onThoughtScroll(event: Event) {
   updateThoughtFade(event.currentTarget as HTMLParagraphElement)
 }
 
-function formatTime(ms?: number): string {
-  if (ms === undefined || !Number.isFinite(ms) || ms < 0) return ''
-  if (ms < 1000) return `${Math.round(ms)} 毫秒`
-  if (ms < 60000) return `${Number((ms / 1000).toFixed(1))} 秒`
-  const minutes = Math.floor(ms / 60000)
-  const seconds = Math.floor(ms / 1000) % 60
-  return seconds ? `${minutes} 分钟 ${seconds} 秒` : `${minutes} 分钟`
-}
-
 const tools = computed(() => props.steps.flatMap(step => step.type === 'tool' ? [step.tool] : []))
 const currentTool = computed(() => props.progress?.type === 'tool' ? describeToolCall(props.progress.tool) : undefined)
 const isThinking = computed(() => props.progress?.type === 'thought')
@@ -66,13 +61,14 @@ const label = computed(() => {
   if (currentTool.value) return currentTool.value.label
   if (isThinking.value) return '思考中'
   if (props.progress?.type === 'text') return '回复中'
-  const elapsed = formatTime(props.durationMs)
+  if (props.epochSnapshot) return formatWorkLogDuration(props.durationMs) || '工作步骤'
+  const elapsed = formatElapsedTime(props.durationMs)
   if (elapsed) return `用时 ${elapsed}`
   const durations = tools.value.flatMap(({ durationMs }) =>
     durationMs !== undefined && Number.isFinite(durationMs) && durationMs >= 0 ? [durationMs] : [],
   )
   if (!durations.length) return '用时未记录'
-  return `工具用时 ${formatTime(durations.reduce((sum, ms) => sum + ms, 0))}`
+  return `工具用时 ${formatElapsedTime(durations.reduce((sum, ms) => sum + ms, 0))}`
 })
 </script>
 

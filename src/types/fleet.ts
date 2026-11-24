@@ -294,7 +294,7 @@ export interface ChatSession {
   todoCount?: number
 }
 
-export type ToolCallStatus = 'running' | 'completed' | 'error'
+export type ToolCallStatus = 'running' | 'completed' | 'success' | 'error'
 
 export interface MessageMediaItem {
   id: string
@@ -454,6 +454,7 @@ export interface ChatMessage {
   nodeId: string
   provider: AdapterProvider
   text: string
+  epochSnapshot?: true
   /** Optimistic user messages track delivery until the node acknowledges them. */
   delivery?: 'sending' | 'sent' | 'failed'
   thought?: string

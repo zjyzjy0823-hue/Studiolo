@@ -11,6 +11,7 @@ import { desktopPlatform } from '../desktop/platform'
 import { decodeBase64Url, downloadAndDecryptBlob, encryptAndUploadFile } from '../services/blobTransfer'
 import { normalizeCoreOrigin } from '../services/fleetUrl'
 import { FleetLocalStore, type FleetOutboxItem } from '../services/fleetLocal'
+import { mapEpochSnapshotMessage, type EpochSnapshotMessage } from '../services/epochSnapshot'
 import { createSessionSync, readSyncMode } from '../services/sessionSync'
 import {
   buildFleetWsUrl,
@@ -1456,7 +1457,7 @@ export const useFleetStore = defineStore('fleet', () => {
     }
   }
 
-  function applyWsEvent(frame: FleetWsEvent) {
+  function applyWsEvent(frame: FleetWsEvent, epochMessages?: ChatMessage[]) {
     const etype = frame.type
     const seq = frame.seq ?? frame.sequence
     pushAudit({
@@ -1857,7 +1858,7 @@ export const useFleetStore = defineStore('fleet', () => {
       if (!forced && !frame.beforeCursor && !hasLiveHistory && !hasSystemHistory && existing.some(m => m.role !== 'system') &&
         frame.messages.length <= existing.length) return
       cachedHistoryKeys.delete(k)
-      const hydrated: ChatMessage[] = frame.messages.map((m, idx) => {
+      const hydrated: ChatMessage[] = epochMessages ?? frame.messages.map((m, idx) => {
         const live = (m.runId || m.requestId)
           ? existing.find(row => row.role === m.role && (
               Boolean(m.runId && (row.runId === m.runId || row.requestId === m.runId)) || Boolean(m.requestId && row.requestId === m.requestId)
@@ -3121,21 +3122,24 @@ export const useFleetStore = defineStore('fleet', () => {
       apply: (_, value) => {
         if (fleetRoute.value !== route || pendingStreamResync.get(sKey) !== requestId) return
         const snapshot = value as {
-          messages: Array<NonNullable<FleetWsEvent['messages']>[number] & { turnId?: string }>
-          turns?: Array<{ turnId: string; startedAt?: number }>
+          messages: EpochSnapshotMessage[]
+          turns?: Array<{ turnId: string; startedAt?: number | null }>
           lastSeq?: number
           running?: boolean
           runId?: string
         }
         // The event-log cursor and live stream cursor count different frames.
-        if (state.buffer.at(-1) !== tail || !Array.isArray(snapshot.messages) || snapshot.lastSeq === 0) {
+        if (state.buffer.at(-1) !== tail || !Array.isArray(snapshot.messages) ||
+          (snapshot.lastSeq === 0 && (tail || lastSeq > 0 || snapshot.running || !snapshot.messages.length))) {
           throw new Error('Epoch snapshot cannot cover the current live stream')
         }
         const startedAt = new Map(snapshot.turns?.map(turn => [turn.turnId, turn.startedAt]))
-        const messages = snapshot.messages.map(message => ({
-          ...message,
-          runId: message.turnId ?? message.runId,
-          createdAt: message.createdAt ?? startedAt.get(message.turnId ?? ''),
+        const now = Date.now()
+        const messages = snapshot.messages.map((message, index) => mapEpochSnapshotMessage(message, {
+          session: sess,
+          fallbackId: `hist-${requestId}-${index}`,
+          fallbackCreatedAt: startedAt.get(message.turnId ?? '') ?? now,
+          liveRunId: snapshot.running ? snapshot.runId : undefined,
         }))
         clearHistory(sKey)
         pendingHistoryPages.value[sKey] = requestId
@@ -3144,7 +3148,7 @@ export const useFleetStore = defineStore('fleet', () => {
         const intent = snapshotFollowIntent.get(sKey)
         if (intent && !intent.settled) intent.requestId = requestId
         reconcileRuntime(sKey, { type: 'SessionHistory', active: snapshot.running, runId: snapshot.runId })
-        applyWsEvent({ type: 'SessionHistory', ...sess, requestId, messages })
+        applyWsEvent({ type: 'SessionHistory', ...sess, requestId, messages }, messages)
         clearSubscribe(sKey)
         void flushOutbox()
       },

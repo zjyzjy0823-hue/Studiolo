@@ -10,6 +10,7 @@ import { useWebsitesStore } from '../../stores/websites'
 import {
   buildSessionMarkdown,
   createPastedTextBlock,
+  formatWorkLogDuration,
   fuzzyMatchFileScore,
   isQuotaOrModelError,
   readTurnTestResult,
@@ -1051,6 +1052,7 @@ const assistantTurns = computed(() => {
     return [msg.id, {
       items,
       lastWorkLogId: workLogs.at(-1)?.id,
+      standaloneDuration: msg.epochSnapshot && !workLogs.length ? formatWorkLogDuration(msg.durationMs) : '',
       testResult: msg.streaming ? undefined : readTurnTestResult(msg.toolCalls),
     }]
   }))
@@ -2575,6 +2577,9 @@ async function retryTurn(msg: ChatMessage) {
               </span>
               <div class="agent-col">
                 <div class="bubble">
+                  <span v-if="assistantTurns.get(msg.id)?.standaloneDuration" class="num faint">
+                    {{ assistantTurns.get(msg.id)?.standaloneDuration }}
+                  </span>
                   <template v-if="assistantTurns.get(msg.id)?.items.length">
                     <div class="msg-parts">
                       <template
@@ -2586,6 +2591,7 @@ async function retryTurn(msg: ChatMessage) {
                           :steps="item.steps"
                           :progress="item.progress"
                           :duration-ms="assistantTurns.get(msg.id)?.lastWorkLogId === item.id ? msg.durationMs : undefined"
+                          :epoch-snapshot="msg.epochSnapshot"
                           :reveal="revealedWorkLog?.logId === item.id ? revealedWorkLog : undefined"
                           @open-file="fp => emit('openFile', fp)"
                           @open-subagent="sid => emit('openSubagent', sid)"
