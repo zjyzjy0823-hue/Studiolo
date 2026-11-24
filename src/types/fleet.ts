@@ -294,6 +294,26 @@ export interface ChatSession {
   todoCount?: number
 }
 
+export interface ProcessItem {
+  id: string
+  command: string
+  cwd: string
+  pid: number | null
+  status: string
+  uptimeSeconds: number | null
+  outputPreview: string
+  outputTail: string
+  exitCode: number | null
+  startedAt: number | null
+}
+
+export interface SubagentItem {
+  id: string
+  goals: string[]
+  count: number
+  status: string
+}
+
 export type ToolCallStatus = 'running' | 'completed' | 'success' | 'error'
 
 export interface MessageMediaItem {

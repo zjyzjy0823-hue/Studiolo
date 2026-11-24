@@ -4,7 +4,8 @@
 
 import { apiRequest, apiResponse, ApiError } from '../api/client'
 import { blobResult, externalResultFromPayload, isJsonContentType, type HermesMediaResult } from './hermesMedia'
-import type { AgentNode, NodePlatform, NodeTokenOut } from '../types/fleet'
+import { mapSessionProcesses, mapSessionSubagents, type SessionActivityResult } from './sessionActivity'
+import type { AdapterProvider, AgentNode, NodePlatform, NodeTokenOut } from '../types/fleet'
 
 export { buildFleetWsUrl, getApiBaseUrl } from './fleetUrl'
 
@@ -41,6 +42,33 @@ export const revokeFleetNode = (token: string, nodeId: string, origin?: string) 
 
 export const deleteFleetNode = (token: string, nodeId: string, origin?: string) =>
   apiRequest<void>(`/api/v1/fleet/nodes/${nodeId}`, { method: 'DELETE' }, token, origin)
+
+type SessionActivityOptions = { token: string; origin: string; provider: AdapterProvider; signal: AbortSignal }
+
+async function fetchSessionActivity<T>(
+  nodeId: string,
+  sessionKey: string,
+  endpoint: 'processes' | 'subagents',
+  map: (payload: unknown) => SessionActivityResult<T>,
+  { token, origin, provider, signal }: SessionActivityOptions,
+): Promise<SessionActivityResult<T>> {
+  try {
+    const payload = await apiRequest<unknown>(
+      `/api/v1/fleet/nodes/${encodeURIComponent(nodeId)}/session/${endpoint}`,
+      { method: 'POST', body: JSON.stringify({ session_id: sessionKey, provider }), signal },
+      token, origin,
+    )
+    return map(payload)
+  } catch (error) {
+    return { kind: 'error', message: error instanceof Error ? error.message : '暂不可用' }
+  }
+}
+
+export const fetchSessionProcesses = (nodeId: string, sessionKey: string, options: SessionActivityOptions) =>
+  fetchSessionActivity(nodeId, sessionKey, 'processes', mapSessionProcesses, options)
+
+export const fetchSessionSubagents = (nodeId: string, sessionKey: string, options: SessionActivityOptions) =>
+  fetchSessionActivity(nodeId, sessionKey, 'subagents', mapSessionSubagents, options)
 
 export type { HermesMediaResult }
 

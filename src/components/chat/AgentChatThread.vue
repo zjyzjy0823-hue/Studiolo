@@ -50,6 +50,8 @@ import MarkdownMessage from './MarkdownMessage.vue'
 import MessageRail from './MessageRail.vue'
 import PermissionRequestCard from './PermissionRequestCard.vue'
 import PromptLibraryModal from './PromptLibraryModal.vue'
+import SessionActivityBar from './SessionActivityBar.vue'
+import SessionActivityDrawer from './SessionActivityDrawer.vue'
 import SessionTodoBar from './SessionTodoBar.vue'
 import WorkLog from './WorkLog.vue'
 import { formatBytes, getProviderMeta, type OpusIconName } from './providerMeta'
@@ -92,6 +94,13 @@ const effectiveKey = computed(() => props.sessionKey || fleet.activeSessionKey)
 const effectiveSession = computed(() =>
   effectiveKey.value ? fleet.sessionsByKey[effectiveKey.value] ?? null : null,
 )
+const activityDrawer = ref<InstanceType<typeof SessionActivityDrawer>>()
+const activityProcesses = computed(() => fleet.processesBySession[effectiveKey.value] ?? [])
+const activitySubagents = computed(() => fleet.subagentsBySession[effectiveKey.value] ?? [])
+const activityUnavailable = computed(() => fleet.activityUnavailableBySession[effectiveKey.value])
+const runningProcessCount = computed(() => activityProcesses.value.filter(item => item.status === 'running').length)
+const subagentCount = computed(() => activitySubagents.value.reduce((total, item) => total + item.count, 0))
+let activityPull: { key: string; id: number; x: number; y: number } | undefined
 const effectiveNode = computed(
   () =>
     (effectiveSession.value ? fleet.nodes.find(n => n.id === effectiveSession.value!.nodeId) : null) ??
@@ -111,6 +120,8 @@ let userScrollIntentUntil = 0
 
 watch(effectiveKey, (key, previousKey) => {
   if (previousKey) fleet.forgetFollowIntent(previousKey)
+  activityDrawer.value?.close()
+  activityPull = undefined
   userScrollIntentUntil = 0
   fleet.reportFollowIntent(key, true)
 }, { immediate: true, flush: 'sync' })
@@ -956,6 +967,28 @@ watch(
 
 function markUserScrollIntent() {
   userScrollIntentUntil = Date.now() + 1200
+}
+
+function startActivityPull(event: TouchEvent) {
+  markUserScrollIntent()
+  activityPull = undefined
+  if (effectiveSession.value?.provider !== 'hermes' || !listEl.value || listEl.value.scrollTop > 1 ||
+    event.touches.length !== 1) return
+  const touch = event.touches[0]
+  activityPull = { key: effectiveKey.value, id: touch.identifier, x: touch.clientX, y: touch.clientY }
+}
+
+function endActivityPull(event: TouchEvent) {
+  const start = activityPull
+  activityPull = undefined
+  if (!start || start.key !== effectiveKey.value || event.touches.length ||
+    !listEl.value || listEl.value.scrollTop > 1) return
+  const touch = Array.from(event.changedTouches).find(item => item.identifier === start.id)
+  if (!touch) return
+  const down = touch.clientY - start.y
+  if (down >= 64 && down > Math.abs(touch.clientX - start.x)) {
+    void fleet.refreshSessionActivity(start.key, true)
+  }
 }
 
 function trackUpwardWheel(event: WheelEvent) {
@@ -2195,6 +2228,9 @@ function onLightboxBackdropFallback(event: MouseEvent) {
 
 let hasLightboxClickFallback = false
 onMounted(() => {
+  watch(() => effectiveSession.value ? effectiveKey.value : '', (key) => {
+    if (key) void fleet.refreshSessionActivity(key)
+  }, { immediate: true })
   const dialog = lightboxEl.value
   if (dialog && typeof HTMLDialogElement !== 'undefined' && !('closedBy' in HTMLDialogElement.prototype)) {
     dialog.addEventListener('click', onLightboxBackdropFallback)
@@ -2401,9 +2437,11 @@ async function retryTurn(msg: ChatMessage) {
     <div
       ref="listEl"
       tabindex="-1"
-      :class="mobile ? 'mmsgs' : 'msgs'"
+      :class="[mobile ? 'mmsgs' : 'msgs', { 'activity-pull': effectiveSession?.provider === 'hermes' }]"
       @scroll.passive="trackMessageScroll"
-      @touchstart.passive="markUserScrollIntent"
+      @touchstart.passive="startActivityPull"
+      @touchend.passive="endActivityPull"
+      @touchcancel.passive="activityPull = undefined"
       @wheel.passive="trackUpwardWheel"
       @keydown="trackUpwardKey"
       @mouseup="handleMessageSelection"
@@ -2922,6 +2960,33 @@ async function retryTurn(msg: ChatMessage) {
         :diff="effectiveDiff"
         :worktree-name="currentWorktreeName"
         @review="fp => emit('openDiff', fp)"
+      />
+
+      <SessionActivityBar
+        :process-count="runningProcessCount"
+        :subagent-count="subagentCount"
+        @open="activityDrawer?.open()"
+      />
+      <button
+        v-if="!runningProcessCount && !subagentCount && activityProcesses.length"
+        type="button"
+        class="btn btn-ghost btn-sm activity-history"
+        aria-haspopup="dialog"
+        @click="activityDrawer?.open()"
+      >查看最近后台任务</button>
+      <p v-if="activityUnavailable?.processes || activityUnavailable?.subagents" class="activity-unavailable" role="status">
+        {{ activityUnavailable.processes && activityUnavailable.subagents ? '后台任务与子代理'
+          : activityUnavailable.processes ? '后台任务' : '子代理' }}暂不可用
+      </p>
+      <SessionActivityDrawer
+        v-if="effectiveSession?.provider === 'hermes'"
+        :key="effectiveKey"
+        ref="activityDrawer"
+        :processes="activityProcesses"
+        :subagents="activitySubagents"
+        :fetched-at="fleet.activityFetchedAt[effectiveKey]"
+        :processes-unavailable="activityUnavailable?.processes"
+        :subagents-unavailable="activityUnavailable?.subagents"
       />
 
       <div v-if="mobile" class="m-status-strip" role="toolbar" aria-label="移动端运行配置">
@@ -3962,6 +4027,9 @@ async function retryTurn(msg: ChatMessage) {
 .thread-root :deep(.mmsgs) {
   padding-bottom: 24px;
 }
+.activity-pull { overscroll-behavior-y: contain; }
+.activity-history { margin-bottom: 4px; }
+.activity-unavailable { margin: 0 0 6px; color: var(--text-2); font-size: 12px; }
 .thread-root :deep(.composer),
 .thread-root :deep(.mcomposer) {
   position: relative;

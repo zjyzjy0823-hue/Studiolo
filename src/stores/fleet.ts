@@ -15,11 +15,14 @@ import { messageCache, type MessageCacheRecord } from '../services/messageCache'
 import { isSessionArchived } from '../composables/useSessionOrganization'
 import { hasEpochMessageContent, mapEpochSnapshotMessage, normalizeEpochMessageContent, type EpochSnapshotMessage } from '../services/epochSnapshot'
 import { createSessionSync, readSyncMode } from '../services/sessionSync'
+import { retainSessionProcesses } from '../services/sessionActivity'
 import {
   buildFleetWsUrl,
   createFleetNode,
   deleteFleetNode,
   fetchHermesMedia,
+  fetchSessionProcesses,
+  fetchSessionSubagents,
   getApiBaseUrl,
   listFleetNodes,
   revokeFleetNode,
@@ -52,10 +55,12 @@ import type {
   NodePlatform,
   NodeTokenOut,
   PermissionRequestCard,
+  ProcessItem,
   SessionDiffState,
   SessionTokenUsage,
   SubscriptionQuota,
   SubscriptionQuotaProvider,
+  SubagentItem,
   TerminalSessionState,
   TodoItem,
   WorkspaceRule,
@@ -74,6 +79,7 @@ import {
   isGenericSessionTitle,
   mergeToolCallUpdate,
   mergeHistoryBoundaries,
+  normalizeToolStatus,
   sameTurnContent,
   switchMessageBranch,
 } from '../services/chatHelpers'
@@ -97,6 +103,16 @@ const STREAM_BUFFER_CAP = 1000
 const SUBSCRIBE_TIMEOUT_MS = 5000
 const HISTORY_TIMEOUT_MS = 10000
 const SUBSCRIBE_RETRY_DELAYS_MS = [500, 1000]
+const ACTIVITY_REFRESH_INTERVAL_MS = 2000
+const ACTIVITY_REQUEST_TIMEOUT_MS = 50_000
+const ACTIVITY_TOOLS = new Set(['terminal', 'delegate_task', 'process_manage'])
+type ActivityRequest = {
+  requestedAt: number
+  pending?: boolean
+  timer?: ReturnType<typeof setTimeout>
+  timeout?: ReturnType<typeof setTimeout>
+  controller?: AbortController
+}
 type StreamPhase = 'live' | 'gap' | 'resyncing'
 type StreamState = {
   phase: StreamPhase
@@ -271,6 +287,11 @@ export const useFleetStore = defineStore('fleet', () => {
   const messagesBySession = ref<Record<string, ChatMessage[]>>({})
   const pendingApprovalsByCall = ref<Record<string, PermissionRequestCard>>({})
   const runningBySession = ref<Record<string, string>>({}) // sessionKey -> active runId
+  const processesBySession = ref<Record<string, ProcessItem[]>>({})
+  const subagentsBySession = ref<Record<string, SubagentItem[]>>({})
+  const activityFetchedAt = ref<Record<string, number>>({})
+  const activityUnavailableBySession = ref<Record<string, { processes?: boolean; subagents?: boolean }>>({})
+  const activityRequests = new Map<string, ActivityRequest>()
   const composerDrafts = ref<Record<string, { text: string; files: File[] }>>({})
   const outbox = ref<FleetOutboxItem[]>([])
   const pendingOutboxWrites = new Set<string>()
@@ -435,6 +456,95 @@ export const useFleetStore = defineStore('fleet', () => {
     () => (activeSessionKey.value ? sessionsByKey.value[activeSessionKey.value] ?? null : null),
   )
 
+  async function refreshSessionActivity(sKey = activeSessionKey.value, queueIfRecent = false) {
+    const route = fleetRoute.value
+    const sess = sessionsByKey.value[sKey]
+    if (!route || sess?.provider !== 'hermes') return
+
+    let request = activityRequests.get(sKey)
+    if (!request) {
+      request = { requestedAt: -Infinity }
+      activityRequests.set(sKey, request)
+    }
+    const wait = request.requestedAt + ACTIVITY_REFRESH_INTERVAL_MS - Date.now()
+    if (request.controller || wait > 0) {
+      // A tool or turn can finish after the current request already sampled the session.
+      if (queueIfRecent) request.pending = true
+      if (!request.controller && request.pending) {
+        const scheduled = request
+        request.timer ??= setTimeout(() => {
+          scheduled.timer = undefined
+          void refreshSessionActivity(sKey)
+        }, wait)
+      }
+      return
+    }
+
+    clearTimeout(request.timer)
+    request.timer = undefined
+    request.pending = false
+    request.requestedAt = Date.now()
+    const controller = new AbortController()
+    request.controller = controller
+    const timeout = setTimeout(() => controller.abort(), ACTIVITY_REQUEST_TIMEOUT_MS)
+    request.timeout = timeout
+    const options = { ...route, provider: sess.provider, signal: controller.signal }
+    const isCurrent = () => fleetRoute.value === route && activityRequests.get(sKey) === request
+
+    try {
+      await Promise.all([
+        fetchSessionProcesses(sess.nodeId, sess.sessionId, options).then(result => {
+          if (!isCurrent()) return
+          if (result.kind === 'ok') {
+            processesBySession.value[sKey] = retainSessionProcesses(result.items, processesBySession.value[sKey])
+            activityFetchedAt.value[sKey] = Date.now()
+          }
+          activityUnavailableBySession.value[sKey] = {
+            ...activityUnavailableBySession.value[sKey],
+            processes: result.kind === 'error' && processesBySession.value[sKey] === undefined,
+          }
+        }),
+        fetchSessionSubagents(sess.nodeId, sess.sessionId, options).then(result => {
+          if (!isCurrent()) return
+          if (result.kind === 'ok') {
+            subagentsBySession.value[sKey] = result.items
+            // The process timestamp anchors the displayed uptime once a process snapshot exists.
+            if (processesBySession.value[sKey] === undefined) activityFetchedAt.value[sKey] = Date.now()
+          }
+          activityUnavailableBySession.value[sKey] = {
+            ...activityUnavailableBySession.value[sKey],
+            subagents: result.kind === 'error' && subagentsBySession.value[sKey] === undefined,
+          }
+        }),
+      ])
+    } finally {
+      clearTimeout(timeout)
+      request.timeout = undefined
+      request.controller = undefined
+      if (isCurrent() && request.pending) void refreshSessionActivity(sKey)
+    }
+  }
+
+  function clearSessionActivity(sKey: string) {
+    const request = activityRequests.get(sKey)
+    activityRequests.delete(sKey)
+    clearTimeout(request?.timer)
+    clearTimeout(request?.timeout)
+    request?.controller?.abort()
+    delete processesBySession.value[sKey]
+    delete subagentsBySession.value[sKey]
+    delete activityFetchedAt.value[sKey]
+    delete activityUnavailableBySession.value[sKey]
+  }
+
+  watch(() => Object.keys(runningBySession.value), (running, previous) => {
+    if (intentionalClose) return
+    const active = new Set(running)
+    for (const sKey of previous) {
+      if (!active.has(sKey)) void refreshSessionActivity(sKey, true)
+    }
+  }, { flush: 'sync' })
+
   const currentMessages = computed<ChatMessage[]>(
     () => (activeSessionKey.value ? messagesBySession.value[activeSessionKey.value] ?? [] : []),
   )
@@ -508,6 +618,7 @@ export const useFleetStore = defineStore('fleet', () => {
   // ---------------- 内存清理（登出 / 切换工作区时必须彻底销毁正文与密钥） ----------------
   function clearSessionMemory() {
     disconnectSocket()
+    for (const sKey of activityRequests.keys()) clearSessionActivity(sKey)
     auditRing.length = 0
     followIntentBySession.clear()
     sessionsByKey.value = {}
@@ -623,6 +734,7 @@ export const useFleetStore = defineStore('fleet', () => {
 
   onScopeDispose(() => {
     disconnectSocket()
+    for (const sKey of activityRequests.keys()) clearSessionActivity(sKey)
     messageCacheReads.clear()
     messageCacheWrites.clear()
     clearTimeout(messageCacheTimer)
@@ -651,6 +763,9 @@ export const useFleetStore = defineStore('fleet', () => {
       void loadNodes()
       connectSocket()
     }
+  })
+  watch([() => currentSession.value ? activeSessionKey.value : '', fleetRoute], ([sKey]) => {
+    if (sKey) void refreshSessionActivity(sKey)
   })
 
   watch([localCacheScope, fleetRoute, localCacheRequested], async ([scope, , requested]) => {
@@ -2258,6 +2373,8 @@ export const useFleetStore = defineStore('fleet', () => {
 
     if ((etype === 'ToolCall' || etype === 'ToolCallUpdate') && (frame.name || frame.callId)) {
       const callKey = frame.callId || `legacy-${frame.name || 'tool'}`
+      const finished = frame.status === 'success' || normalizeToolStatus(frame.status) !== 'running'
+      let refreshActivity = false
       updateAssistantMessage(sKey, nodeId, effProvider, frame.runId, frame.requestId, msg => {
         let nextMedia = msg.media
         if (frame.media?.length) {
@@ -2265,14 +2382,20 @@ export const useFleetStore = defineStore('fleet', () => {
           const added = frame.media.filter(m => m?.url && !existingUrls.has(m.url))
           if (added.length) nextMedia = [...(msg.media ?? []), ...added]
         }
+        const toolCalls = mergeToolCallUpdate(msg.toolCalls, frame)
+        if (finished && effProvider === 'hermes') {
+          const tool = toolCalls.find(item => item.callId === callKey || item.id === callKey)
+          refreshActivity = ACTIVITY_TOOLS.has(tool?.name ?? '')
+        }
         return {
           ...msg,
-          toolCalls: mergeToolCallUpdate(msg.toolCalls, frame),
+          toolCalls,
           parts: appendMessagePart(msg.parts, { type: 'tool', callId: callKey }),
           liveProgress: { type: 'tool', callId: callKey },
           ...(nextMedia ? { media: nextMedia } : {}),
         }
       })
+      if (refreshActivity) void refreshSessionActivity(sKey, true)
       return
     }
 
@@ -2531,6 +2654,7 @@ export const useFleetStore = defineStore('fleet', () => {
       const nextSessions = { ...sessionsByKey.value }
       delete nextSessions[sKey]
       sessionsByKey.value = nextSessions
+      clearSessionActivity(sKey)
       const nextMsgs = { ...messagesBySession.value }
       delete nextMsgs[sKey]
       messagesBySession.value = nextMsgs
@@ -3115,6 +3239,7 @@ export const useFleetStore = defineStore('fleet', () => {
       if (!diffBySession.value[sKey]) {
         requestSessionDiff(sKey)
       }
+      void refreshSessionActivity(sKey)
     }
   }
 
@@ -4850,6 +4975,11 @@ export const useFleetStore = defineStore('fleet', () => {
     pendingApprovalsList,
     nodesWithApprovalPending,
     runningBySession,
+    processesBySession,
+    subagentsBySession,
+    activityFetchedAt,
+    activityUnavailableBySession,
+    refreshSessionActivity,
     currentIsStreaming,
     clearSessionMemory,
     loadNodes,
