@@ -4,6 +4,7 @@ import { isAndroidLocal } from '../../desktop/androidLocal'
 import { decodeBase64Url } from '../../services/blobTransfer'
 import type { InlineMediaAttachment } from '../../services/messageSegments'
 import { saveBlobToDevice } from '../../services/saveDownload'
+import { addDownload } from '../../services/downloadHistory'
 import { useFleetStore } from '../../stores/fleet'
 import type { ArtifactRef } from '../../types/fleet'
 import OpusIcon from '../ui/OpusIcon.vue'
@@ -203,10 +204,26 @@ async function handleDownload() {
       if (media.kind === 'external') {
         // 大文件：服务端已经把文件放到 VPS，交给系统下载器（有进度、可续传）
         await openExternal(media.url)
+        addDownload({
+          name: media.fileName || fileName,
+          sizeBytes: media.sizeBytes ?? 0,
+          channel: 'external',
+          status: 'handed_off',
+          url: media.url,
+          expiresAt: media.expiresAt,
+          sessionKey: props.sessionKey,
+        })
         emit('status', android ? '已交给系统下载器' : `已交给下载器 ${fileName}`)
         return
       }
       await saveBlobToDevice(media.blob, fileName)
+      addDownload({
+        name: fileName,
+        sizeBytes: media.blob.size,
+        channel: 'relay',
+        status: 'saved',
+        sessionKey: props.sessionKey,
+      })
       emit('status', android ? androidStatus : `正在下载 ${fileName}`)
     } else if (url) {
       const blob = await readDownloadBlob(url).catch(error => {

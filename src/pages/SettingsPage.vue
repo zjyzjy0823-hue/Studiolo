@@ -13,6 +13,7 @@ import AccountSettings from '../components/settings/AccountSettings.vue'
 import SyncSettings from '../components/settings/SyncSettings.vue'
 import AgentsSettings from '../components/settings/AgentsSettings.vue'
 import StorageSettings from '../components/settings/StorageSettings.vue'
+import DownloadHistory from '../components/settings/DownloadHistory.vue'
 import SecuritySettings from '../components/settings/SecuritySettings.vue'
 import NotificationSettings from '../components/settings/NotificationSettings.vue'
 import AboutSettings from '../components/settings/AboutSettings.vue'
@@ -33,7 +34,7 @@ const emit = defineEmits<{ action: [message: string]; navigate: [page: string]; 
 const props = defineProps<{ openSync?: boolean; mobile?: boolean; reducedMotion?: boolean; syncStatus?: SyncStatus | null; syncLabel?: string }>()
 const sections = [
   { id: 'appearance', label: '外观' }, { id: 'sync', label: '同步' }, { id: 'agents', label: 'Agent 与连接' }, { id: 'account', label: '账户与设备' },
-  { id: 'security', label: '隐私与安全' }, { id: 'storage', label: '存储' }, { id: 'notifications', label: '通知' }, { id: 'about', label: '关于' },
+  { id: 'security', label: '隐私与安全' }, { id: 'storage', label: '存储' }, { id: 'downloads', label: '下载记录' }, { id: 'notifications', label: '通知' }, { id: 'about', label: '关于' },
 ] as const
 function sectionFromSearch(): SettingsSectionId | null {
   if (typeof window === 'undefined') return null
@@ -259,6 +260,7 @@ const mobileDetailLabel = computed(() => sections.find(item => item.id === mobil
         <SyncSettings v-else-if="mobileDetail === 'sync'" @action="emit('action', $event)" />
         <AgentsSettings v-else-if="mobileDetail === 'agents'" @navigate="emit('navigate', $event)" />
         <StorageSettings v-else-if="mobileDetail === 'storage'" :info="storage" @clear="clearCache" @export="exportData" @import="importData" @backup="backupData" />
+        <DownloadHistory v-else-if="mobileDetail === 'downloads'" @action="emit('action', $event)" />
         <SecuritySettings v-else-if="mobileDetail === 'security'" :config="security" @update:config="saveSettings({ security: $event })" @password="passwordOpen = true" @action="emit('action', $event)" @navigate="emit('navigate', $event)" />
         <NotificationSettings v-else-if="mobileDetail === 'notifications'" :config="notifications" @update:config="saveSettings({ notifications: $event })" />
         <AboutSettings v-else :info="aboutInfo" @action="emit('action', $event)" />
@@ -314,6 +316,7 @@ const mobileDetailLabel = computed(() => sections.find(item => item.id === mobil
         <SyncSettings v-else-if="activeSection === 'sync'" @action="emit('action', $event)" />
         <AgentsSettings v-else-if="activeSection === 'agents'" @navigate="emit('navigate', $event)" />
         <StorageSettings v-else-if="activeSection === 'storage'" :info="storage" @clear="clearCache" @export="exportData" @import="importData" @backup="backupData" />
+        <DownloadHistory v-else-if="activeSection === 'downloads'" @action="emit('action', $event)" />
         <SecuritySettings v-else-if="activeSection === 'security'" :config="security" @update:config="saveSettings({ security: $event })" @password="passwordOpen = true" @action="emit('action', $event)" @navigate="emit('navigate', $event)" />
         <NotificationSettings v-else-if="activeSection === 'notifications'" :config="notifications" @update:config="saveSettings({ notifications: $event })" />
         <AboutSettings v-else :info="aboutInfo" @action="emit('action', $event)" />
