@@ -570,7 +570,8 @@ class AgentNodeDaemon:
 
         if epoch is None:
             snapshot = await asyncio.to_thread(log.store.snapshot, session_id, log.epoch)
-            return {**result, "epoch": log.epoch, "lastSeq": snapshot.lastSeq, "snapshot": asdict(snapshot)}
+            return {**result, "epoch": log.epoch, "lastSeq": snapshot.lastSeq,
+                    "snapshot": asdict(snapshot), "incomplete": provider == "hermes"}
         if epoch not in (log.epoch, recorded_epoch):
             # Neither an unknown epoch nor a gateway cursor belongs to this node log.
             return {**result, "epoch": log.epoch, "events": [], "hasMore": False, "snapshotRequired": True}

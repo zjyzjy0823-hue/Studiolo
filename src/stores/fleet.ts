@@ -11,6 +11,7 @@ import { desktopPlatform } from '../desktop/platform'
 import { decodeBase64Url, downloadAndDecryptBlob, encryptAndUploadFile } from '../services/blobTransfer'
 import { normalizeCoreOrigin } from '../services/fleetUrl'
 import { FleetLocalStore, type FleetOutboxItem } from '../services/fleetLocal'
+import { createSessionSync, readSyncMode } from '../services/sessionSync'
 import {
   buildFleetWsUrl,
   createFleetNode,
@@ -246,6 +247,12 @@ export const useFleetStore = defineStore('fleet', () => {
   // ---------------- 实时连接状态 ----------------
   const wsState = ref<FleetConnectionState>('disconnected')
   const nativeTransport = desktopPlatform() !== 'web'
+  const syncMode = readSyncMode()
+  const epochCapabilities = syncMode === 'epoch' ? { capabilities: ['session.events.v1'] } : undefined
+  const declareNativeSessionEvents = nativeTransport && epochCapabilities
+    ? () => sendWsCommand({ type: 'node.ping', ...epochCapabilities }, false)
+    : undefined
+  const legacySnapshotSessions = new WeakMap<FleetRoute, Set<string>>()
   let nativeConnectionId: string | null = null
   let socket: WebSocket | null = null
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -1090,7 +1097,7 @@ export const useFleetStore = defineStore('fleet', () => {
     ws.onopen = () => {
       if (socket !== ws || fleetRoute.value !== route) return
       // 首帧发送认证 JWT（避免泄漏到 URL），待服务端回传 FleetSnapshot 验证握手成功后再转 online
-      ws.send(JSON.stringify({ type: 'auth', token }))
+      ws.send(JSON.stringify({ type: 'auth', token, ...epochCapabilities }))
     }
 
     ws.onmessage = event => {
@@ -1472,6 +1479,7 @@ export const useFleetStore = defineStore('fleet', () => {
     if (etype === 'FleetSnapshot' && Array.isArray(frame.nodes)) {
       reconnectAttempt = 0
       wsState.value = 'online'
+      declareNativeSessionEvents?.()
       lastError.value = null
       const onlineMap = new Map(frame.nodes.map(item => [((item as unknown as { nodeId?: string }).nodeId ?? item.id), item]))
       nodes.value = nodes.value.map(existing => {
@@ -3055,6 +3063,7 @@ export const useFleetStore = defineStore('fleet', () => {
       failRecovery(sKey, '会话连接不可用，请重试')
       return false
     }
+    if (syncMode === 'epoch') return openEpochSession(sess, sKey)
     const state = streamState(sKey)
     const streamId = streamIdBySession.get(sKey)
     const lastSeq = streamId ? state.cursors.get(streamId) ?? 0 : lastSeqBySession.value[sKey] ?? 0
@@ -3076,6 +3085,79 @@ export const useFleetStore = defineStore('fleet', () => {
       }, SUBSCRIBE_TIMEOUT_MS)
     } else failRecovery(sKey, '无法订阅会话，请重试')
     return sent
+  }
+
+  function openEpochSession(sess: ChatSession, sKey: string) {
+    const route = fleetRoute.value
+    if (!route) {
+      failRecovery(sKey, '会话连接不可用，请重试')
+      return false
+    }
+    let downgraded = legacySnapshotSessions.get(route)
+    if (!downgraded) legacySnapshotSessions.set(route, downgraded = new Set())
+    if (downgraded.has(sKey)) {
+      requestSnapshotHistory(sKey)
+      return true
+    }
+
+    const state = streamState(sKey)
+    const tail = state.buffer.at(-1)
+    const streamId = tail?.streamId ?? streamIdBySession.get(sKey)
+    const lastSeq = Math.max(state.cursors.get(streamId ?? '') ?? 0,
+      ...state.buffer.filter(frame => frame.streamId === streamId).map(frame => frame.sequence ?? 0))
+    const requestId = createRequestId()
+    state.phase = 'gap'
+    pendingStreamResync.set(sKey, requestId)
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 50_000)
+
+    const sessionSync = createSessionSync({
+      mode: syncMode,
+      rpc: () => apiRequest<unknown>(
+        `/api/v1/fleet/nodes/${encodeURIComponent(sess.nodeId)}/session/snapshot`,
+        { method: 'POST', body: JSON.stringify({ sessionId: sess.sessionId, provider: sess.provider }), signal: controller.signal },
+        route.token, route.origin,
+      ),
+      apply: (_, value) => {
+        if (fleetRoute.value !== route || pendingStreamResync.get(sKey) !== requestId) return
+        const snapshot = value as {
+          messages: Array<NonNullable<FleetWsEvent['messages']>[number] & { turnId?: string }>
+          turns?: Array<{ turnId: string; startedAt?: number }>
+          lastSeq?: number
+          running?: boolean
+          runId?: string
+        }
+        // The event-log cursor and live stream cursor count different frames.
+        if (state.buffer.at(-1) !== tail || !Array.isArray(snapshot.messages) || snapshot.lastSeq === 0) {
+          throw new Error('Epoch snapshot cannot cover the current live stream')
+        }
+        const startedAt = new Map(snapshot.turns?.map(turn => [turn.turnId, turn.startedAt]))
+        const messages = snapshot.messages.map(message => ({
+          ...message,
+          runId: message.turnId ?? message.runId,
+          createdAt: message.createdAt ?? startedAt.get(message.turnId ?? ''),
+        }))
+        clearHistory(sKey)
+        pendingHistoryPages.value[sKey] = requestId
+        forcedHistoryRequests.add(requestId)
+        state.snapshot = { streamId, lastSeq, requestId }
+        const intent = snapshotFollowIntent.get(sKey)
+        if (intent && !intent.settled) intent.requestId = requestId
+        reconcileRuntime(sKey, { type: 'SessionHistory', active: snapshot.running, runId: snapshot.runId })
+        applyWsEvent({ type: 'SessionHistory', ...sess, requestId, messages })
+        clearSubscribe(sKey)
+        void flushOutbox()
+      },
+      append: () => { throw new Error('Fleet currently opens epoch snapshots through the subscription seam') },
+    })
+    void sessionSync.open(sKey).catch(() => {
+      if (fleetRoute.value !== route || pendingStreamResync.get(sKey) !== requestId) return
+      // A v1 connection can still request legacy history for an individual session.
+      downgraded.add(sKey)
+      state.snapshot = undefined
+      requestSnapshotHistory(sKey)
+    }).finally(() => clearTimeout(timeout))
+    return true
   }
 
   function requestContextUsage(sKey: string) {

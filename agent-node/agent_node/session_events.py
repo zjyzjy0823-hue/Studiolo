@@ -246,7 +246,7 @@ def fold(events: Iterable[SessionEvent]) -> Snapshot:
 
 
 def fold_ordered(events: Iterable[SessionEvent]) -> Snapshot:
-    """Apply ordered projections. A native frame can contribute several updates at the same seq."""
+    """Apply the validated sequence of unique events."""
     snapshot = Snapshot()
     turns: dict[str, dict[str, Any]] = {}
     assistants: dict[str, dict[str, Any]] = {}
@@ -275,9 +275,9 @@ def fold_ordered(events: Iterable[SessionEvent]) -> Snapshot:
                 snapshot.turns.append(turns[turn_id])
             turn = turns[turn_id]
             if kind == "turn.started":
-                turn["startedAt"] = payload["startedAt"]
+                turn["startedAt"] = payload["startedAt"] or None
             else:
-                turn.update(endedAt=payload["endedAt"], status=payload["status"],
+                turn.update(endedAt=payload["endedAt"] or None, status=payload["status"],
                             usage=payload.get("usage", {}))
             if turn["startedAt"] is not None and turn["endedAt"] is not None:
                 turn["durationMs"] = turn["endedAt"] - turn["startedAt"]

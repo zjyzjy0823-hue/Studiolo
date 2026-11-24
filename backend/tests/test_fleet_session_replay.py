@@ -64,3 +64,59 @@ def test_core_denies_replay_outside_node_workspace(client, users, replay_node, m
         assert client.post(f"{url}/{path}", headers=stranger, json=params).status_code == 404
         assert client.post(f"{url}/{path}", json=params).status_code == 401
         call.assert_not_awaited()
+
+
+@pytest.mark.parametrize("declaration", ["auth", "hello", "node.ping"])
+def test_core_negotiates_and_suppresses_legacy_replay_per_connection(client, users, replay_node, declaration):
+    owner, _ = users
+    _, node_auth = replay_node
+    capabilities = ["session.events.v1"]
+    ready = {"type": "Ready", "serverCapabilities": capabilities}
+
+    with (
+        client.websocket_connect("/ws/fleet/node", headers=node_auth) as node,
+        client.websocket_connect("/ws/fleet/client", headers=owner) as legacy,
+        client.websocket_connect("/ws/fleet/client") as epoch,
+    ):
+        node_ready = node.receive_json()
+        assert node_ready["type"] == "NodeReady"
+        assert node_ready["serverCapabilities"] == capabilities
+        node_id = node_ready["nodeId"]
+        auth = {"type": "auth", "token": owner["Authorization"].split()[1]}
+        if declaration == "auth":
+            auth["capabilities"] = capabilities
+        epoch.send_json(auth)
+        assert legacy.receive_json() == epoch.receive_json()
+        if declaration != "auth":
+            epoch.send_json({"type": declaration, "capabilities": capabilities})
+        assert epoch.receive_json() == ready
+        if declaration == "node.ping":
+            assert epoch.receive_json() == {"type": "Pong", "requestId": None}
+
+        command = {"type": "session.subscribe", "nodeId": node_id, "sessionId": SESSION, "provider": "hermes"}
+        legacy.send_json({**command, "requestId": "old"})
+        legacy_target = node.receive_json()["_clientConnId"]
+        epoch.send_json({**command, "requestId": "new"})
+        epoch_target = node.receive_json()["_clientConnId"]
+        replay = {
+            "type": "SessionStreamReplay", "nodeId": node_id, "provider": "hermes", "sessionId": SESSION,
+            "streamId": "live", "lastSeq": 2, "requestId": "old", "incremental": True, "snapshotRequired": False,
+            "active": True, "runId": "run", "pendingApprovals": [],
+            "events": [{"type": "TextDelta", "text": "终", "sequence": 2, "streamId": "live"}],
+        }
+        node.send_json({**replay, "_clientConnId": legacy_target})
+        node.send_json({**replay, "requestId": "new", "_clientConnId": epoch_target})
+        node.send_json({**replay, "requestId": "broadcast"})
+        history = {
+            "type": "SessionHistory", "sessionId": SESSION, "nodeId": node_id,
+            "requestId": "fallback", "messages": [{"role": "assistant", "text": "旧历史"}],
+        }
+        node.send_json({**history, "_clientConnId": epoch_target})
+        marker = {"type": "TextDelta", "sessionId": SESSION, "nodeId": node_id, "sequence": 3, "text": "live"}
+        node.send_json(marker)
+
+        assert legacy.receive_json() == replay
+        assert legacy.receive_json() == {**replay, "requestId": "broadcast"}
+        assert legacy.receive_json() == marker
+        assert epoch.receive_json() == history
+        assert epoch.receive_json() == marker

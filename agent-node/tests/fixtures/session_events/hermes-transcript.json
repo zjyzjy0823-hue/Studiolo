@@ -1,0 +1,56 @@
+[
+  {
+    "id": 1,
+    "role": "user",
+    "timestamp": 1700000001,
+    "content": "Verify two tools"
+  },
+  {
+    "id": 2,
+    "role": "assistant",
+    "timestamp": 1700000002,
+    "content": null,
+    "finish_reason": "tool_calls",
+    "tool_calls": [
+      {
+        "id": "fixture-tool-1",
+        "type": "function",
+        "function": {
+          "name": "terminal",
+          "arguments": "{\"command\": \"printf fixture\"}"
+        }
+      },
+      {
+        "id": "fixture-tool-2",
+        "type": "function",
+        "function": {
+          "name": "terminal",
+          "arguments": "{\"command\": \"printf fixture\"}"
+        }
+      }
+    ]
+  },
+  {
+    "id": 3,
+    "role": "tool",
+    "timestamp": 1700000003,
+    "content": "{\"output\": \"persisted-1\", \"exit_code\": 0}",
+    "tool_call_id": "fixture-tool-1",
+    "tool_name": "terminal"
+  },
+  {
+    "id": 4,
+    "role": "tool",
+    "timestamp": 1700000004,
+    "content": "{\"output\": \"persisted-2\", \"exit_code\": 0}",
+    "tool_call_id": "fixture-tool-2",
+    "tool_name": "terminal"
+  },
+  {
+    "id": 5,
+    "role": "assistant",
+    "timestamp": 1700000005,
+    "content": "Tools done.",
+    "finish_reason": "stop"
+  }
+]

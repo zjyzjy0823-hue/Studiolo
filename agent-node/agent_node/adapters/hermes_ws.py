@@ -16,7 +16,7 @@ import re
 from shlex import quote as quote_arg
 from time import monotonic
 from typing import Any
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
 import httpx
@@ -25,13 +25,14 @@ from websockets.asyncio.client import ClientConnection
 
 from ..config import HermesMediaConfig, PathOutsideAllowedRootsError, ensure_allowed_path
 from ..hermes_media import transcript_attachment_paths
+from ..session_events import MAX_SESSION_SEQ, fold
 from .base import (
     AdapterProbe, ApprovalCallback, EventEmitter, build_todo_updated_event,
     build_token_usage_event, build_tool_call_update, compaction_frame, compaction_record,
     extract_usage_counts, merge_prompt_with_attachments, prepare_session_dir,
 )
 from .hermes import HermesAdapter, _gateway_history, _hermes_context, _HISTORY_LIMIT
-from .hermes_replay import fold_gateway_replay
+from .hermes_replay import merge_transcript_snapshot, normalize_gateway_replay
 from .jsonrpc import JsonRpcError
 
 
@@ -549,73 +550,129 @@ class HermesWsAdapter(HermesAdapter):
         if not self._epoch:
             return None
         session = await self._session(connection, session_id)
+        rows = await self._read_snapshot_transcript(session.stored_id) if epoch is None else None
         # The standalone gateway uses the ready epoch. The session authority owns
         # a separate replay epoch per session and sends it on resume and replay.
         current_epoch = (session.epoch if self._canonical else self._epoch) or self._epoch
-        params = {"session_id": session.runtime_id}
-        result = {"sessionId": session_id, "source": "gateway"}
-        if epoch is not None:
-            replay = await connection.call("session.events.since", {**params, "last_seen": last_seq, "replay_epoch": epoch})
-            owning_epoch = replay.get("replay_epoch") or replay.get("epoch") or current_epoch
-            events = replay["events"]
-            if not isinstance(events, list):
-                raise ValueError("Hermes replay events must be an array")
-            if owning_epoch != epoch:
-                return {**result, "epoch": owning_epoch, "events": [], "hasMore": False, "snapshotRequired": True}
-            response = {**result, "epoch": owning_epoch, "events": events[:limit],
-                        "hasMore": len(events) > limit or bool(replay.get("hasMore") or replay.get("has_more"))}
-            if replay.get("snapshot_required") or replay.get("truncated"):
-                response["snapshotRequired"] = True
-            return response
+        # Both RPCs start at the same retained boundary so they can reconstruct
+        # the same turn context and normalized sequence numbers.
+        gateway_epoch, frames, incomplete = await self._read_gateway_replay(
+            connection, session.runtime_id, current_epoch,
+        )
+        replay_epoch, events = normalize_gateway_replay(session_id, gateway_epoch, frames)
+        result = {"sessionId": session_id, "source": "gateway", "epoch": replay_epoch}
+        if epoch is None:
+            snapshot = fold(events) if rows is None else merge_transcript_snapshot(session_id, rows, events)
+            return {**result, "lastSeq": snapshot.lastSeq, "snapshot": asdict(snapshot),
+                    "incomplete": incomplete or rows is None}
 
+        head = events[-1]["seq"] if events else 0
+        if epoch != replay_epoch or last_seq > head:
+            return {**result, "events": [], "hasMore": False, "snapshotRequired": True}
+        pending = [event for event in events if event["seq"] > last_seq]
+        response = {**result, "events": pending[:limit], "hasMore": len(pending) > limit}
+        if incomplete and last_seq == 0:
+            response["snapshotRequired"] = True
+        return response
+
+    async def _read_snapshot_transcript(self, stored_id: str) -> list[dict[str, Any]] | None:
+        """Fetch raw REST rows for the epoch snapshot, preserving gateway display order."""
+        headers = self._gateway_headers() if self.serve_url == self._http_base else {}
+        if self._dashboard_token:
+            headers["X-Hermes-Session-Token"] = self._dashboard_token
+        url = f"{self._http_base}/api/sessions/{quote(stored_id, safe='')}/messages"
+        rows: list[dict[str, Any]] = []
         try:
-            native = await connection.call("session.snapshot", params)
-        except JsonRpcError as exc:
-            if exc.code != -32601:
-                raise
-        else:
-            snapshot = native["snapshot"]
-            last_seq = native.get("lastSeq", native.get("last_sequence", snapshot.get("lastSeq")))
-            if type(last_seq) is not int or last_seq < 0 or snapshot.get("lastSeq") != last_seq:
-                raise ValueError("Hermes snapshot has an invalid sequence boundary")
-            return {**result, "epoch": native.get("replay_epoch") or native.get("epoch") or current_epoch,
-                    "lastSeq": last_seq, "snapshot": snapshot}
+            async with asyncio.timeout(10), httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
+                while True:
+                    response = await client.get(url, headers=headers, params={
+                        "limit": _HISTORY_LIMIT, "offset": len(rows), "order": "oldest",
+                        "include_compacted": "true", "inline_images": "false",
+                    })
+                    response.raise_for_status()
+                    data = response.json()
+                    page = data.get("messages", data.get("data")) if isinstance(data, dict) else data
+                    if not isinstance(page, list) or any(not isinstance(row, dict) for row in page):
+                        raise ValueError("invalid Hermes messages page")
+                    pagination = data.get("pagination") if isinstance(data, dict) else None
+                    page_limit = _HISTORY_LIMIT
+                    if isinstance(pagination, dict):
+                        if pagination.get("offset", len(rows)) != len(rows):
+                            raise ValueError("Hermes messages offset did not advance")
+                        page_limit = pagination.get("limit", page_limit)
+                        if type(page_limit) is not int or page_limit <= 0:
+                            raise ValueError("invalid Hermes messages page limit")
+                    rows.extend(page)
+                    if len(page) < page_limit:
+                        return rows
+        except (httpx.HTTPError, TimeoutError, ValueError) as exc:
+            _LOG.debug("Hermes snapshot transcript unavailable: %s", type(exc).__name__)
+            return None
 
-        def incomplete() -> dict[str, Any]:
-            return {**result, "epoch": current_epoch, "code": "replay_incomplete"}
-
-        last_seq = 0
-        events = []
-        retried_epoch = False
-        while True:
+    @staticmethod
+    async def _read_gateway_replay(
+        connection: _GatewayConnection, runtime_id: str, epoch: str,
+    ) -> tuple[str, list[dict[str, Any]], bool]:
+        async def page_after(cursor: int) -> tuple[str, list[dict[str, Any]], int | None, bool, bool]:
             replay = await connection.call("session.events.since", {
-                **params, "last_seen": last_seq, "replay_epoch": current_epoch,
+                "session_id": runtime_id, "last_seen": cursor, "replay_epoch": epoch,
             })
-            owning_epoch = replay.get("replay_epoch") or replay.get("epoch") or current_epoch
-            if owning_epoch != current_epoch:
-                current_epoch = owning_epoch
-                if last_seq or retried_epoch:
-                    return incomplete()
-                retried_epoch = True
-                continue
-            if replay.get("snapshot_required") or replay.get("truncated"):
-                return incomplete()
+            owner = replay.get("replay_epoch") or replay.get("epoch") or epoch
             page = replay["events"]
+            head = replay.get("last_sequence", replay.get("latest_seq"))
+            if not isinstance(owner, str) or not owner.strip():
+                raise ValueError("Hermes replay has an invalid epoch")
             if not isinstance(page, list):
                 raise ValueError("Hermes replay events must be an array")
-            for event in page:
-                if type(event["seq"]) is not int or event["seq"] != last_seq + 1:
-                    return incomplete()
-                last_seq = event["seq"]
-            events.extend(page)
-            if not (replay.get("hasMore") or replay.get("has_more")):
-                if replay.get("last_sequence", replay.get("latest_seq", last_seq)) != last_seq:
-                    return incomplete()
-                break
-            if not page:
-                return incomplete()
-        snapshot = fold_gateway_replay(session_id, current_epoch, events)
-        return {**result, "epoch": current_epoch, "lastSeq": snapshot.lastSeq, "snapshot": asdict(snapshot)}
+            if head is not None and (type(head) is not int or not 0 <= head <= MAX_SESSION_SEQ):
+                raise ValueError("Hermes replay has an invalid watermark")
+            truncated = bool(replay.get("snapshot_required") or replay.get("truncated"))
+            return owner, page, head, truncated, bool(replay.get("hasMore") or replay.get("has_more"))
+
+        # The authority omits its entire retained suffix when the requested
+        # cursor is too old. Find the oldest cursor it still accepts.
+        async def retained_page(cursor: int, head: int) -> tuple[str, list[dict[str, Any]], bool]:
+            low, high = cursor + 1, head - 1
+            retained, more = [], False
+            while low <= high:
+                probe = (low + high) // 2
+                owner, page, _, truncated, has_more = await page_after(probe)
+                if owner != epoch:
+                    return owner, [], False
+                if truncated:
+                    low = probe + 1
+                else:
+                    retained, more = page, has_more
+                    high = probe - 1
+            return epoch, retained, more
+
+        for _ in range(2):
+            frames = []
+            cursor = 0
+            incomplete = False
+            while True:
+                owner, page, head, truncated, has_more = await page_after(cursor)
+                if owner == epoch and truncated and not page and head is not None:
+                    owner, page, has_more = await retained_page(cursor, head)
+                if owner != epoch:
+                    epoch = owner
+                    break
+                incomplete |= truncated
+                for frame in page:
+                    if not isinstance(frame, dict):
+                        raise ValueError("Hermes replay event must be an object")
+                    if frame.get("session_id", runtime_id) != runtime_id:
+                        raise ValueError("Hermes replay mixed sessions")
+                    seq = frame["seq"]
+                    if type(seq) is not int or not cursor < seq <= MAX_SESSION_SEQ:
+                        raise ValueError("Hermes replay has an invalid event sequence")
+                    incomplete |= seq != cursor + 1
+                    cursor = seq
+                    frames.append(frame)
+                if not page or not has_more:
+                    incomplete |= has_more or (head is not None and head != cursor)
+                    return epoch, frames, incomplete
+        return epoch, [], True
 
     async def _read_transcript(self, connection: _GatewayConnection, session: _Session,
                                limit: int = _HISTORY_LIMIT, *, attachment_reference: str | None = None) -> list[dict[str, Any]]:

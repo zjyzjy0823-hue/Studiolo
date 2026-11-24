@@ -16,6 +16,7 @@ from .audit import audit_event
 MAX_DEDUP_KEYS = 2048
 CLIENT_OUTBOUND_QUEUE_SIZE = 256
 CLIENT_SEND_TIMEOUT = 10.0
+SESSION_EVENTS_V1 = "session.events.v1"
 logger = logging.getLogger(__name__)
 ALLOWED_CLIENT_COMMANDS = frozenset({
     "sessions.list",
@@ -153,6 +154,18 @@ class ConnectedClient:
     disconnect_task: asyncio.Task[None] | None = None
     closing: bool = False
     in_flight: bool = False
+    session_events_v1: bool = False
+
+    def skips_frame(self, frame: dict[str, Any]) -> bool:
+        return self.session_events_v1 and frame.get("type") == "SessionStreamReplay"
+
+
+def supports_session_events(capabilities: Any) -> bool:
+    return isinstance(capabilities, list) and SESSION_EVENTS_V1 in capabilities
+
+
+def client_ready() -> dict[str, Any]:
+    return {"type": "Ready", "serverCapabilities": [SESSION_EVENTS_V1]}
 
 
 class FleetRelayHub:
@@ -224,9 +237,11 @@ class FleetRelayHub:
             pass
         await self.unregister_node(workspace_id, node_id, current.websocket)
 
-    async def register_client(self, workspace_id: str, websocket: WebSocket) -> str:
+    async def register_client(
+        self, workspace_id: str, websocket: WebSocket, *, session_events_v1: bool = False,
+    ) -> str:
         conn_id = str(uuid4())
-        client = ConnectedClient(websocket=websocket)
+        client = ConnectedClient(websocket=websocket, session_events_v1=session_events_v1)
         async with self._lock:
             online_snapshot = [
                 {
@@ -245,6 +260,8 @@ class FleetRelayHub:
             client.outbound.put_nowait({
                 "type": "FleetSnapshot", "nodes": online_snapshot, "capabilities": ["active-runs"],
             })
+            if session_events_v1:
+                client.outbound.put_nowait(client_ready())
             self._clients.setdefault(workspace_id, {})[conn_id] = client
             client.writer_task = asyncio.create_task(self._write_client(workspace_id, conn_id, client))
         return conn_id
@@ -326,6 +343,10 @@ class FleetRelayHub:
     async def _write_client(self, workspace_id: str, conn_id: str, client: ConnectedClient) -> None:
         while not client.closing:
             frame = await client.outbound.get()
+            # A hello can arrive after this frame was queued.
+            if client.skips_frame(frame):
+                client.outbound.task_done()
+                continue
             client.in_flight = True
             try:
                 async with asyncio.timeout(CLIENT_SEND_TIMEOUT):
@@ -445,6 +466,16 @@ class FleetRelayHub:
     ) -> dict[str, Any] | None:
         """将前端指令校验并路由至工作区内的目标在线 AgentNode，返回即时错误帧或 None。"""
         cmd_type = str(frame.get("type") or "")
+        session_events_v1 = supports_session_events(frame.get("capabilities"))
+        if cmd_type == "hello" or session_events_v1:
+            async with self._lock:
+                client = self._clients.get(workspace_id, {}).get(client_conn_id)
+                if client is not None and (cmd_type == "hello" or not client.session_events_v1):
+                    client.session_events_v1 |= session_events_v1
+                    self._queue_client_frame(workspace_id, client_conn_id, client, client_ready())
+            if cmd_type == "hello":
+                return None
+
         if cmd_type not in ALLOWED_CLIENT_COMMANDS:
             return {"type": "Error", "code": "unsupported_command", "requestId": frame.get("requestId"),
                     "message": f"Unsupported command: {cmd_type}"}
@@ -539,7 +570,10 @@ class FleetRelayHub:
             targets = [(target_client_id, client)]
         else:
             targets = list(clients.items())
-        return sum(self._queue_client_frame(workspace_id, cid, client, frame) for cid, client in targets)
+        return sum(
+            self._queue_client_frame(workspace_id, cid, client, frame)
+            for cid, client in targets if not client.skips_frame(frame)
+        )
 
 
 fleet_hub = FleetRelayHub()

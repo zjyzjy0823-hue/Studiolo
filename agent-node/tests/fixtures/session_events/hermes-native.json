@@ -1,0 +1,254 @@
+{
+  "events": [
+    {
+      "type": "session.info",
+      "session_id": "hermes-native-fixture",
+      "payload": {
+        "stored_session_id": "hermes-native-fixture",
+        "pending": [
+          {
+            "admission_id": "fixture-turn",
+            "ref": {
+              "profile_id": "replay",
+              "session_id": "hermes-native-fixture"
+            },
+            "sequence": 1,
+            "status": "queued",
+            "outcome": null,
+            "authority_epoch": 1,
+            "execution_generation": null,
+            "input_id": "input-1",
+            "text": "Verify two tools",
+            "controls": [],
+            "steering": false
+          }
+        ],
+        "authority_epoch": 1,
+        "desktop_protocol": "hermes-gateway-v1",
+        "running": false,
+        "execution_generation": 0,
+        "revision": 0
+      },
+      "replay_epoch": "fixture-replay",
+      "seq": 1
+    },
+    {
+      "authority_epoch": 1,
+      "execution_generation": 1,
+      "admission_id": "fixture-turn",
+      "type": "message.start",
+      "session_id": "hermes-native-fixture",
+      "payload": {},
+      "replay_epoch": "fixture-replay",
+      "seq": 2
+    },
+    {
+      "authority_epoch": 1,
+      "execution_generation": 1,
+      "admission_id": "fixture-turn",
+      "type": "session.info",
+      "session_id": "hermes-native-fixture",
+      "payload": {
+        "stored_session_id": "hermes-native-fixture",
+        "pending": [
+          {
+            "admission_id": "fixture-turn",
+            "ref": {
+              "profile_id": "replay",
+              "session_id": "hermes-native-fixture"
+            },
+            "sequence": 1,
+            "status": "started",
+            "outcome": null,
+            "authority_epoch": 1,
+            "execution_generation": 1,
+            "input_id": "input-1",
+            "text": "Verify two tools",
+            "controls": [],
+            "steering": false
+          }
+        ],
+        "authority_epoch": 1,
+        "desktop_protocol": "hermes-gateway-v1",
+        "running": true,
+        "execution_generation": 1,
+        "revision": 0
+      },
+      "replay_epoch": "fixture-replay",
+      "seq": 3
+    },
+    {
+      "authority_epoch": 1,
+      "execution_generation": 1,
+      "admission_id": "fixture-turn",
+      "type": "reasoning.delta",
+      "session_id": "hermes-native-fixture",
+      "payload": {
+        "text": "Check the tool results."
+      },
+      "replay_epoch": "fixture-replay",
+      "seq": 4
+    },
+    {
+      "authority_epoch": 1,
+      "execution_generation": 1,
+      "admission_id": "fixture-turn",
+      "type": "tool.start",
+      "session_id": "hermes-native-fixture",
+      "payload": {
+        "tool_id": "fixture-tool-1",
+        "name": "terminal",
+        "context": "printf fixture-1",
+        "tool_call_id": "fixture-tool-1",
+        "tool_name": "terminal",
+        "args": {
+          "command": "printf fixture-1"
+        }
+      },
+      "replay_epoch": "fixture-replay",
+      "seq": 5
+    },
+    {
+      "authority_epoch": 1,
+      "execution_generation": 1,
+      "admission_id": "fixture-turn",
+      "type": "tool.progress",
+      "session_id": "hermes-native-fixture",
+      "payload": {
+        "tool_id": "fixture-tool-1",
+        "name": "terminal",
+        "progress": 0.5,
+        "message": "Running"
+      },
+      "replay_epoch": "fixture-replay",
+      "seq": 6
+    },
+    {
+      "authority_epoch": 1,
+      "execution_generation": 1,
+      "admission_id": "fixture-turn",
+      "type": "tool.complete",
+      "session_id": "hermes-native-fixture",
+      "payload": {
+        "tool_id": "fixture-tool-1",
+        "name": "terminal",
+        "context": "printf fixture-1",
+        "tool_call_id": "fixture-tool-1",
+        "tool_name": "terminal",
+        "args": {
+          "command": "printf fixture-1"
+        },
+        "is_error": false,
+        "result": "{\"output\": \"fixture-1\", \"exit_code\": 0}"
+      },
+      "replay_epoch": "fixture-replay",
+      "seq": 7
+    },
+    {
+      "authority_epoch": 1,
+      "execution_generation": 1,
+      "admission_id": "fixture-turn",
+      "type": "tool.start",
+      "session_id": "hermes-native-fixture",
+      "payload": {
+        "tool_id": "fixture-tool-2",
+        "name": "terminal",
+        "context": "printf fixture-2",
+        "tool_call_id": "fixture-tool-2",
+        "tool_name": "terminal",
+        "args": {
+          "command": "printf fixture-2"
+        }
+      },
+      "replay_epoch": "fixture-replay",
+      "seq": 8
+    },
+    {
+      "authority_epoch": 1,
+      "execution_generation": 1,
+      "admission_id": "fixture-turn",
+      "type": "tool.complete",
+      "session_id": "hermes-native-fixture",
+      "payload": {
+        "tool_id": "fixture-tool-2",
+        "name": "terminal",
+        "context": "printf fixture-2",
+        "tool_call_id": "fixture-tool-2",
+        "tool_name": "terminal",
+        "args": {
+          "command": "printf fixture-2"
+        },
+        "is_error": false,
+        "result": "{\"output\": \"fixture-2\", \"exit_code\": 0}"
+      },
+      "replay_epoch": "fixture-replay",
+      "seq": 9
+    },
+    {
+      "authority_epoch": 1,
+      "execution_generation": 1,
+      "admission_id": "fixture-turn",
+      "type": "message.delta",
+      "session_id": "hermes-native-fixture",
+      "payload": {
+        "text": "Tools "
+      },
+      "replay_epoch": "fixture-replay",
+      "seq": 10
+    },
+    {
+      "authority_epoch": 1,
+      "execution_generation": 1,
+      "admission_id": "fixture-turn",
+      "type": "message.delta",
+      "session_id": "hermes-native-fixture",
+      "payload": {
+        "text": "done."
+      },
+      "replay_epoch": "fixture-replay",
+      "seq": 11
+    },
+    {
+      "authority_epoch": 1,
+      "execution_generation": 1,
+      "admission_id": "fixture-turn",
+      "type": "message.complete",
+      "session_id": "hermes-native-fixture",
+      "payload": {
+        "text": "Tools done.",
+        "content": "Tools done.",
+        "admission_id": "fixture-turn",
+        "outcome": "completed",
+        "status": "complete"
+      },
+      "replay_epoch": "fixture-replay",
+      "seq": 12
+    },
+    {
+      "authority_epoch": 1,
+      "execution_generation": 1,
+      "admission_id": "fixture-turn",
+      "type": "session.info",
+      "session_id": "hermes-native-fixture",
+      "payload": {
+        "stored_session_id": "hermes-native-fixture",
+        "pending": [],
+        "authority_epoch": 1,
+        "desktop_protocol": "hermes-gateway-v1",
+        "running": false,
+        "execution_generation": 1,
+        "revision": 1
+      },
+      "replay_epoch": "fixture-replay",
+      "seq": 13
+    }
+  ],
+  "latest_seq": 13,
+  "last_sequence": 13,
+  "epoch": "fixture-replay",
+  "replay_epoch": "fixture-replay",
+  "truncated": false,
+  "snapshot_required": false,
+  "count": 13,
+  "open_requests": []
+}

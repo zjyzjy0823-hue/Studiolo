@@ -24,7 +24,7 @@ from ..security import authenticate_node_token, authenticate_user_jwt, bearer, c
 from ..utils.time import iso_utc
 from ..workspaces import get_personal_workspace
 from . import blobs, media, usage
-from .hub import ALLOWED_NODE_EVENTS, ConnectedNode, fleet_hub
+from .hub import ALLOWED_NODE_EVENTS, SESSION_EVENTS_V1, ConnectedNode, fleet_hub, supports_session_events
 from .schemas import (
     AdapterInfo,
     BlobCommitInput,
@@ -558,7 +558,10 @@ async def fleet_node_ws(websocket: WebSocket):
         transfer_endpoints=endpoints,
     )
     await fleet_hub.register_node(conn)
-    await websocket.send_json({"type": "NodeReady", "nodeId": node_id, "workspaceId": workspace_id})
+    await websocket.send_json({
+        "type": "NodeReady", "nodeId": node_id, "workspaceId": workspace_id,
+        "serverCapabilities": [SESSION_EVENTS_V1],
+    })
 
     try:
         while True:
@@ -643,12 +646,14 @@ async def fleet_client_ws(websocket: WebSocket):
     await websocket.accept()
     auth_header = websocket.headers.get("authorization", "")
     token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
+    session_events_v1 = False
     if not token:
         frame = await _recv_first_auth_frame(websocket)
         if frame is None:
             await websocket.close(code=4401, reason="Missing auth frame")
             return
         token = str(frame.get("token") or "")
+        session_events_v1 = supports_session_events(frame.get("capabilities"))
 
     with _open_ws_db(websocket) as db:
         user = authenticate_user_jwt(token, db)
@@ -657,7 +662,7 @@ async def fleet_client_ws(websocket: WebSocket):
             return
         workspace_id = get_personal_workspace(db, user).id
 
-    conn_id = await fleet_hub.register_client(workspace_id, websocket)
+    conn_id = await fleet_hub.register_client(workspace_id, websocket, session_events_v1=session_events_v1)
     try:
         while True:
             frame = await websocket.receive_json()

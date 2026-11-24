@@ -46,7 +46,7 @@
 
 | 日志拥有者 | epoch | seq |
 |---|---|---|
-| Hermes gateway，原生事件透传 | gateway 的 `replay_epoch` | gateway 原生序号 |
+| Hermes gateway，原生回放 | 由 gateway 的 `replay_epoch` 和可读窗口派生 | 按归一化后的事件顺序连续编号。已使用契约信封的 gateway 保留原有 epoch 和 seq。 |
 | 节点，记录兼容出站帧 | 节点进程启动 UUID | 节点按会话分配。同一兼容帧映射的多个事件在一个 SQLite 事务内提交。 |
 
 epoch 切换时客户端丢弃旧游标，从拥有者重新拉快照。SQLite 中的既有 epoch 仍可单独读取。
@@ -73,8 +73,53 @@ SQLite 主键 `(session_id, epoch, seq)` 同时提供唯一索引和范围查询
 | `Notice` / 无回合的 `Failed` | `notice` | 使用来源、级别和文本。 |
 | `SessionStreamReplay`、历史、文件、传输和控制帧 | — | 旧协议回放和控制响应不进入日志。P1 未产生 `snapshot.ready`。 |
 
-当前 Hermes WS 适配器用原生 `replay_epoch` 和序号处理 gateway 重放，出站兼容帧可能由一条原生事件展开成多帧，也可由 daemon 本地生成。P1 对这些帧使用节点 epoch。gateway 原生事件透传由 P2 的 Hermes API 提供。现有兼容帧没有提供的工具时长、最终文本和回合用量保持缺省。只收到文本 delta 的回合保留以 delta 累积的文字。录制开始前的历史、外部发起的 Hermes 回合、以及未发出独立会话事件的控制或插话动作，不在 P1 的重放覆盖范围内。
+当前 Hermes WS 适配器用原生 `replay_epoch` 和序号处理 gateway 重放，出站兼容帧可能由一条原生事件展开成多帧，也可由 daemon 本地生成。P1 对这些帧使用节点 epoch。Hermes 快照和增量通过下述映射提供契约数据。现有兼容帧没有提供的工具时长、最终文本和回合用量保持缺省。只收到文本 delta 的回合保留以 delta 累积的文字。录制开始前的历史、外部发起的 Hermes 回合、以及未发出独立会话事件的控制或插话动作，不在 P1 的重放覆盖范围内。
+
+## Hermes gateway 原生回放映射
+
+Hermes WS 的 `session.snapshot` 先按 gateway 的行顺序分页读取 `GET /api/sessions/{storedId}/messages`，再以运行时会话 ID 读取 `session.events.since` 的可用窗口。两路数据使用 P1 的 `fold` 投影为快照。响应内外的 `lastSeq` 都取归一化事件窗口的游标，窗口为空时为 0。`session.events.since` 继续只读取并返回事件，旧游标不属于当前窗口时返回 `snapshotRequired: true`。
+
+- 有最终 assistant 行的已完成回合以 transcript 为准。相同回合的事件被剔除，保留会话级事件和原事件游标。发起工具调用的中间 assistant 行归入当前回合。
+- 事件窗口中仍在运行或 transcript 未提供终态的回合按事件首次出现的顺序追加。正在运行的回合沿用事件的 `turnId`、`running` 和 `runId`。
+- 对齐优先使用显式 `turnId` 或 `turn_id`。无标识的 transcript 回合按最终 assistant 行的顺序生成 `t1`、`t2` 等标识。用工具调用 ID、最终 assistant 文本或窗口中残留的用户消息按顺序查找重叠；完全相同的候选优先取保留窗口后部。时间戳不参与排序或对齐。
+- `role="tool"` 或带 `tool_call_id` 的结果行映射为 `tool.call.completed`。快照工具卡缺失的 `durationMs` 为 `null`，明确的 `0` 保留。历史回合缺失的起止时间为 `null`。
+- 去重键为 `(turnKey, role, callId|textHash)`，消息文本用 SHA-256，工具使用调用 ID。同键冲突保留 transcript 版本。同一回合内重复出现的 transcript 键保留首次记录。
+
+所有 provider 的快照响应都带 `incomplete`。Hermes 的 `/messages` 不可用时仍返回纯事件快照，并标注 `incomplete: true`。gateway 事件窗口有缺失、或 Hermes 没有 gateway replay epoch 而使用节点旁路事件日志时，也标注 `incomplete: true`。旧协议 `SessionStreamReplay` 沿用原有历史和重放路径。
+
+### 信封字段
+
+| 契约字段 | 取值 |
+|---|---|
+| `sessionId` | 节点 RPC 的会话 ID。gateway 运行时的 `session_id` 仅用于读取原生回放。 |
+| `epoch` | 原生回放使用 `hermes-v1:<replay_epoch>`。窗口有前缀或内部缺口时附加缺失区间的摘要。窗口变化会使旧游标触发重拉。 |
+| `seq` | 按原生 `seq` 排序，从 1 连续编号。同一原生帧展开的多条事件各占一个序号。分页的 `limit` 按契约事件计数。 |
+| `turnId` | 优先取 `admission_id`。缺省时使用当前回合、新回合的 `payload.turn_id` 或 `execution_generation`。仍缺失时，用该回合首条有效帧的原生序号生成 `turn-<seq>`。会话级事件为 `null`。 |
+| `participantId` | 固定为 `hermes`。 |
+| `at` | 原生 `at` 中有效的 Unix 毫秒。缺失时记为 0。回合的开始或结束时间为 0 时，快照中对应时间为 `null`，只在两端时间都已知时计算时长。 |
+| `type`、`payload` | 按下表构造。 |
+
+### 原生类型与 payload
+
+| 原生 type | 契约 type | 字段对应关系 |
+|---|---|---|
+| `session.info` | `session.created` | 有字符串 `cwd` 或 `title` 时输出会话元信息，`provider` 为 `hermes`。节点暂存 `pending` 中按 `admission_id` 索引的原始提示词，等对应回合开始时使用。 |
+| `message.start` / `turn.started` | `turn.started` → 可选 `message.user` → `session.running` | `started_at` → `startedAt`，缺失时用 `at`。仅 `message.start` 可同时输出用户消息，优先用当前帧的 `text`，其次用前序 `session.info.pending` 中与本次 `admission_id` 匹配的 `text`。运行态写入 `running: true`、`runId: turnId`。 |
+| `message.user` | `message.user` | 取 `text` 和附件。附件保留契约字段 `artifactId`、`fileName`、`mime`、`mimeType`、`size`、`sizeBytes`，其中小驼峰字段也接受对应的下划线字段。 |
+| `message.delta` / `message.token` / `message.interim` | `message.assistant.delta` | 取非空的 `text`，跳过 `already_streamed` 和空分段边界。 |
+| `reasoning.delta` / `thinking.delta` / `reasoning.available` | `thought.delta` / `thought.completed` | 取非空的 `text`。仅 `reasoning.available` 映射为完成。 |
+| `message.complete` / `turn.ended` | 可选 `message.assistant.completed` → 可选 `thought.completed` → `turn.ended` → `session.running` | `message.complete` 的 `text`、附件按消息字段处理，`response_reused` 或 `response_previewed` 时跳过最终文本。`reasoning` → 思考 `text`。`ended_at` → `endedAt`，缺失时用 `at`。`status` 或 `outcome` 归为 `completed`、`cancelled` 或 `failed`。`turn_usage.input/output` → `usage.in/out`。最后写入 `running: false`。 |
+| `tool.start` | `tool.call.started` | `tool_id` 或 `tool_call_id` → `callId`，`name` 或 `tool_name` → `name`，`args` → `input`。 |
+| `tool.progress` | `tool.call.updated` | 同样映射工具标识、名称和参数。`progress` → `progress`，`message` → `deltaOutput`，`status` 为 `running`。 |
+| `tool.complete` | `tool.call.completed` | 同样映射工具标识、名称和参数。用 `result_text`、`result` 或 `summary` 依次确定 `output`，非字符串结果序列化为 JSON 文本。`error`、`is_error` 或 `result.error` 为真时 `ok` 为 false。`duration_s` → 整数 `durationMs`。 |
+| `approval.request` / `approval.settled` | `approval.requested` / `approval.resolved` | `prompt_id` → `requestId`。请求只取字符串 `command`、`risk`。结算取 `choice` 或 `decision`，`once` / `session` → `allow_once` / `allow_session`。 |
+| `notice` | `notice` | `text` 或 `message` → `text`，默认 `level: "info"`、`source: "hermes"`。 |
+| `todo.updated`、`session.usage` 和其他未列出的控制帧 | — | 不产生契约事件。会话累计用量不计作回合用量。 |
 
 ## 契约样本
 
 `agent-node/tests/fixtures/session_events/` 中的三份 JSONL 各取一轮已完成的历史会话。来源分别为 Hermes `state.db`、Codex rollout JSONL 和 OpenCode `opencode.db`。生成时把历史记录归一成兼容帧，经 daemon 出站口写入临时数据库，再用 `events_since` 导出。会话及调用 ID 已替换，正文与工具输出已脱敏，信封的 `at` 为样本时间。原始历史没有保留流式分块，也没有统一提供工具时长。样本保留可读取的回合时间、工具调用数量、工具名及已知时长。
+
+`agent-node/tests/fixtures/session_events/hermes-native.json` 来自 Hermes `3b42157858` 的 `AuthorityConnection` 真正执行 `session.events.since` 的响应。采集时使用隔离状态目录和确定性的回复回调，由原生 authority 发出回合事件并使用 gateway 的工具事件构建函数。样本使用测试文字，回放与入队 ID 已固定。该样本的原生帧没有时间戳，也没有工具时长。
+
+`agent-node/tests/fixtures/session_events/hermes-transcript.json` 取自本机 Hermes `state.db` 的一个真实回合，保留 user、assistant、tool 的行顺序、结束原因和工具引用关系。ID、时间戳、消息正文、工具名、参数和结果使用脱敏样本值。测试通过 HTTP 和 WebSocket 替身验证分页、合并和降级行为。
