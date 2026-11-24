@@ -237,6 +237,7 @@ class HermesWsAdapter(HermesAdapter):
         self._sessions: dict[str, _Session] = {}
         self._runtime_sessions: dict[str, str] = {}
         self._active: dict[str, _Turn] = {}
+        self.on_session_event: Callable[[str, dict[str, Any]], None] | None = None
         self._session_running_cache: dict[str, _SessionRunningState] = {}
         self._session_running_probes: dict[str, asyncio.Task[_SessionRunningState]] = {}
 
@@ -400,6 +401,15 @@ class HermesWsAdapter(HermesAdapter):
             generation = result.get("execution_generation")
             info = result.get("info")
             cwd = info.get("cwd") if isinstance(info, dict) else None
+            if self.on_session_event and isinstance(runtime_id, str) and runtime_id and isinstance(cwd, str) and cwd:
+                # A subscription's resume also attaches this connection to the live events.
+                with suppress(PathOutsideAllowedRootsError):
+                    ensure_allowed_path(cwd, self.allowed_roots)
+                    session = self._sessions.setdefault(session_id, _Session(session_id))
+                    if session.connection is not connection:
+                        self._remember_snapshot(connection, session_id, session, result)
+                        session.epoch = result.get("replay_epoch") or self._epoch
+                        session.seq = result.get("last_sequence") or 0
             state = _SessionRunningState(
                 running=bool(result.get("running")),
                 runtime_id=runtime_id if isinstance(runtime_id, str) else "",
@@ -467,7 +477,8 @@ class HermesWsAdapter(HermesAdapter):
             if seq <= session.seq:
                 return
             session.seq = seq
-        if (kind := params.get("type")) == "session.info" and not self._active.get(sid):
+        turn = self._active.get(sid)
+        if params.get("type") == "session.info" and turn is None:
             # Apply metadata in the reader before resolving subsequent RPCs. No callback
             # may block this loop or make an RPC of its own.
             previous = self.session_effort_fields(sid)
@@ -475,8 +486,10 @@ class HermesWsAdapter(HermesAdapter):
             current = self.session_effort_fields(sid)
             if current != previous and self.on_effort_update:
                 asyncio.create_task(self._notify_effort(sid, current))
-        if turn := self._active.get(sid):
+        if turn is not None:
             turn.events.put_nowait(params)
+        elif self._session_cwds.get(sid) is not None and (callback := self.on_session_event):
+            callback(sid, params)
 
     async def _notify_effort(self, sid: str, current: dict[str, Any]) -> None:
         if callback := self.on_effort_update:

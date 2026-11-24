@@ -26,6 +26,14 @@ class SessionEvent(TypedDict):
     payload: dict[str, Any]
 
 
+@dataclass
+class SessionEventUpdate:
+    type: str
+    turn_id: str | None
+    at: int
+    payload: dict[str, Any]
+
+
 _EVENT_TYPES = frozenset({
     "session.created", "turn.started", "turn.ended", "message.user",
     "message.assistant.delta", "message.assistant.completed",
@@ -146,6 +154,14 @@ class EventStore:
         at: int, events: list[tuple[str, dict[str, Any]]],
     ) -> None:
         """Assign and commit a frame's events atomically, including across DB connections."""
+        self.append_updates(session_id=session_id, epoch=epoch, participant_id=participant_id,
+                            updates=[SessionEventUpdate(kind, turn_id, at, payload) for kind, payload in events])
+
+    def append_updates(
+        self, *, session_id: str, epoch: str, participant_id: str, updates: list[SessionEventUpdate],
+    ) -> None:
+        if not updates:
+            return
         with self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             head = db.execute(
@@ -153,11 +169,11 @@ class EventStore:
                 (session_id, epoch),
             ).fetchone()
             seq = head[0] if head else 0
-            for kind, payload in events:
+            for update in updates:
                 seq += 1
                 row = _event_row(SessionEvent(
-                    sessionId=session_id, epoch=epoch, seq=seq, turnId=turn_id,
-                    participantId=participant_id, type=kind, at=at, payload=payload,
+                    sessionId=session_id, epoch=epoch, seq=seq, turnId=update.turn_id,
+                    participantId=participant_id, type=update.type, at=update.at, payload=update.payload,
                 ))
                 db.execute(_INSERT_EVENT, row)
             db.execute(_UPDATE_HEAD, (session_id, epoch, seq))
@@ -367,9 +383,16 @@ class SessionEventLog:
         self.store = store
         self.epoch = _NODE_EPOCH
 
-    def record(self, frame: dict[str, Any], prompt: PromptEvents | None = None) -> None:
+    def record(
+        self, frame: dict[str, Any], prompt: PromptEvents | None = None,
+        *, updates: list[SessionEventUpdate] | None = None,
+    ) -> None:
         kind, sid, provider = (frame.get(key) for key in ("type", "sessionId", "provider"))
         if not isinstance(sid, str) or not sid or not isinstance(provider, str) or not provider:
+            return
+
+        if updates is not None:
+            self.store.append_updates(session_id=sid, epoch=self.epoch, participant_id=provider, updates=updates)
             return
 
         at = time.time_ns() // 1_000_000

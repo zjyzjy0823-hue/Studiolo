@@ -24,6 +24,7 @@ import websockets
 
 from .adapters.base import AgentAdapter, ApprovalCallback, EventEmitter
 from .adapters.hermes import HermesAdapter
+from .adapters.hermes_replay import GatewayEventNormalizer
 from .adapters.hermes_ws import HermesWsAdapter, ProviderError
 from .adapters.jsonrpc import JsonRpcError
 from .adapters.registry import build_adapter_registry
@@ -34,7 +35,7 @@ from .crypto_chunks import generate_file_key
 from .hermes_media import CAPABILITY as HERMES_MEDIA_CAPABILITY, MediaError, relay_hermes_attachment
 from .terminal_session import TerminalManager
 from .port_preview import PortPreviewManager
-from .session_events import MAX_SESSION_SEQ, EventStore, PromptEvents, SessionEventLog
+from .session_events import MAX_SESSION_SEQ, EventStore, PromptEvents, SessionEventLog, SessionEventUpdate
 from .transfer import (
     DirectArtifactStore,
     create_direct_transfer_app,
@@ -64,6 +65,7 @@ from .worktree import current_session_ref, project_identity, recover_session_wor
 _LOG = logging.getLogger(__name__)
 _PROJECT_PERMISSION_MODES = ("default", "read", "deny")
 IDLE_TRANSCRIPT_INTERVAL_SECONDS = 2.0
+EXTERNAL_STREAM_IDLE_SECONDS = 15 * 60
 
 
 @dataclass
@@ -74,6 +76,66 @@ class IdleTranscript:
 
 
 @dataclass
+class ExternalTurn:
+    session_id: str = ""
+    normalizer: GatewayEventNormalizer = field(default_factory=GatewayEventNormalizer)
+    epoch: str | None = None
+    events: list[SessionEventUpdate] = field(default_factory=list)
+    last_event_at: float = field(default_factory=time.monotonic)
+    reply: str = ""
+    reply_tail: str = ""
+    has_thought: bool = False
+
+    def live_frames(self, updates: list[SessionEventUpdate]) -> list[dict[str, Any]]:
+        # The Core websocket uses compatibility types. The event store receives
+        # the original contract updates, including those without a live frame.
+        if updates:
+            self.last_event_at = time.monotonic()
+        frames = []
+        for update in updates:
+            kind, payload = update.type, update.payload
+            frame = None
+            if kind == "turn.started":
+                self.reply = self.reply_tail = ""
+                self.has_thought = False
+                frame = {"type": "Accepted", **payload}
+            elif kind == "message.assistant.delta":
+                self.reply += payload["text"]
+                self.reply_tail += payload["text"]
+                frame = {"type": "TextDelta", **payload}
+            elif kind == "message.assistant.completed":
+                final = payload["text"]
+                if final and not self.reply.endswith(final):
+                    prefix = self.reply if final.startswith(self.reply) else self.reply_tail
+                    if final.startswith(prefix):
+                        frame = {"type": "TextDelta", "text": final[len(prefix):]}
+            elif kind in ("thought.delta", "thought.completed"):
+                if kind == "thought.delta" or not self.has_thought:
+                    self.has_thought = True
+                    frame = {"type": "ThoughtDelta", **payload}
+            elif kind == "tool.call.started":
+                self.reply_tail = ""
+                frame = {"type": "ToolCall", **payload}
+            elif kind == "tool.call.updated":
+                frame = {"type": "ToolCallUpdate", **payload}
+            elif kind == "tool.call.completed":
+                frame = {"type": "ToolCallUpdate", **payload, "status": "completed" if payload["ok"] else "error"}
+            elif kind == "turn.ended":
+                if payload["status"] == "completed":
+                    frame = {"type": "Completed", "endedAt": payload["endedAt"]}
+                else:
+                    cancelled = payload["status"] == "cancelled"
+                    frame = {"type": "Failed", "endedAt": payload["endedAt"],
+                             "code": "cancelled" if cancelled else "node_execution_error",
+                             "message": "已中断当前 Hermes 任务" if cancelled else "Hermes 回合失败"}
+                self.reply = self.reply_tail = ""
+                self.has_thought = False
+            if frame is not None:
+                frames.append({**frame, "runId": update.turn_id})
+        return frames
+
+
+@dataclass
 class SessionStream:
     stream_id: str = field(default_factory=lambda: uuid4().hex)
     sequence: int = 0
@@ -81,8 +143,11 @@ class SessionStream:
     run_id: str | None = None
     byte_count: int = 0
     events: deque[tuple[int, dict[str, Any]]] = field(default_factory=deque)
+    last_event_at: float = field(default_factory=time.monotonic)
+    external: ExternalTurn | None = None
 
     def append(self, event: dict[str, Any]) -> dict[str, Any]:
+        self.last_event_at = time.monotonic()
         self.sequence += 1
         frame = {**event, "seq": self.sequence, "sequence": self.sequence, "streamId": self.stream_id}
         size = len(json.dumps(frame, ensure_ascii=False).encode("utf-8"))
@@ -347,11 +412,15 @@ class AgentNodeDaemon:
     async def _send_ws(
         self, ws: Any, frame: dict[str, Any], *, prompt: PromptEvents | None = None, forward: bool = True,
         stream: SessionStream | None = None, provider: str | None = None,
+        updates: list[SessionEventUpdate] | None = None,
     ) -> None:
         async with self._send_lock:
             if self._session_event_log is not None:
                 event_frame = {"provider": provider, **frame} if provider is not None else frame
-                await asyncio.to_thread(self._session_event_log.record, event_frame, prompt)
+                if updates is None:
+                    await asyncio.to_thread(self._session_event_log.record, event_frame, prompt)
+                else:
+                    await asyncio.to_thread(self._session_event_log.record, event_frame, updates=updates)
             if not forward:
                 return
             if stream is not None:

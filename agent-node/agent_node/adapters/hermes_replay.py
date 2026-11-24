@@ -7,7 +7,7 @@ from hashlib import sha256
 import json
 from typing import Any, cast
 
-from ..session_events import MAX_SESSION_SEQ, SessionEvent, Snapshot, fold, validate_event
+from ..session_events import MAX_SESSION_SEQ, SessionEvent, SessionEventUpdate, Snapshot, fold, validate_event
 
 
 def normalize_gateway_replay(
@@ -38,44 +38,56 @@ def normalize_gateway_replay(
         epoch += ":" + sha256(repr(gaps).encode()).hexdigest()[:24]
 
     events = []
-    active_turn = None
-    pending_prompts: dict[str, str] = {}
+    normalizer = GatewayEventNormalizer()
     for frame in frames:
-        kind, seq = frame["type"], frame["seq"]
-        payload = frame.get("payload")
         if "sessionId" in frame or frame.get("replay_epoch", gateway_epoch) != gateway_epoch:
             raise ValueError("Hermes replay mixed event logs")
+        for update in normalizer.normalize(frame, fallback_turn=f"turn-{frame['seq']}"):
+            event = SessionEvent(
+                sessionId=session_id, epoch=epoch, seq=len(events) + 1, participantId="hermes",
+                turnId=update.turn_id, at=update.at, type=update.type, payload=update.payload,
+            )
+            validate_event(event)
+            events.append(event)
+    return epoch, events
+
+
+@dataclass
+class GatewayEventNormalizer:
+    active_turn: str | None = None
+    pending_prompts: dict[str, str] = field(default_factory=dict)
+
+    def normalize(
+        self, frame: dict[str, Any], *, fallback_turn: str, default_at: int = 0,
+    ) -> list[SessionEventUpdate]:
+        kind, payload = frame["type"], frame.get("payload")
         if payload is None:
             payload = {}
         if not isinstance(payload, dict):
             raise ValueError("Hermes replay payload must be an object")
-        at = _timestamp(frame.get("at"))
+        at = _timestamp(frame.get("at"), default_at)
         explicit_turn = _identifier(frame.get("admission_id"))
         starts_turn = kind in ("message.start", "turn.started")
         ends_turn = kind in ("message.complete", "turn.ended")
         if kind == "session.info" and isinstance(pending := payload.get("pending"), list):
-            pending_prompts = {
+            self.pending_prompts = {
                 item["admission_id"]: item["text"] for item in pending if isinstance(item, dict)
                 and isinstance(item.get("admission_id"), str) and isinstance(item.get("text"), str)
             }
-        if kind == "message.start" and explicit_turn in pending_prompts and not isinstance(payload.get("text"), str):
-            payload = {**payload, "text": pending_prompts[explicit_turn]}
-        fallback_turn = (_identifier(payload.get("turn_id"))
-                         or _identifier(frame.get("execution_generation")) or f"turn-{seq}")
-        turn_id = explicit_turn or (None if starts_turn else active_turn) or fallback_turn
+        if kind == "message.start" and explicit_turn in self.pending_prompts and not isinstance(payload.get("text"), str):
+            payload = {**payload, "text": self.pending_prompts[explicit_turn]}
+        turn_id = (explicit_turn or (None if starts_turn else self.active_turn)
+                   or _identifier(payload.get("turn_id")) or _identifier(frame.get("execution_generation"))
+                   or fallback_turn)
+        events = []
         for event_type, data in _updates(kind, payload, at, turn_id):
             session_scope = event_type in ("session.created", "session.running", "notice")
-            event = SessionEvent(
-                sessionId=session_id, epoch=epoch, seq=len(events) + 1, participantId="hermes",
-                turnId=None if session_scope else turn_id, at=at, type=event_type, payload=data,
-            )
-            validate_event(event)
-            events.append(event)
+            events.append(SessionEventUpdate(event_type, None if session_scope else turn_id, at, data))
             if not session_scope:
-                active_turn = turn_id
+                self.active_turn = turn_id
         if ends_turn:
-            active_turn = None
-    return epoch, events
+            self.active_turn = None
+        return events
 
 
 def _identifier(value: Any) -> str | None:
