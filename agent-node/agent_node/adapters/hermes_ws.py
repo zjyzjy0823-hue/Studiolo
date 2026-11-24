@@ -10,9 +10,11 @@ from inspect import signature
 from ipaddress import ip_address
 import json
 import logging
+from math import isfinite
 from pathlib import Path
 import re
 from shlex import quote as quote_arg
+from time import monotonic
 from typing import Any
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from uuid import uuid4
@@ -34,6 +36,9 @@ from .jsonrpc import JsonRpcError
 _LOG = logging.getLogger(__name__)
 _TRANSPORT_ERRORS = (OSError, TimeoutError, websockets.WebSocketException)
 _TOKEN_SCRIPT = re.compile(r'window\.__HERMES_SESSION_TOKEN__\s*=\s*("(?:[^"\\]|\\.)*")')
+_SESSION_RUNNING_TTL = 2.0
+_SESSION_RUNNING_TIMEOUT = 3.0
+_STEER_REFUSALS = ("session_idle", "stale_generation", "steer_unavailable")
 
 
 def _loopback(host: str) -> bool:
@@ -115,6 +120,17 @@ class _Session:
     info: dict[str, Any] = field(default_factory=dict)
     transcript: list[dict[str, Any]] = field(default_factory=list)
     held: list[dict[str, Any]] | None = None
+
+
+@dataclass(frozen=True)
+class _SessionRunningState:
+    running: bool
+    runtime_id: str
+    turn_started_at: float | None
+    expires_at: float
+    connection: _GatewayConnection | None = None
+    execution_generation: int | None = None
+    cwd: str | None = None
 
 
 @dataclass
@@ -214,6 +230,8 @@ class HermesWsAdapter(HermesAdapter):
         self._sessions: dict[str, _Session] = {}
         self._runtime_sessions: dict[str, str] = {}
         self._active: dict[str, _Turn] = {}
+        self._session_running_cache: dict[str, _SessionRunningState] = {}
+        self._session_running_probes: dict[str, asyncio.Task[_SessionRunningState]] = {}
 
     async def _credentials(self) -> tuple[str, list[str] | None]:
         async with httpx.AsyncClient(timeout=4, trust_env=False, follow_redirects=False) as client:
@@ -325,6 +343,12 @@ class HermesWsAdapter(HermesAdapter):
     async def close(self) -> None:
         self._closed = True
         self._ready.set()
+        probes = list(self._session_running_probes.values())
+        for probe in probes:
+            probe.cancel()
+        await asyncio.gather(*probes, return_exceptions=True)
+        self._session_running_probes.clear()
+        self._session_running_cache.clear()
         for turn in self._active.values():
             turn.events.put_nowait({"type": "_failed", "payload": {"error": "Hermes WebSocket adapter closed"}})
             for task in turn.approval_tasks.values():
@@ -334,6 +358,65 @@ class HermesWsAdapter(HermesAdapter):
             await asyncio.gather(self._socket_task, return_exceptions=True)
             self._socket_task = None
         await super().close()
+
+    async def session_running(self, *, session_id: str) -> bool | None:
+        state = await self._session_running_state(session_id)
+        return state.running if state and state.connection is not None else None
+
+    async def _session_running_state(self, session_id: str, *, require_runtime: bool = False) -> _SessionRunningState | None:
+        if self._closed:
+            return None
+        now = monotonic()
+        cached = self._session_running_cache.get(session_id)
+        if cached is not None and cached.expires_at > now and (cached.runtime_id or not require_runtime):
+            return cached
+        probe = self._session_running_probes.get(session_id)
+        if probe is None:
+            for sid, state in list(self._session_running_cache.items()):
+                if state.expires_at <= now:
+                    del self._session_running_cache[sid]
+            probe = asyncio.create_task(self._probe_session_running(session_id))
+            self._session_running_probes[session_id] = probe
+        # A cancelled subscription must leave the shared probe available to other callers.
+        return await asyncio.shield(probe)
+
+    async def _probe_session_running(self, session_id: str) -> _SessionRunningState:
+        try:
+            async with asyncio.timeout(_SESSION_RUNNING_TIMEOUT):
+                connection = await self._online()
+                result = await connection.call(
+                    "session.resume", {"session_id": session_id, "omit_messages": True},
+                    timeout=_SESSION_RUNNING_TIMEOUT,
+                )
+            runtime_id = result.get("session_id")
+            started_at = result.get("turn_started_at")
+            generation = result.get("execution_generation")
+            info = result.get("info")
+            cwd = info.get("cwd") if isinstance(info, dict) else None
+            state = _SessionRunningState(
+                running=bool(result.get("running")),
+                runtime_id=runtime_id if isinstance(runtime_id, str) else "",
+                turn_started_at=float(started_at) if type(started_at) in (float, int) and isfinite(started_at) else None,
+                expires_at=monotonic() + _SESSION_RUNNING_TTL,
+                connection=connection,
+                execution_generation=generation if type(generation) is int else None,
+                cwd=cwd if isinstance(cwd, str) else None,
+            )
+        except Exception as exc:
+            _LOG.debug("Hermes session running probe unavailable: %s", type(exc).__name__)
+            state = _SessionRunningState(False, "", None, monotonic() + _SESSION_RUNNING_TTL)
+        finally:
+            self._session_running_probes.pop(session_id, None)
+        self._session_running_cache[session_id] = state
+        return state
+
+    def cached_turn_started_at(self, session_id: str) -> float | None:
+        state = self._session_running_cache.get(session_id)
+        return state.turn_started_at if state and state.expires_at > monotonic() else None
+
+    def cached_running_sessions(self) -> set[str]:
+        now = monotonic()
+        return {sid for sid, state in self._session_running_cache.items() if state.expires_at > now and state.running}
 
     async def probe(self) -> AdapterProbe:
         caps = ("chat", "history", "approval", "worktree", "models", "cron", "files", "diff", "checkpoints",
@@ -957,7 +1040,29 @@ class HermesWsAdapter(HermesAdapter):
         try:
             result = await connection.call("session.steer", params)
         except JsonRpcError as exc:
-            if exc.code == 4010 or exc.message in ("session_idle", "stale_generation", "steer_unavailable"):
+            if exc.code == 4010 or exc.message in _STEER_REFUSALS:
+                return False
+            raise
+        return result.get("status") == "queued"
+
+    async def steer_external(self, *, session_id: str, text: str) -> bool:
+        if not text.strip():
+            return False
+        state = await self._session_running_state(session_id, require_runtime=True)
+        if state is None or not state.running or not state.runtime_id or state.connection is None or not state.cwd:
+            return False
+        try:
+            ensure_allowed_path(state.cwd, self.allowed_roots)
+        except PathOutsideAllowedRootsError:
+            return False
+        params: dict[str, Any] = {"session_id": state.runtime_id, "text": text}
+        if self._canonical and state.execution_generation is not None:
+            params["execution_generation"] = state.execution_generation
+        # Use the same gateway connection that resumed the runtime session.
+        try:
+            result = await state.connection.call("session.steer", params)
+        except JsonRpcError as exc:
+            if exc.code in (4001, 4010) or exc.message in _STEER_REFUSALS:
                 return False
             raise
         return result.get("status") == "queued"

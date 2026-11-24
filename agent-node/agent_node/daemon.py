@@ -2,7 +2,7 @@
 
 import asyncio
 from collections import OrderedDict, deque
-from contextlib import closing
+from contextlib import closing, suppress
 from dataclasses import dataclass, field
 from hashlib import sha256
 import json
@@ -24,6 +24,7 @@ import websockets
 
 from .adapters.base import AgentAdapter, ApprovalCallback, EventEmitter
 from .adapters.hermes import HermesAdapter
+from .adapters.hermes_ws import HermesWsAdapter
 from .adapters.registry import build_adapter_registry
 from .audit import audit_event
 from .config import NodeConfig, PathOutsideAllowedRootsError, detect_lan_urls, ensure_allowed_path
@@ -526,15 +527,20 @@ class AgentNodeDaemon:
             return
 
         if cmd == "session.active.list":
-            await send_back({
-                "type": "ActiveRunsSnapshot",
-                "runs": [
-                    {"provider": provider, "sessionId": sid, "runId": stream.run_id,
-                     "streamId": stream.stream_id, "lastSeq": stream.sequence}
-                    for provider, sid in self._active_runs
-                    if (stream := self._session_streams.get((provider, sid))) and stream.run_id
-                ],
-            })
+            hermes = self.adapters.get("hermes")
+            probed_runs = set()
+            if isinstance(hermes, HermesWsAdapter):
+                probed_runs = {("hermes", sid) for sid in hermes.cached_running_sessions()}
+            runs = []
+            for key in self._active_runs | probed_runs:
+                run_provider, sid = key
+                stream = self._session_streams.get(key)
+                if key in probed_runs or (stream and stream.run_id):
+                    runs.append({
+                        "provider": run_provider, "sessionId": sid, "runId": stream.run_id if stream else None,
+                        **({"streamId": stream.stream_id, "lastSeq": stream.sequence} if stream else {}),
+                    })
+            await send_back({"type": "ActiveRunsSnapshot", "runs": runs})
             return
 
         if cmd in ("project.permissions.list", "project.permissions.set"):
@@ -842,16 +848,27 @@ class AgentNodeDaemon:
                 if watch_idle and sid:
                     self._idle_transcripts.setdefault(sid, IdleTranscript())
                 key = (provider, sid)
-                is_active = key in self._active_runs
+                probed_running = False
+                if key not in self._active_runs and sid and isinstance(adapter, HermesWsAdapter):
+                    with suppress(Exception):
+                        probed_running = await adapter.session_running(session_id=sid) is True
+                # A local run can start while the probe is in flight.
+                local_active = key in self._active_runs
+                is_active = local_active or probed_running
                 raw_last_seq = frame.get("afterSequence", frame.get("lastSeq"))
                 last_seq = raw_last_seq if type(raw_last_seq) is int and raw_last_seq > 0 else 0
                 stream = self._session_streams.get(key)
+                run_id = stream.run_id if stream and is_active else None
+                if stream is None and probed_running and isinstance(adapter, HermesWsAdapter):
+                    turn_started_at = adapter.cached_turn_started_at(sid)
+                    run_id = f"external-{int(turn_started_at or 0)}"
                 latest = stream.sequence if stream else 0
                 stream_id = frame.get("streamId")
                 generation_matches = stream_id in (None, stream.stream_id if stream else None)
                 has_cursor = bool(last_seq or (stream_id and raw_last_seq == 0))
                 incremental = has_cursor and generation_matches
-                cursor = last_seq if incremental else stream.turn_start if stream and is_active else latest
+                # An external turn doesn't start a new turn in the local stream.
+                cursor = last_seq if incremental else stream.turn_start if stream and local_active else latest
                 oldest = stream.events[0][1]["sequence"] if stream and stream.events else latest + 1
                 snapshot_required = bool((has_cursor and not generation_matches) or cursor > latest or cursor < oldest - 1)
                 buffered = [event for _, event in stream.events if event["sequence"] > cursor] if stream and not snapshot_required else []
@@ -861,7 +878,7 @@ class AgentNodeDaemon:
                         "provider": provider,
                         "sessionId": sid,
                         "active": is_active,
-                        "runId": stream.run_id if stream and is_active else None,
+                        "runId": run_id,
                         "incremental": incremental,
                         "lastSeq": latest,
                         "streamId": stream.stream_id if stream else None,
@@ -1419,16 +1436,28 @@ class AgentNodeDaemon:
                     await send_back({"type": "SteerRejected", "sessionId": sid,
                                      "code": "unsupported", "message": "当前 Agent 不支持插话"})
                     return
-                if (provider, sid) not in self._active_runs:
-                    await send_back({"type": "SteerRejected", "sessionId": sid,
-                                     "code": "idle", "message": "当前没有运行中的回合"})
-                    return
+                key = (provider, sid)
+                external_steer = None
+                if key not in self._active_runs and sid and isinstance(adapter, HermesWsAdapter):
+                    with suppress(Exception):
+                        if await adapter.session_running(session_id=sid) is True:
+                            external_steer = adapter.steer_external
+                local_active = key in self._active_runs
+                if not local_active:
+                    if external_steer is None:
+                        await send_back({"type": "SteerRejected", "sessionId": sid,
+                                         "code": "idle", "message": "当前没有运行中的回合"})
+                        return
+                    steer_fn = external_steer
                 try:
                     ok = await steer_fn(session_id=sid, text=text)
                 except Exception as exc:  # noqa: BLE001
-                    await send_back({"type": "SteerRejected", "sessionId": sid,
-                                     "code": "failed", "message": str(exc)[:200]})
-                    return
+                    if local_active:
+                        await send_back({"type": "SteerRejected", "sessionId": sid,
+                                         "code": "failed", "message": str(exc)[:200]})
+                        return
+                    _LOG.debug("Hermes external steer failed: %s", type(exc).__name__)
+                    ok = False
                 await send_back({"type": "SteerAccepted" if ok else "SteerRejected",
                                  "sessionId": sid, "code": "" if ok else "not_redirected",
                                  "message": "" if ok else "上游未接受插话（可能已排队）"})

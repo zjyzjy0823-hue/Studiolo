@@ -10,7 +10,7 @@ from agent_node.adapters.hermes import HermesAdapter
 from agent_node.adapters.hermes_ws import HermesWsAdapter
 from agent_node.adapters.registry import build_adapter_registry
 from agent_node.config import DirectTransferConfig, NodeConfig, load_node_config
-from agent_node.daemon import AgentNodeDaemon
+from agent_node.daemon import AgentNodeDaemon, SessionStream
 
 
 class GatewaySocket:
@@ -133,6 +133,390 @@ def test_idle_transcript_skips_active_run_and_recent_stream(tmp_path):
         await daemon._poll_idle_transcripts(ws, "node")
         adapter.fetch_transcript.assert_not_awaited()
         ws.send.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("running", [True, False, None, ConnectionError("probe failed")])
+def test_subscribe_replays_hermes_running_state(tmp_path, monkeypatch, running):
+    async def run():
+        adapter = HermesWsAdapter((tmp_path,))
+        probe = AsyncMock(return_value=running)
+        if isinstance(running, Exception):
+            probe.side_effect = running
+        monkeypatch.setattr(adapter, "session_running", probe)
+        config = NodeConfig("http://127.0.0.1:8000", "sn_live_test", (tmp_path,),
+                            direct=DirectTransferConfig(enabled=False))
+        daemon = AgentNodeDaemon(config, adapters={"hermes": adapter}, staging_dir=tmp_path)
+        ws = AsyncMock()
+        subscribe = {"type": "session.subscribe", "provider": "hermes", "sessionId": "saved"}
+
+        await daemon.handle_command(ws, subscribe)
+        ws.send.assert_awaited_once()
+        replay = json.loads(ws.send.await_args.args[0])
+        assert replay["type"] == "SessionStreamReplay"
+        assert replay["active"] is (running is True)
+        assert replay["runId"] == ("external-0" if running is True else None)
+        assert not daemon._active_runs
+        probe.assert_awaited_once_with(session_id="saved")
+
+        key = ("hermes", "saved")
+        daemon._active_runs.add(key)
+        daemon._session_streams[key] = SessionStream(run_id="local-run")
+        await daemon.handle_command(ws, subscribe)
+        replay = json.loads(ws.send.await_args.args[0])
+        assert replay["type"] == "SessionStreamReplay"
+        assert replay["active"] is True
+        assert replay["runId"] == "local-run"
+        probe.assert_awaited_once_with(session_id="saved")
+
+    asyncio.run(run())
+
+
+def test_subscribe_coalesces_probes_and_refreshes_after_two_seconds(tmp_path, monkeypatch, wire_adapter):
+    async def run():
+        now = 100.0
+        running = True
+        calls = []
+
+        def dispatch(socket, msg):
+            if msg["method"] == "session.resume":
+                params = msg["params"]
+                calls.append(params)
+                assert params["omit_messages"] is True
+                return {"result": {"running": running and params["session_id"] == "saved"}}
+            return {"result": {}}
+
+        monkeypatch.setattr("agent_node.adapters.hermes_ws.monotonic", lambda: now)
+        adapter, sockets = wire_adapter(dispatch, canonical=False)
+        config = NodeConfig("http://127.0.0.1:8000", "sn_live_test", (tmp_path,),
+                            direct=DirectTransferConfig(enabled=False))
+        daemon = AgentNodeDaemon(config, adapters={"hermes": adapter}, staging_dir=tmp_path)
+        ws = AsyncMock()
+
+        async def subscribe(sid="saved"):
+            await daemon.handle_command(ws, {"type": "session.subscribe", "provider": "hermes", "sessionId": sid})
+            replay = json.loads(ws.send.await_args.args[0])
+            assert replay["type"] == "SessionStreamReplay"
+            return replay["active"]
+
+        try:
+            assert await asyncio.gather(subscribe(), subscribe()) == [True, True]
+            assert calls == [{"session_id": "saved", "omit_messages": True}]
+            now += 1.99
+            running = False
+            assert await subscribe() is True
+            assert len(calls) == 1
+            assert await subscribe("other") is False
+            assert calls[-1] == {"session_id": "other", "omit_messages": True}
+
+            now += 0.02
+            assert await subscribe() is False
+            assert calls == [
+                {"session_id": "saved", "omit_messages": True},
+                {"session_id": "other", "omit_messages": True},
+                {"session_id": "saved", "omit_messages": True},
+            ]
+            assert len(sockets) == 1
+            assert not adapter._active and not adapter._sessions and not daemon._active_runs
+        finally:
+            await adapter.close()
+
+    asyncio.run(run())
+
+
+def test_active_snapshot_includes_fresh_external_hermes_runs(tmp_path, monkeypatch, wire_adapter):
+    async def run():
+        now = 100.0
+
+        def dispatch(socket, msg):
+            if msg["method"] == "session.resume":
+                return {"result": {"running": msg["params"]["session_id"] != "idle"}}
+            return {"result": {}}
+
+        monkeypatch.setattr("agent_node.adapters.hermes_ws.monotonic", lambda: now)
+        adapter, _ = wire_adapter(dispatch, canonical=True)
+        config = NodeConfig("http://127.0.0.1:8000", "sn_live_test", (tmp_path,),
+                            direct=DirectTransferConfig(enabled=False))
+        daemon = AgentNodeDaemon(config, adapters={"hermes": adapter}, staging_dir=tmp_path)
+        ws = AsyncMock()
+        old_stream = SessionStream(stream_id="old-stream", run_id="old-run")
+        old_stream.append({"type": "Completed"})
+        daemon._session_streams[("hermes", "with-stream")] = old_stream
+        daemon._session_streams[("hermes", "local")] = SessionStream(stream_id="local-stream", run_id="local-run")
+        daemon._active_runs.add(("hermes", "local"))
+
+        async def snapshot():
+            await daemon.handle_command(ws, {"type": "session.active.list"})
+            frame = json.loads(ws.send.await_args.args[0])
+            assert frame["type"] == "ActiveRunsSnapshot"
+            return sorted(frame["runs"], key=lambda run: run["sessionId"])
+
+        local = {"provider": "hermes", "sessionId": "local", "runId": "local-run",
+                 "streamId": "local-stream", "lastSeq": 0}
+        try:
+            for sid in ("external", "idle", "with-stream"):
+                await daemon.handle_command(ws, {"type": "session.subscribe", "provider": "hermes", "sessionId": sid})
+            replay = json.loads(ws.send.await_args.args[0])
+            assert replay["type"] == "SessionStreamReplay"
+            assert replay["active"] is True
+            assert replay["runId"] == "old-run"
+            assert replay["events"] == []
+            assert await snapshot() == [
+                {"provider": "hermes", "sessionId": "external", "runId": None},
+                local,
+                {"provider": "hermes", "sessionId": "with-stream", "runId": "old-run",
+                 "streamId": "old-stream", "lastSeq": 1},
+            ]
+            now += 2
+            assert await snapshot() == [local]
+        finally:
+            await adapter.close()
+
+    asyncio.run(run())
+
+
+def test_running_probe_returns_unknown_on_gateway_timeout(tmp_path, monkeypatch):
+    async def run():
+        adapter = HermesWsAdapter((tmp_path,))
+        connection = AsyncMock()
+        connection.call.side_effect = TimeoutError
+        monkeypatch.setattr(adapter, "_online", AsyncMock(return_value=connection))
+        try:
+            assert await adapter.session_running(session_id="saved") is None
+            assert await adapter.session_running(session_id="saved") is None
+            connection.call.assert_awaited_once_with(
+                "session.resume", {"session_id": "saved", "omit_messages": True}, timeout=3,
+            )
+            assert adapter.cached_running_sessions() == set()
+        finally:
+            await adapter.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(("canonical", "generation", "steer_generation"), [
+    (False, 7, {}),
+    (True, 7, {"execution_generation": 7}),
+    (True, None, {}),
+])
+def test_external_replay_and_steer_use_gateway_runtime_state(tmp_path, wire_adapter, canonical, generation,
+                                                           steer_generation):
+    async def run():
+        calls = []
+
+        def dispatch(socket, msg):
+            method, params = msg["method"], msg["params"]
+            if method == "session.resume":
+                calls.append((method, params))
+                snapshot = {"session_id": "runtime", "session_key": "saved", "running": True,
+                            "turn_started_at": 1234.75, "info": {"cwd": str(tmp_path)}}
+                if generation is not None:
+                    snapshot["execution_generation"] = generation
+                return {"result": snapshot}
+            if method == "session.steer":
+                calls.append((method, params))
+                return {"result": {"status": "queued"}}
+            return {"result": {}}
+
+        adapter, _ = wire_adapter(dispatch, canonical=canonical)
+        config = NodeConfig("http://127.0.0.1:8000", "sn_live_test", (tmp_path,),
+                            direct=DirectTransferConfig(enabled=False))
+        daemon = AgentNodeDaemon(config, adapters={"hermes": adapter}, staging_dir=tmp_path)
+        ws = AsyncMock()
+        session = {"provider": "hermes", "sessionId": "saved"}
+        try:
+            await daemon.handle_command(ws, {**session, "type": "session.subscribe"})
+            replay = json.loads(ws.send.await_args.args[0])
+            assert replay["type"] == "SessionStreamReplay"
+            assert replay["active"] is True
+            assert replay["runId"] == "external-1234"
+
+            await daemon.handle_command(ws, {**session, "type": "prompt.steer", "text": "shorten",
+                                             "requestId": "steer-request"})
+            assert json.loads(ws.send.await_args.args[0]) == {
+                "type": "SteerAccepted", "sessionId": "saved", "requestId": "steer-request",
+                "code": "", "message": "",
+            }
+            assert calls == [
+                ("session.resume", {"session_id": "saved", "omit_messages": True}),
+                ("session.steer", {"session_id": "runtime", "text": "shorten", **steer_generation}),
+            ]
+            assert not daemon._active_runs and not daemon._session_streams
+            assert not adapter._active and not adapter._sessions
+        finally:
+            await adapter.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("reply", [
+    {"result": {"status": "rejected"}},
+    {"error": {"code": 4001, "message": "session not found"}},
+    {"error": {"code": 4010, "message": "agent does not support steer"}},
+    {"error": {"code": -32000, "message": "session_idle"}},
+    {"error": {"code": -32000, "message": "stale_generation"}},
+    {"error": {"code": -32000, "message": "steer_unavailable"}},
+])
+def test_external_steer_refusal_is_not_redirected(tmp_path, wire_adapter, reply):
+    async def run():
+        calls = []
+
+        def dispatch(socket, msg):
+            method = msg["method"]
+            calls.append(method)
+            if method == "session.resume":
+                return {"result": {"session_id": "runtime", "running": True, "info": {"cwd": str(tmp_path)}}}
+            if method == "session.steer":
+                return reply
+            return {"result": {}}
+
+        adapter, _ = wire_adapter(dispatch, canonical=False)
+        config = NodeConfig("http://127.0.0.1:8000", "sn_live_test", (tmp_path,),
+                            direct=DirectTransferConfig(enabled=False))
+        daemon = AgentNodeDaemon(config, adapters={"hermes": adapter}, staging_dir=tmp_path)
+        ws = AsyncMock()
+        try:
+            assert await adapter.steer_external(session_id="saved", text="shorten") is False
+            await daemon.handle_command(ws, {"type": "prompt.steer", "provider": "hermes",
+                                             "sessionId": "saved", "text": "shorten"})
+            response = json.loads(ws.send.await_args.args[0])
+            assert response["type"] == "SteerRejected"
+            assert response["code"] == "not_redirected"
+            assert calls == ["client.capabilities", "session.resume", "session.steer", "session.steer"]
+        finally:
+            await adapter.close()
+
+    asyncio.run(run())
+
+
+def test_steer_without_running_hermes_turn_is_idle(tmp_path):
+    async def run():
+        adapter = AsyncMock(spec=HermesWsAdapter)
+        adapter.session_running.return_value = False
+        config = NodeConfig("http://127.0.0.1:8000", "sn_live_test", (tmp_path,),
+                            direct=DirectTransferConfig(enabled=False))
+        daemon = AgentNodeDaemon(config, adapters={"hermes": adapter}, staging_dir=tmp_path)
+        ws = AsyncMock()
+        await daemon.handle_command(ws, {"type": "prompt.steer", "provider": "hermes",
+                                         "sessionId": "saved", "text": "shorten"})
+        response = json.loads(ws.send.await_args.args[0])
+        assert response["type"] == "SteerRejected"
+        assert response["code"] == "idle"
+        adapter.session_running.assert_awaited_once_with(session_id="saved")
+        adapter.steer_external.assert_not_awaited()
+        adapter.steer.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("starts_during_probe", [False, True])
+def test_local_hermes_steer_takes_priority(tmp_path, starts_during_probe):
+    async def run():
+        adapter = AsyncMock(spec=HermesWsAdapter)
+        adapter.steer.return_value = True
+        config = NodeConfig("http://127.0.0.1:8000", "sn_live_test", (tmp_path,),
+                            direct=DirectTransferConfig(enabled=False))
+        daemon = AgentNodeDaemon(config, adapters={"hermes": adapter}, staging_dir=tmp_path)
+        ws = AsyncMock()
+
+        async def probe(*, session_id):
+            daemon._active_runs.add(("hermes", session_id))
+            return True
+
+        if starts_during_probe:
+            adapter.session_running.side_effect = probe
+        else:
+            daemon._active_runs.add(("hermes", "saved"))
+        await daemon.handle_command(ws, {"type": "prompt.steer", "provider": "hermes",
+                                         "sessionId": "saved", "text": "shorten"})
+        assert json.loads(ws.send.await_args.args[0])["type"] == "SteerAccepted"
+        adapter.steer.assert_awaited_once_with(session_id="saved", text="shorten")
+        adapter.steer_external.assert_not_awaited()
+        if starts_during_probe:
+            adapter.session_running.assert_awaited_once_with(session_id="saved")
+        else:
+            adapter.session_running.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_external_steer_reprobes_running_cache_without_runtime_id(tmp_path, wire_adapter):
+    async def run():
+        calls = []
+
+        def dispatch(socket, msg):
+            method = msg["method"]
+            if method == "session.resume":
+                calls.append(method)
+                if len(calls) == 1:
+                    return {"result": {"running": True}}
+                return {"result": {"session_id": "runtime", "running": True, "info": {"cwd": str(tmp_path)}}}
+            if method == "session.steer":
+                calls.append(method)
+                assert msg["params"] == {"session_id": "runtime", "text": "shorten"}
+                return {"result": {"status": "queued"}}
+            return {"result": {}}
+
+        adapter, _ = wire_adapter(dispatch, canonical=False)
+        try:
+            assert await adapter.session_running(session_id="saved") is True
+            assert await adapter.steer_external(session_id="saved", text="shorten") is True
+            assert calls == ["session.resume", "session.resume", "session.steer"]
+        finally:
+            await adapter.close()
+
+    asyncio.run(run())
+
+
+def test_external_steer_checks_the_session_working_directory(tmp_path, wire_adapter):
+    async def run():
+        calls = []
+
+        def dispatch(socket, msg):
+            method = msg["method"]
+            calls.append(method)
+            if method == "session.resume":
+                info = {"cwd": str(tmp_path.parent)} if msg["params"]["session_id"] == "outside" else {}
+                return {"result": {"session_id": "runtime", "running": True, "info": info}}
+            return {"result": {}}
+
+        adapter, _ = wire_adapter(dispatch, canonical=False)
+        try:
+            assert await adapter.steer_external(session_id="outside", text="shorten") is False
+            assert await adapter.steer_external(session_id="unknown", text="shorten") is False
+            assert calls == ["client.capabilities", "session.resume", "session.resume"]
+        finally:
+            await adapter.close()
+
+    asyncio.run(run())
+
+
+def test_subscribe_replays_inactive_when_gateway_does_not_answer_probe(tmp_path, wire_adapter):
+    async def run():
+        calls = []
+
+        def dispatch(socket, msg):
+            method = msg["method"]
+            calls.append(method)
+            return None if method == "session.resume" else {"result": {}}
+
+        adapter, _ = wire_adapter(dispatch, canonical=False)
+        config = NodeConfig("http://127.0.0.1:8000", "sn_live_test", (tmp_path,),
+                            direct=DirectTransferConfig(enabled=False))
+        daemon = AgentNodeDaemon(config, adapters={"hermes": adapter}, staging_dir=tmp_path)
+        ws = AsyncMock()
+        try:
+            await asyncio.wait_for(daemon.handle_command(ws, {"type": "session.subscribe", "provider": "hermes",
+                                                              "sessionId": "saved"}), timeout=4)
+            ws.send.assert_awaited_once()
+            replay = json.loads(ws.send.await_args.args[0])
+            assert replay["type"] == "SessionStreamReplay"
+            assert replay["active"] is False
+            assert replay["runId"] is None
+            assert calls == ["client.capabilities", "session.resume"]
+        finally:
+            await adapter.close()
 
     asyncio.run(run())
 
