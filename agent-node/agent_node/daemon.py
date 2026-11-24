@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, field
 from hashlib import sha256
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import platform as py_platform
@@ -164,6 +165,188 @@ def _history_cursor(message: dict[str, Any], previous: dict[str, Any]) -> str:
     return sha256(json.dumps(anchor, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
+def _coerce_external_id(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value
+    if type(value) is int:
+        return str(value)
+    return None
+
+
+def _stringify_external_output(value: Any) -> str | None:
+    if value is None or isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _extract_external_duration_ms(payload: dict[str, Any]) -> int | None:
+    raw_ms = payload.get("durationMs")
+    if raw_ms is None:
+        raw_ms = payload.get("duration_ms")
+    if type(raw_ms) in (int, float) and math.isfinite(raw_ms) and raw_ms >= 0:
+        return int(raw_ms)
+    raw_s = payload.get("duration_s")
+    if type(raw_s) in (int, float) and math.isfinite(raw_s) and raw_s >= 0:
+        return int(raw_s * 1000)
+    return None
+
+
+def map_external_gateway_event(
+    session_id: str,
+    params: dict[str, Any],
+    run_id: str,
+    *,
+    provider: str = "hermes",
+) -> dict[str, Any] | None:
+    """将 Hermes 网关原生事件映射为客户端现有可渲染帧；无法识别或脏数据返回 None。"""
+    if (not isinstance(session_id, str) or not session_id.strip()
+            or not isinstance(params, dict)
+            or not isinstance(run_id, str) or not run_id.strip()):
+        return None
+    event_type = params.get("type")
+    if not isinstance(event_type, str) or not event_type:
+        return None
+    raw_payload = params.get("payload")
+    if raw_payload is None:
+        if event_type in ("turn.completed", "turn.ended", "message.complete"):
+            payload: dict[str, Any] = {}
+        else:
+            return None
+    elif isinstance(raw_payload, dict):
+        payload = raw_payload
+    else:
+        return None
+
+    if event_type in ("message.delta", "message.token", "message.interim"):
+        if payload.get("already_streamed"):
+            return None
+        text = payload.get("text")
+        if not isinstance(text, str) or not text:
+            return None
+        return {
+            "type": "TextDelta",
+            "text": text,
+            "runId": run_id,
+            "requestId": run_id,
+            "sessionId": session_id,
+            "provider": provider,
+        }
+
+    if event_type in ("reasoning.delta", "thinking.delta", "reasoning.available"):
+        text = payload.get("text")
+        if not isinstance(text, str) or not text:
+            return None
+        return {
+            "type": "ThoughtDelta",
+            "text": text,
+            "runId": run_id,
+            "requestId": run_id,
+            "sessionId": session_id,
+            "provider": provider,
+        }
+
+    if event_type == "tool.start":
+        call_id = _coerce_external_id(
+            payload.get("call_id") or payload.get("tool_id") or payload.get("tool_call_id")
+        )
+        if call_id is None:
+            return None
+        raw_name = payload.get("name") or payload.get("tool_name")
+        name = raw_name if isinstance(raw_name, str) and raw_name else "tool"
+        args = payload.get("args")
+        frame: dict[str, Any] = {
+            "type": "ToolCall",
+            "callId": call_id,
+            "name": name,
+            "status": "running",
+            "args": args,
+            "runId": run_id,
+            "sessionId": session_id,
+            "provider": provider,
+        }
+        if args is not None:
+            frame["input"] = args
+        return frame
+
+    if event_type == "tool.progress":
+        call_id = _coerce_external_id(
+            payload.get("call_id") or payload.get("tool_id") or payload.get("tool_call_id")
+        )
+        if call_id is None:
+            return None
+        raw_name = payload.get("name") or payload.get("tool_name")
+        name = raw_name if isinstance(raw_name, str) and raw_name else None
+        raw_output = payload.get("output")
+        if raw_output is None:
+            raw_output = payload.get("message")
+        return {
+            "type": "ToolCallUpdate",
+            "callId": call_id,
+            "name": name,
+            "status": "running",
+            "output": _stringify_external_output(raw_output),
+            "durationMs": _extract_external_duration_ms(payload),
+            "runId": run_id,
+            "sessionId": session_id,
+            "provider": provider,
+        }
+
+    if event_type == "tool.complete":
+        call_id = _coerce_external_id(
+            payload.get("call_id") or payload.get("tool_id") or payload.get("tool_call_id")
+        )
+        if call_id is None:
+            return None
+        raw_name = payload.get("name") or payload.get("tool_name")
+        name = raw_name if isinstance(raw_name, str) and raw_name else None
+        result = payload.get("result")
+        error_val = payload.get("error") or (result.get("error") if isinstance(result, dict) else None)
+        is_error = bool(
+            error_val
+            or payload.get("is_error")
+            or payload.get("ok") is False
+            or payload.get("status") in ("error", "failed")
+        )
+        raw_output = payload.get("output")
+        if raw_output is None:
+            raw_output = payload.get("result_text")
+        if raw_output is None:
+            raw_output = result
+        if raw_output is None:
+            raw_output = payload.get("summary")
+        if raw_output is None and is_error:
+            raw_output = error_val
+        frame = {
+            "type": "ToolCallUpdate",
+            "callId": call_id,
+            "name": name,
+            "status": "error" if is_error else "completed",
+            "output": _stringify_external_output(raw_output),
+            "durationMs": _extract_external_duration_ms(payload),
+            "runId": run_id,
+            "sessionId": session_id,
+            "provider": provider,
+        }
+        if is_error and error_val is not None:
+            frame["error"] = _stringify_external_output(error_val)
+        return frame
+
+    if event_type in ("turn.completed", "turn.ended", "message.complete") or (
+        event_type == "session.info" and payload.get("running") is False
+    ):
+        return {
+            "type": "Completed",
+            "runId": run_id,
+            "sessionId": session_id,
+            "provider": provider,
+        }
+
+    return None
+
+
 class AgentNodeDaemon:
     """运行在每台受控机器上的轻量级节点守护进程。"""
 
@@ -204,9 +387,103 @@ class AgentNodeDaemon:
         self._alist_cache: dict[tuple[str, int, int], PublishResult] = {}
         self._command_scope = sha256(f"{config.core_url}\n{config.node_token}".encode()).hexdigest()
         self._send_lock = asyncio.Lock()
+        self._ws: Any = None
+        self._external_run_ids: dict[str, str] = {}
+        self._last_external_run_ids: dict[str, str] = {}
+        self._external_run_seq: dict[str, int] = {}
+        self._external_event_tasks: set[asyncio.Task[None]] = set()
         self._session_event_log = (
             SessionEventLog(EventStore()) if os.getenv("STUDIOLO_SESSION_EVENTS") == "1" else None
         )
+        self._register_external_event_handlers()
+
+    def _register_external_event_handlers(self) -> None:
+        for adapter in self.adapters.values():
+            if isinstance(adapter, HermesWsAdapter):
+                adapter.on_session_event = self._on_external_session_event
+
+    def _next_external_run_id(self, session_id: str, params: dict[str, Any]) -> str:
+        existing = self._external_run_ids.get(session_id)
+        if existing is not None:
+            return existing
+        turn_started_at: float | None = None
+        hermes = self.adapters.get("hermes")
+        if isinstance(hermes, HermesWsAdapter):
+            with suppress(Exception):
+                turn_started_at = hermes.cached_turn_started_at(session_id)
+        if turn_started_at is None and isinstance(params, dict):
+            payload = params.get("payload")
+            raw_started = params.get("turn_started_at")
+            if raw_started is None and isinstance(payload, dict):
+                raw_started = payload.get("turn_started_at")
+            if type(raw_started) in (int, float) and math.isfinite(raw_started) and raw_started > 0:
+                turn_started_at = float(raw_started)
+        now = time.time()
+        ts = (
+            int(turn_started_at)
+            if isinstance(turn_started_at, (int, float)) and math.isfinite(turn_started_at) and turn_started_at > 0
+            else int(now)
+        )
+        run_id = f"external-{ts}"
+        if run_id == self._last_external_run_ids.get(session_id):
+            now_id = f"external-{int(now)}"
+            if now_id != self._last_external_run_ids.get(session_id):
+                run_id = now_id
+            else:
+                seq = self._external_run_seq.get(session_id, 0) + 1
+                self._external_run_seq[session_id] = seq
+                run_id = f"external-{int(now)}-{seq}"
+        self._external_run_ids[session_id] = run_id
+        self._last_external_run_ids[session_id] = run_id
+        return run_id
+
+    async def _dispatch_external_frame(self, ws: Any, frame: dict[str, Any]) -> None:
+        try:
+            await self._send_ws(ws, frame)
+        except (OSError, websockets.ConnectionClosed):
+            _LOG.debug("External Hermes frame dropped on closed Core websocket")
+        except Exception:
+            _LOG.debug("Failed to forward external Hermes session event", exc_info=True)
+
+    def _on_external_session_event(self, session_id: str, params: dict[str, Any]) -> None:
+        try:
+            if not isinstance(session_id, str) or not session_id.strip() or not isinstance(params, dict):
+                return
+            if ("hermes", session_id) in self._active_runs:
+                return
+            event_type = params.get("type")
+            payload = params.get("payload")
+            if event_type == "message.start":
+                self._next_external_run_id(session_id, params)
+                return
+            if event_type == "session.info" and isinstance(payload, dict):
+                running = payload.get("running")
+                if running is True:
+                    self._next_external_run_id(session_id, params)
+                    return
+                if running is False and session_id not in self._external_run_ids:
+                    return
+            run_id = self._external_run_ids.get(session_id)
+            if run_id is None:
+                if map_external_gateway_event(session_id, params, "__probe__") is None:
+                    return
+                run_id = self._next_external_run_id(session_id, params)
+            frame = map_external_gateway_event(session_id, params, run_id)
+            if frame is None:
+                return
+            if frame["type"] == "Completed":
+                self._external_run_ids.pop(session_id, None)
+            if idle := self._idle_transcripts.get(session_id):
+                idle.last_event_at = time.monotonic()
+            ws = self._ws
+            if ws is None:
+                return
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._dispatch_external_frame(ws, frame))
+            self._external_event_tasks.add(task)
+            task.add_done_callback(self._external_event_tasks.discard)
+        except Exception:
+            _LOG.debug("Skipping invalid external Hermes session event", exc_info=True)
 
     def _load_trust_patterns(self) -> list[str]:
         try:
@@ -667,6 +944,8 @@ class AgentNodeDaemon:
         return {**result, "provider": "hermes"}
 
     async def handle_command(self, ws: Any, frame: dict[str, Any], *, node_id: str | None = None) -> None:
+        if ws is not None:
+            self._ws = ws
         cmd = str(frame.get("type") or "")
         req_id = frame.get("requestId")
         client_conn_id = frame.get("_clientConnId")
@@ -1043,10 +1322,11 @@ class AgentNodeDaemon:
                 if watch_idle and sid:
                     self._idle_transcripts.setdefault(sid, IdleTranscript())
                 key = (provider, sid)
-                probed_running = False
+                probed_state: bool | None = None
                 if key not in self._active_runs and sid and isinstance(adapter, HermesWsAdapter):
                     with suppress(Exception):
-                        probed_running = await adapter.session_running(session_id=sid) is True
+                        probed_state = await adapter.session_running(session_id=sid)
+                probed_running = probed_state is True
                 # A local run can start while the probe is in flight.
                 local_active = key in self._active_runs
                 is_active = local_active or probed_running
@@ -1056,7 +1336,12 @@ class AgentNodeDaemon:
                 run_id = stream.run_id if stream and is_active else None
                 if stream is None and probed_running and isinstance(adapter, HermesWsAdapter):
                     turn_started_at = adapter.cached_turn_started_at(sid)
-                    run_id = f"external-{int(turn_started_at or 0)}"
+                    run_id = self._external_run_ids.get(sid) or f"external-{int(turn_started_at or 0)}"
+                if probed_running and not local_active and run_id and isinstance(adapter, HermesWsAdapter):
+                    self._external_run_ids.setdefault(sid, run_id)
+                    self._last_external_run_ids.setdefault(sid, run_id)
+                elif probed_state is False and not local_active and isinstance(adapter, HermesWsAdapter):
+                    self._external_run_ids.pop(sid, None)
                 latest = stream.sequence if stream else 0
                 stream_id = frame.get("streamId")
                 generation_matches = stream_id in (None, stream.stream_id if stream else None)
@@ -1470,6 +1755,8 @@ class AgentNodeDaemon:
                 self._session_cwds.pop((provider, sid), None)
                 self._session_streams.pop((provider, sid), None)
                 self._session_allowed_commands.pop((provider, sid), None)
+                if provider == "hermes":
+                    self._external_run_ids.pop(sid, None)
                 await self.port_previews.close((provider, sid))
                 await send_back({"type": "SessionDeleted", "provider": provider, "sessionId": sid})
             elif cmd == "session.compact":
@@ -1531,6 +1818,8 @@ class AgentNodeDaemon:
                 if run_key in self._active_runs or run_key in self._compacting_sessions:
                     raise ValueError("当前会话已有任务运行中")
                 self._active_runs.add(run_key)
+                if provider == "hermes":
+                    self._external_run_ids.pop(sid, None)
                 stream = self._session_streams.setdefault(run_key, SessionStream())
                 stream.turn_start = stream.sequence
                 stream.run_id = eff_req_id
@@ -1746,6 +2035,8 @@ class AgentNodeDaemon:
     async def run_once(self) -> None:
         hello = await self.build_hello()
         async with websockets.connect(self.config.ws_url, open_timeout=10.0) as ws:
+            self._ws = ws
+            self._register_external_event_handlers()
             await self._send_ws(ws, {"type": "auth", "token": self.config.node_token, "hello": hello})
             ready = json.loads(await ws.recv())
             if ready.get("type") != "NodeReady":
@@ -1780,13 +2071,16 @@ class AgentNodeDaemon:
                     bg_tasks.add(task)
                     task.add_done_callback(bg_tasks.discard)
             finally:
+                if self._ws is ws:
+                    self._ws = None
                 if isinstance(hermes, HermesAdapter):
                     hermes.on_effort_update = None
                 hb_task.cancel()
                 idle_task.cancel()
-                for t in list(bg_tasks):
+                ext_tasks = list(self._external_event_tasks)
+                for t in (*bg_tasks, *ext_tasks):
                     t.cancel()
-                await asyncio.gather(hb_task, idle_task, *bg_tasks, return_exceptions=True)
+                await asyncio.gather(hb_task, idle_task, *bg_tasks, *ext_tasks, return_exceptions=True)
                 await self.port_previews.close()
 
     async def run_forever(self) -> None:

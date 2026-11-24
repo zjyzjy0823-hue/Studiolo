@@ -593,7 +593,7 @@ def test_external_replay_and_steer_use_gateway_runtime_state(tmp_path, wire_adap
                 ("session.steer", {"session_id": "runtime", "text": "shorten", **steer_generation}),
             ]
             assert not daemon._active_runs and not daemon._session_streams
-            assert not adapter._active and not adapter._sessions
+            assert not adapter._active and set(adapter._sessions) == {"saved"}
         finally:
             await adapter.close()
 
