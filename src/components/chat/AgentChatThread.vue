@@ -1105,16 +1105,22 @@ const effectiveOutbox = computed(() =>
 )
 const waitsForReconnect = computed(() => fleet.wsState !== 'online' || effectiveNode.value?.status !== 'online')
 const receiptStyles = {
-  sending: { icon: 'clock', label: '发送中' },
-  sent: { icon: 'check', label: '已发送' },
-  replied: { icon: 'checks', label: 'Agent 已响应' },
-  failed: { icon: 'alert', label: '发送失败' },
+  uploading: { icon: 'clock', label: '上传中…', statusText: '上传中…' },
+  sending: { icon: 'clock', label: '发送中…', statusText: '发送中…' },
+  sent: { icon: 'check', label: '已发送', statusText: '' },
+  replied: { icon: 'checks', label: 'Agent 已响应', statusText: '' },
+  failed: { icon: 'alert', label: '发送失败', statusText: '发送失败' },
 } as const
 const messageReceipts = computed(() => {
   const replied = repliedUserMessageIds(effectiveMessages.value)
-  return new Map(effectiveMessages.value.filter(row => row.role === 'user').map(row => [
-    row.id, replied.has(row.id) ? 'replied' : row.delivery ?? 'sent',
-  ] as const))
+  return new Map(effectiveMessages.value.filter(row => row.role === 'user').map(row => {
+    const state = replied.has(row.id)
+      ? 'replied'
+      : row.delivery === 'sending' && fleet.isPromptUploading(row.requestId)
+        ? 'uploading'
+        : row.delivery ?? 'sent'
+    return [row.id, state] as const
+  }))
 })
 const effectiveCheckpoints = computed(() =>
   effectiveKey.value ? fleet.checkpointsBySession[effectiveKey.value] ?? [] : [],
@@ -2599,10 +2605,23 @@ async function retryTurn(msg: ChatMessage) {
                       v-if="messageReceipts.get(msg.id)"
                       class="message-receipt"
                       :class="'is-' + messageReceipts.get(msg.id)"
-                      role="img"
+                      :role="receiptStyles[messageReceipts.get(msg.id)!].statusText ? 'status' : 'img'"
                       :aria-label="receiptStyles[messageReceipts.get(msg.id)!].label"
                       :title="receiptStyles[messageReceipts.get(msg.id)!].label"
-                    ><OpusIcon :name="receiptStyles[messageReceipts.get(msg.id)!].icon" /></span>
+                    >
+                      <OpusIcon :name="receiptStyles[messageReceipts.get(msg.id)!].icon" />
+                      <span
+                        v-if="receiptStyles[messageReceipts.get(msg.id)!].statusText"
+                        class="message-receipt-text"
+                      >{{ receiptStyles[messageReceipts.get(msg.id)!].statusText }}</span>
+                    </span>
+                    <button
+                      v-if="messageReceipts.get(msg.id) === 'failed' && msg.text?.trim() && msg.text.trim() !== '[发送了加密文件附件]'"
+                      type="button"
+                      class="message-receipt-retry"
+                      :disabled="sending || isStreaming"
+                      @click="retryTurn(msg)"
+                    >重试</button>
                     <span v-if="msg.text?.trim()" class="user-token-count num" title="估算输入 token">
                       {{ formatTokenCount(estimateTextTokens(msg.text)) }} tok
                     </span>
@@ -5135,13 +5154,27 @@ dialog.img-lightbox::backdrop {
   white-space: nowrap;
 }
 .message-receipt {
-  display: inline-grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
   flex: none;
-  width: 20px;
+  min-width: 20px;
   height: 24px;
 }
 .message-receipt .i { width: 17px; height: 17px; }
+.message-receipt-text { font-size: 11px; line-height: 1; }
+.message-receipt-retry {
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  color: var(--warn, #a84a18);
+  font-size: 11px;
+  line-height: 1;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.message-receipt-retry:disabled { opacity: 0.5; cursor: not-allowed; }
 .message-receipt.is-replied { color: var(--info, #1675c2); }
 .message-receipt.is-failed { color: var(--warn, #a84a18); }
 .user-token-count::before {

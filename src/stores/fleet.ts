@@ -298,6 +298,7 @@ export const useFleetStore = defineStore('fleet', () => {
   const outbox = ref<FleetOutboxItem[]>([])
   const pendingOutboxWrites = new Set<string>()
   const transmittingOutbox = shallowReactive(new Map<string, object>())
+  const uploadingPromptIds = shallowReactive(new Set<string>())
   const attemptedOutboxSteers = new WeakMap<FleetOutboxItem, object>()
   const deliveredOutbox = new Map<string, FleetOutboxItem>()
   const cachedHistoryKeys = new Set<string>()
@@ -656,6 +657,7 @@ export const useFleetStore = defineStore('fleet', () => {
     outbox.value = []
     pendingOutboxWrites.clear()
     transmittingOutbox.clear()
+    uploadingPromptIds.clear()
     deliveredOutbox.clear()
     cachedHistoryKeys.clear()
     messageCachePreviews.clear()
@@ -1245,6 +1247,7 @@ export const useFleetStore = defineStore('fleet', () => {
     contextReads.value = {}
     contextCompactions.value = {}
     transmittingOutbox.clear()
+    uploadingPromptIds.clear()
     for (const finish of projectPermissionWrites.values()) finish(new Error('节点连接已断开'))
     for (const { finish } of pendingSessionWrites.values()) finish(new Error('节点连接已断开'))
     for (const target of pendingSessionLists.values()) sessionListStates.value[target] = {}
@@ -1394,6 +1397,7 @@ export const useFleetStore = defineStore('fleet', () => {
 
   function appendMessage(sKey: string, msg: ChatMessage) {
     const prev = messagesBySession.value[sKey] ?? []
+    if (msg.id && prev.some(row => row.id === msg.id)) return
     const next = prev.length >= MAX_MESSAGES_PER_SESSION
       ? [...prev.slice(prev.length - MAX_MESSAGES_PER_SESSION + 1), msg]
       : [...prev, msg]
@@ -1407,6 +1411,27 @@ export const useFleetStore = defineStore('fleet', () => {
       const next = [...rows]
       next[index] = { ...next[index], delivery }
       messagesBySession.value = { ...messagesBySession.value, [sKey]: next }
+    }
+  }
+
+  function attachPromptArtifacts(sKey: string, requestId: string, artifacts: ArtifactRef[]) {
+    if (!artifacts.length) return
+    const rows = messagesBySession.value[sKey] ?? []
+    const index = rows.findIndex(
+      row => row.role === 'user' && (row.requestId === requestId || row.id === `user-${requestId}`),
+    )
+    if (index === -1) return
+    const next = [...rows]
+    next[index] = { ...next[index], artifacts }
+    messagesBySession.value = { ...messagesBySession.value, [sKey]: next }
+  }
+
+  function removeOptimisticUserMessage(sKey: string, requestId: string) {
+    const rows = messagesBySession.value[sKey]
+    if (!rows?.some(row => row.id === `user-${requestId}`)) return
+    messagesBySession.value = {
+      ...messagesBySession.value,
+      [sKey]: rows.filter(row => row.id !== `user-${requestId}`),
     }
   }
 
@@ -1801,9 +1826,9 @@ export const useFleetStore = defineStore('fleet', () => {
       const pendingPrompt = outbox.value.find(item => item.id === frame.requestId)
       if (pendingPrompt) {
         transmittingOutbox.delete(pendingPrompt.id)
-        const rows = messagesBySession.value[pendingPrompt.sessionKey] ?? []
-        messagesBySession.value = { ...messagesBySession.value, [pendingPrompt.sessionKey]: rows.filter(row => row.id !== `user-${pendingPrompt.id}`) }
+        uploadingPromptIds.delete(pendingPrompt.id)
         if (etype !== 'NodeUnavailable') {
+          updatePromptDelivery(pendingPrompt.sessionKey, pendingPrompt.id, 'failed')
           restoreOutboxDraft(pendingPrompt)
           void removeOutboxPrompt(pendingPrompt)
           lastError.value = frame.message || '发送失败，消息已还原到输入框'
@@ -3536,10 +3561,11 @@ export const useFleetStore = defineStore('fleet', () => {
     options?: RunOptions,
     appendUser = true,
     queued?: FleetOutboxItem,
+    explicitRequestId?: string,
   ) {
     const sess = sessionsByKey.value[sKey]
     if (!sess) throw new Error('目标会话不存在')
-    const reqId = queued?.id ?? createRequestId()
+    const reqId = queued?.id ?? explicitRequestId ?? createRequestId()
     const seed = queued ? undefined : forkSeedBySession.value[sKey]
     const wireText = queued?.wireText ?? preparePromptText(text, seed)
 
@@ -3597,6 +3623,8 @@ export const useFleetStore = defineStore('fleet', () => {
         artifacts: attachments.length ? attachments : undefined,
         createdAt: Date.now(),
       })
+    } else if (appendUser && attachments.length) {
+      attachPromptArtifacts(sKey, reqId, attachments)
     }
   }
 
@@ -3623,10 +3651,15 @@ export const useFleetStore = defineStore('fleet', () => {
     return transmittingOutbox.has(id)
   }
 
+  function isPromptUploading(requestId?: string) {
+    return Boolean(requestId && uploadingPromptIds.has(requestId))
+  }
+
   function cancelDeferredPrompt(id: string) {
     const item = outbox.value.find(row => row.id === id)
     if (!item || transmittingOutbox.has(id)) return false
     restoreOutboxDraft(item)
+    removeOptimisticUserMessage(item.sessionKey, item.id)
     void removeOutboxPrompt(item).then(flushOutbox)
     return true
   }
@@ -3634,10 +3667,14 @@ export const useFleetStore = defineStore('fleet', () => {
   function appendSteerUserMessage(item: FleetOutboxItem) {
     const sKey = item.sessionKey
     const id = `user-${item.id}`
-    if (messagesBySession.value[sKey]?.some(row => row.id === id)) return
+    if (messagesBySession.value[sKey]?.some(row => row.id === id)) {
+      updatePromptDelivery(sKey, item.id, 'sent')
+      return
+    }
     appendMessage(sKey, {
       id,
       role: 'user',
+      requestId: item.id,
       nodeId: item.session.nodeId,
       provider: item.session.provider,
       text: item.text,
@@ -3688,15 +3725,20 @@ export const useFleetStore = defineStore('fleet', () => {
 
       const attempt = {}
       transmittingOutbox.set(item.id, attempt)
+      if (item.files.length) uploadingPromptIds.add(item.id)
       void (async () => {
         try {
-          const attachments = await uploadFilesWithPreview(item.files)
+          const attachments = item.files.length ? await uploadFilesWithPreview(item.files) : []
+          uploadingPromptIds.delete(item.id)
           if (fleetRoute.value !== route || transmittingOutbox.get(item.id) !== attempt) return
+          attachPromptArtifacts(item.sessionKey, item.id, attachments)
           await sendPromptToSession(item.sessionKey, item.text, attachments, item.options, true, item)
         } catch (cause) {
+          uploadingPromptIds.delete(item.id)
           if (fleetRoute.value !== route || transmittingOutbox.get(item.id) !== attempt) return
           transmittingOutbox.delete(item.id)
           if (wsState.value !== 'online' || nodes.value.find(node => node.id === session.nodeId)?.status !== 'online') return
+          updatePromptDelivery(item.sessionKey, item.id, 'failed')
           restoreOutboxDraft(item)
           await removeOutboxPrompt(item)
           lastError.value = cause instanceof Error ? cause.message : '发送失败，消息已还原到输入框'
@@ -3825,30 +3867,99 @@ export const useFleetStore = defineStore('fleet', () => {
     const clean = text.trim()
     if (!clean && !files.length) return
     const body = clean || '[发送了加密文件附件]'
+    const session = sessionsByKey.value[sKey]
+    if (!session) throw new Error('目标会话不存在')
+    const fileList = [...files]
+    const expectLocal = Boolean(storage || (localCacheScope.value && FleetLocalStore.available()))
+    if (!expectLocal) {
+      if (runningBySession.value[sKey]) { enqueuePrompt(sKey, body, fileList, options); return }
+      if (wsState.value !== 'online') throw new Error('当前环境无法加密保存待发送消息')
+    } else {
+      if (outbox.value.length + pendingOutboxWrites.size >= 32) throw new Error('待发送队列已满')
+      if (fileList.reduce((total, file) => total + file.size, 0) > 20 * 1024 * 1024) throw new Error('待发送附件合计不能超过 20 MB')
+    }
+    const id = createRequestId()
+    const createdAt = Date.now()
+    appendMessage(sKey, {
+      id: `user-${id}`,
+      requestId: id,
+      role: 'user',
+      nodeId: session.nodeId,
+      provider: session.provider,
+      text: body,
+      delivery: 'sending',
+      createdAt,
+    })
+    if (fileList.length && !expectLocal) uploadingPromptIds.add(id)
     if (!localCacheRequested.value) {
       localCacheRequested.value = true
       await nextTick()
     }
     const local = storage
-    const session = sessionsByKey.value[sKey]
-    if (!session) throw new Error('目标会话不存在')
     if (!local) {
-      if (runningBySession.value[sKey]) { enqueuePrompt(sKey, body, files, options); return }
-      if (wsState.value !== 'online') throw new Error('当前环境无法加密保存待发送消息')
-      const uploadedRefs = await uploadFilesWithPreview(files)
-      await sendPromptToSession(sKey, body, uploadedRefs, options)
+      if (runningBySession.value[sKey]) {
+        uploadingPromptIds.delete(id)
+        removeOptimisticUserMessage(sKey, id)
+        enqueuePrompt(sKey, body, fileList, options)
+        return
+      }
+      if (wsState.value !== 'online') {
+        uploadingPromptIds.delete(id)
+        removeOptimisticUserMessage(sKey, id)
+        throw new Error('当前环境无法加密保存待发送消息')
+      }
+      const route = fleetRoute.value
+      if (fileList.length) uploadingPromptIds.add(id)
+      void (async () => {
+        try {
+          const uploadedRefs = fileList.length ? await uploadFilesWithPreview(fileList) : []
+          uploadingPromptIds.delete(id)
+          if (fleetRoute.value !== route) return
+          attachPromptArtifacts(sKey, id, uploadedRefs)
+          await sendPromptToSession(sKey, body, uploadedRefs, options, true, undefined, id)
+        } catch (cause) {
+          uploadingPromptIds.delete(id)
+          if (fleetRoute.value !== route) return
+          updatePromptDelivery(sKey, id, 'failed')
+          lastError.value = cause instanceof Error ? cause.message : '消息发送失败'
+        }
+      })()
       return
     }
-    if (outbox.value.length + pendingOutboxWrites.size >= 32) throw new Error('待发送队列已满')
-    if (files.reduce((total, file) => total + file.size, 0) > 20 * 1024 * 1024) throw new Error('待发送附件合计不能超过 20 MB')
-    const id = createRequestId()
+    if (outbox.value.length + pendingOutboxWrites.size >= 32) {
+      uploadingPromptIds.delete(id)
+      removeOptimisticUserMessage(sKey, id)
+      throw new Error('待发送队列已满')
+    }
+    if (fileList.reduce((total, file) => total + file.size, 0) > 20 * 1024 * 1024) {
+      uploadingPromptIds.delete(id)
+      removeOptimisticUserMessage(sKey, id)
+      throw new Error('待发送附件合计不能超过 20 MB')
+    }
     const seed = forkSeedBySession.value[sKey]
-    const item: FleetOutboxItem = { id, sessionKey: sKey, session, text: body, files: [...files], options: options && { ...options },
-      wireText: preparePromptText(body, seed), createdAt: Date.now() }
+    const item: FleetOutboxItem = {
+      id,
+      sessionKey: sKey,
+      session,
+      text: body,
+      files: fileList,
+      options: options && { ...options },
+      wireText: preparePromptText(body, seed),
+      createdAt,
+    }
     pendingOutboxWrites.add(id)
-    try { await local.savePrompt(item) }
-    finally { pendingOutboxWrites.delete(id) }
-    if (storage !== local) throw new Error('对话账号已切换，消息已保存在原账号的待发队列')
+    try {
+      await local.savePrompt(item)
+    } catch (cause) {
+      removeOptimisticUserMessage(sKey, id)
+      throw cause
+    } finally {
+      pendingOutboxWrites.delete(id)
+    }
+    if (storage !== local) {
+      removeOptimisticUserMessage(sKey, id)
+      throw new Error('对话账号已切换，消息已保存在原账号的待发队列')
+    }
     if (seed && forkSeedBySession.value[sKey] === seed) delete forkSeedBySession.value[sKey]
     outbox.value = [...outbox.value, item].sort((left, right) => left.createdAt - right.createdAt)
     void flushOutbox()
@@ -5023,6 +5134,7 @@ export const useFleetStore = defineStore('fleet', () => {
     chatNodes,
     outbox,
     isOutboxTransmitting,
+    isPromptUploading,
     cancelDeferredPrompt,
     runSettings,
     catalogs,
