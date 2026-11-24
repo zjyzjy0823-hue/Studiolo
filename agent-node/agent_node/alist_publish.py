@@ -15,6 +15,7 @@ import base64
 import hashlib
 import hmac
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -103,7 +104,9 @@ class LinkPublisher:
     def remote_name(self, path: Path) -> str:
         stat = path.stat()
         digest = hashlib.sha256(f"{path.name}:{stat.st_size}".encode()).hexdigest()[:8]
-        safe = path.name.replace("/", "_")
+        # File-Path 走 HTTP 头，必须是 ASCII；中文/emoji 文件名要压成安全字符，
+        # 展示名由客户端自己保留，远端用什么名字不影响用户看到的名字。
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", path.name).strip("_") or "file"
         return f"{digest}-{safe}"
 
     def _remote_size(self, remote_path: str) -> int | None:
@@ -136,7 +139,14 @@ class LinkPublisher:
                 }),
                 content=handle,
             )
-        payload = response.json()
+        if response.status_code >= 400:
+            body = response.text[:120].replace("\n", " ") if hasattr(response, "text") else ""
+            raise PublishError(f"上传失败: HTTP {response.status_code} {body}".strip())
+        try:
+            payload = response.json()
+        except ValueError:
+            body = response.text[:120].replace("\n", " ") if hasattr(response, "text") else ""
+            raise PublishError(f"上传响应不是 JSON: {body}") from None
         if payload.get("code") != 200:
             raise PublishError(f"上传失败: {payload.get('message')}")
         if self._remote_size(remote_path) != size:
