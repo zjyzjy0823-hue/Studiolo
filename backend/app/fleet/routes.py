@@ -37,6 +37,8 @@ from .schemas import (
     NodeOut,
     NodePatchInput,
     NodeTokenOut,
+    SessionEventsSinceInput,
+    SessionSnapshotInput,
     SubscriptionQuota,
     TransferEndpoint,
     valid_uuid,
@@ -152,6 +154,37 @@ async def read_subscription_quota(
         return SubscriptionQuota.model_validate(result)
     except ValidationError:
         return SubscriptionQuota(status="unavailable")
+
+
+async def _session_replay_rpc(
+    node_id: str, method: str, payload: SessionSnapshotInput | SessionEventsSinceInput,
+    user: User, db: Session, response: Response,
+) -> dict[str, Any]:
+    workspace = get_personal_workspace(db, user)
+    node = _owned_node(db, workspace.id, node_id)
+    response.headers["Cache-Control"] = "no-store"
+    if node.revoked_at is not None:
+        return {"ok": False, "code": "node_offline", "error": "Target device node is offline"}
+    # Replay payloads are opaque to Core, including the owner-generated epoch and seq.
+    return await fleet_hub.call_node_rpc(
+        workspace.id, node.id, {"type": method, **payload.model_dump(exclude_none=True)}, timeout=45,
+    )
+
+
+@router.post("/nodes/{node_id}/session/snapshot", response_model=None)
+async def session_snapshot(
+    node_id: str, payload: SessionSnapshotInput, response: Response,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return await _session_replay_rpc(node_id, "session.snapshot", payload, user, db, response)
+
+
+@router.post("/nodes/{node_id}/session/events/since", response_model=None)
+async def session_events_since(
+    node_id: str, payload: SessionEventsSinceInput, response: Response,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return await _session_replay_rpc(node_id, "session.events.since", payload, user, db, response)
 
 
 @router.post("/nodes", status_code=201, response_model=NodeTokenOut)
@@ -553,10 +586,11 @@ async def fleet_node_ws(websocket: WebSocket):
                     db.commit()
                 continue
 
-            if evt_type in ("CronRpcResult", "SubscriptionQuotaResult", "HermesMediaResult"):
+            if evt_type in ("CronRpcResult", "SubscriptionQuotaResult", "HermesMediaResult", "SessionReplayResult"):
                 rpc_id = str(frame.get("_rpcId") or "").strip()
-                if rpc_id:
-                    await fleet_hub.resolve_node_rpc(workspace_id, node_id, rpc_id, frame)
+                payload = frame.get("result") if evt_type == "SessionReplayResult" else frame
+                if rpc_id and isinstance(payload, dict):
+                    await fleet_hub.resolve_node_rpc(workspace_id, node_id, rpc_id, payload)
                 continue
 
             if evt_type == "TokenUsage" or (evt_type == "Completed" and isinstance(frame.get("usage"), dict)):

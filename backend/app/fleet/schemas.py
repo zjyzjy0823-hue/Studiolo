@@ -17,6 +17,23 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 MAX_CHUNK_BYTES = 8 * 1024 * 1024  # 单分块上限 8 MiB，防止内存中继缓冲膨胀
 DEFAULT_ARTIFACT_TTL_SECONDS = 7 * 24 * 3600
+MAX_SESSION_SEQ = (1 << 63) - 1
+
+
+class SessionSnapshotInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sessionId: str = Field(min_length=1)
+    provider: AdapterProvider | None = None
+
+
+class SessionEventsSinceInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sessionId: str = Field(min_length=1)
+    epoch: str = Field(min_length=1)
+    lastSeq: int = Field(strict=True, ge=0, le=MAX_SESSION_SEQ)
+    limit: int | None = Field(default=None, strict=True, gt=0, le=MAX_SESSION_SEQ)
 
 
 def validate_endpoint_url(value: str, *, allow_insecure: bool = False) -> str:

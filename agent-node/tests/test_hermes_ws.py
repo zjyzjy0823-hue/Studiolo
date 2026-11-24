@@ -17,10 +17,10 @@ from agent_node.hermes_media import relay_hermes_attachment
 class GatewaySocket:
     """In-memory wire fixture that mixes RPC replies and events on the receive loop."""
 
-    def __init__(self, dispatch, *, canonical):
+    def __init__(self, dispatch, *, canonical, replay_epoch):
         self.dispatch = dispatch
         self.frames = asyncio.Queue()
-        self.event("gateway.ready", {"session_authority": canonical, "replay_epoch": "gateway-epoch"})
+        self.event("gateway.ready", {"session_authority": canonical, "replay_epoch": replay_epoch})
 
     async def __aenter__(self):
         return self
@@ -56,11 +56,11 @@ def wire_adapter(monkeypatch, tmp_path):
     async def credentials(self):
         return self._ws_url, None
 
-    def make(dispatch, *, canonical):
+    def make(dispatch, *, canonical, replay_epoch="gateway-epoch"):
         sockets = []
 
         def connect(*args, **kwargs):
-            socket = GatewaySocket(dispatch, canonical=canonical)
+            socket = GatewaySocket(dispatch, canonical=canonical, replay_epoch=replay_epoch)
             sockets.append(socket)
             return socket
 

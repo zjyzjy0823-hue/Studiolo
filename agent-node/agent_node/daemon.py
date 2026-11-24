@@ -3,7 +3,7 @@
 import asyncio
 from collections import OrderedDict, deque
 from contextlib import closing, suppress
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from hashlib import sha256
 import json
 import logging
@@ -25,6 +25,7 @@ import websockets
 from .adapters.base import AgentAdapter, ApprovalCallback, EventEmitter
 from .adapters.hermes import HermesAdapter
 from .adapters.hermes_ws import HermesWsAdapter
+from .adapters.jsonrpc import JsonRpcError
 from .adapters.registry import build_adapter_registry
 from .alist_publish import LinkPublisher, PublishResult
 from .audit import audit_event
@@ -33,7 +34,7 @@ from .crypto_chunks import generate_file_key
 from .hermes_media import CAPABILITY as HERMES_MEDIA_CAPABILITY, MediaError, relay_hermes_attachment
 from .terminal_session import TerminalManager
 from .port_preview import PortPreviewManager
-from .session_events import EventStore, PromptEvents, SessionEventLog
+from .session_events import MAX_SESSION_SEQ, EventStore, PromptEvents, SessionEventLog
 from .transfer import (
     DirectArtifactStore,
     create_direct_transfer_app,
@@ -520,6 +521,62 @@ class AgentNodeDaemon:
         await self._send_ws(ws, evt)
         return artifact_ref
 
+    async def _read_session_replay(self, frame: dict[str, Any]) -> dict[str, Any]:
+        log = self._session_event_log
+        if log is None:
+            return {"code": "unsupported", "source": "node"}
+
+        is_snapshot = frame["type"] == "session.snapshot"
+        session_id = frame.get("sessionId")
+        provider = frame.get("provider") if is_snapshot else None
+        if not isinstance(session_id, str) or not session_id.strip():
+            return {"code": "invalid_params", "source": "node"}
+        if provider is not None and (not isinstance(provider, str) or not provider.strip()):
+            return {"code": "invalid_params", "source": "node"}
+        epoch, last_seq, limit = None, 0, 500
+        if not is_snapshot:
+            epoch, last_seq, limit = frame.get("epoch"), frame.get("lastSeq"), frame.get("limit", 500)
+            if (not isinstance(epoch, str) or not epoch.strip()
+                    or type(last_seq) is not int or not 0 <= last_seq <= MAX_SESSION_SEQ
+                    or type(limit) is not int or not 0 < limit <= MAX_SESSION_SEQ):
+                return {"code": "invalid_params", "source": "node"}
+
+        hermes = self.adapters.get("hermes")
+        recorded_epoch = None
+        if provider is None:
+            owner = await asyncio.to_thread(log.store.session_owner, session_id, epoch or log.epoch)
+            if owner is not None:
+                recorded_epoch, provider = owner
+            else:
+                provider = next((p for p, sid in self._session_cwds if sid == session_id), None)
+            if provider is None and epoch != log.epoch and isinstance(hermes, HermesWsAdapter):
+                # An unrecorded Hermes session may have been opened by another gateway client.
+                provider = "hermes"
+
+        result = {"sessionId": session_id, "source": "node"}
+        if provider == "hermes" and isinstance(hermes, HermesWsAdapter):
+            try:
+                async with asyncio.timeout(40):
+                    replay = await hermes.read_session_replay(session_id, epoch=epoch, last_seq=last_seq, limit=limit)
+            except PathOutsideAllowedRootsError:
+                return {**result, "source": "gateway", "code": "path_not_allowed"}
+            except (OSError, TimeoutError, websockets.WebSocketException, JsonRpcError):
+                return {**result, "source": "gateway", "code": "gateway_replay_error"}
+            except (KeyError, TypeError, ValueError):
+                _LOG.exception("Invalid Hermes session replay response")
+                return {**result, "source": "gateway", "code": "gateway_replay_error"}
+            if replay is not None:
+                return replay
+
+        if epoch is None:
+            snapshot = await asyncio.to_thread(log.store.snapshot, session_id, log.epoch)
+            return {**result, "epoch": log.epoch, "lastSeq": snapshot.lastSeq, "snapshot": asdict(snapshot)}
+        if epoch not in (log.epoch, recorded_epoch):
+            # Neither an unknown epoch nor a gateway cursor belongs to this node log.
+            return {**result, "epoch": log.epoch, "events": [], "hasMore": False, "snapshotRequired": True}
+        events = await asyncio.to_thread(log.store.events_since, session_id, epoch, last_seq, min(limit + 1, MAX_SESSION_SEQ))
+        return {**result, "epoch": epoch, "events": events[:limit], "hasMore": len(events) > limit}
+
     async def handle_command(self, ws: Any, frame: dict[str, Any], *, node_id: str | None = None) -> None:
         cmd = str(frame.get("type") or "")
         req_id = frame.get("requestId")
@@ -534,6 +591,18 @@ class AgentNodeDaemon:
             if req_id and "requestId" not in payload:
                 payload["requestId"] = req_id
             await self._send_ws(ws, payload)
+
+        if cmd in ("session.snapshot", "session.events.since"):
+            rpc_id = frame.get("_rpcId")
+            if not isinstance(rpc_id, str) or not rpc_id:
+                return
+            try:
+                result = await self._read_session_replay(frame)
+            except (OSError, sqlite3.Error, ValueError):
+                _LOG.exception("Cannot read node session event log")
+                result = {"code": "node_execution_error", "source": "node"}
+            await send_back({"type": "SessionReplayResult", "_rpcId": rpc_id, "result": result})
+            return
 
         if cmd == "hermes.media.relay":
             rpc_id = frame.get("_rpcId")

@@ -126,6 +126,7 @@ ALLOWED_NODE_EVENTS = frozenset({
     "CronRpcResult",
     "SubscriptionQuotaResult",
     "HermesMediaResult",
+    "SessionReplayResult",
 })
 
 

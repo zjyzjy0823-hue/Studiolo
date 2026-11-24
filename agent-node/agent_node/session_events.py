@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
+from itertools import groupby
 import json
 import os
 from pathlib import Path
@@ -34,7 +35,7 @@ _EVENT_TYPES = frozenset({
 })
 _TURN_TYPES = _EVENT_TYPES - {"session.created", "session.running", "notice", "snapshot.ready"}
 _NODE_EPOCH = str(uuid4())
-_MAX_SQLITE_INT = (1 << 63) - 1
+MAX_SESSION_SEQ = (1 << 63) - 1
 
 
 def validate_event(event: SessionEvent) -> None:
@@ -51,9 +52,9 @@ def validate_event(event: SessionEvent) -> None:
             raise ValueError("turnId is required for turn-scoped events")
     elif not isinstance(turn_id, str) or not turn_id.strip():
         raise ValueError("turnId must be a nonempty string or null")
-    if type(event["seq"]) is not int or not 0 < event["seq"] <= _MAX_SQLITE_INT:
+    if type(event["seq"]) is not int or not 0 < event["seq"] <= MAX_SESSION_SEQ:
         raise ValueError("seq must be a positive SQLite integer")
-    if type(event["at"]) is not int or not 0 <= event["at"] <= _MAX_SQLITE_INT:
+    if type(event["at"]) is not int or not 0 <= event["at"] <= MAX_SESSION_SEQ:
         raise ValueError("at must be a nonnegative Unix timestamp in milliseconds")
     if not isinstance(event["payload"], dict):
         raise ValueError("payload must be a JSON object")
@@ -166,6 +167,8 @@ class EventStore:
     ) -> list[SessionEvent]:
         if type(limit) is not int or limit <= 0:
             raise ValueError("limit must be a positive integer")
+        if not self.path.exists():
+            return []
         with self._connection() as db:
             rows = db.execute(
                 """SELECT session_id, epoch, seq, turn_id, participant_id, type, payload, at
@@ -178,6 +181,27 @@ class EventStore:
                          type=kind, payload=json.loads(payload), at=at)
             for sid, ep, seq, turn, participant, kind, payload, at in rows
         ]
+
+    def session_owner(self, session_id: str, preferred_epoch: str) -> tuple[str, str] | None:
+        if not self.path.exists():
+            return None
+        with self._connection() as db:
+            row = db.execute(
+                """SELECT epoch, participant_id FROM session_events WHERE session_id = ? AND epoch = ?
+                   ORDER BY seq DESC LIMIT 1""",
+                (session_id, preferred_epoch),
+            ).fetchone()
+            if row is None:
+                row = db.execute(
+                    """SELECT epoch, participant_id FROM session_events WHERE session_id = ?
+                       ORDER BY at DESC, seq DESC LIMIT 1""",
+                    (session_id,),
+                ).fetchone()
+        return row
+
+    def snapshot(self, session_id: str, epoch: str) -> "Snapshot":
+        # A single SQLite read fixes the snapshot boundary even while frames are being appended.
+        return fold(self.events_since(session_id, epoch, 0, limit=MAX_SESSION_SEQ))
 
     def max_seq(self, session_id: str, epoch: str) -> int:
         with self._connection() as db:
@@ -207,12 +231,6 @@ class Snapshot:
 
 def fold(events: Iterable[SessionEvent]) -> Snapshot:
     """Fold one session and epoch. Identical event keys are applied once."""
-    snapshot = Snapshot()
-    turns: dict[str, dict[str, Any]] = {}
-    assistants: dict[str, dict[str, Any]] = {}
-    calls: dict[tuple[str, str], dict[str, Any]] = {}
-    approvals: dict[tuple[str, str], dict[str, Any]] = {}
-    completed_text: set[tuple[str, str]] = set()
     log_key: tuple[str, str] | None = None
     ordered = []
     for event in events:
@@ -223,9 +241,20 @@ def fold(events: Iterable[SessionEvent]) -> Snapshot:
         log_key = key
         ordered.append(event)
 
-    for event in sorted(ordered, key=lambda event: event["seq"]):
-        if event["seq"] == snapshot.lastSeq:
-            continue
+    groups = groupby(sorted(ordered, key=lambda event: event["seq"]), key=lambda event: event["seq"])
+    return fold_ordered(next(group) for _, group in groups)
+
+
+def fold_ordered(events: Iterable[SessionEvent]) -> Snapshot:
+    """Apply ordered projections. A native frame can contribute several updates at the same seq."""
+    snapshot = Snapshot()
+    turns: dict[str, dict[str, Any]] = {}
+    assistants: dict[str, dict[str, Any]] = {}
+    calls: dict[tuple[str, str], dict[str, Any]] = {}
+    approvals: dict[tuple[str, str], dict[str, Any]] = {}
+    completed_text: set[tuple[str, str]] = set()
+
+    for event in events:
         snapshot.lastSeq = event["seq"]
         kind, turn_id = event["type"], event["turnId"]
         payload = deepcopy(event["payload"])
