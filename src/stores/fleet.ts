@@ -537,11 +537,34 @@ export const useFleetStore = defineStore('fleet', () => {
     delete activityUnavailableBySession.value[sKey]
   }
 
+  function downgradeRunningTools(list: readonly ChatMessage[]): ChatMessage[] {
+    if (!list.some(msg => msg.toolCalls?.some(tool => tool.status === 'running'))) return list as ChatMessage[]
+    return list.map(msg => (
+      msg.toolCalls?.some(tool => tool.status === 'running')
+        ? {
+            ...msg,
+            toolCalls: msg.toolCalls.map(tool => (
+              tool.status === 'running' ? { ...tool, status: 'completed' } : tool
+            )),
+          }
+        : msg
+    ))
+  }
+
+  function settleSessionRunningTools(sKey: string) {
+    const list = messagesBySession.value[sKey]
+    if (!list) return
+    const next = downgradeRunningTools(list)
+    if (next !== list) messagesBySession.value = { ...messagesBySession.value, [sKey]: next }
+  }
+
   watch(() => Object.keys(runningBySession.value), (running, previous) => {
-    if (intentionalClose) return
     const active = new Set(running)
     for (const sKey of previous) {
-      if (!active.has(sKey)) void refreshSessionActivity(sKey, true)
+      if (!active.has(sKey)) {
+        settleSessionRunningTools(sKey)
+        if (!intentionalClose) void refreshSessionActivity(sKey, true)
+      }
     }
   }, { flush: 'sync' })
 
@@ -781,16 +804,17 @@ export const useFleetStore = defineStore('fleet', () => {
         if (!sessionsByKey.value[id]) sessionsByKey.value[id] = value.session
         if (syncMode === 'epoch' && (messageCachePreviews.has(id) || historyStateBySession.value[id]?.state === 'empty')) continue
         const existing = messagesBySession.value[id]
+        const cachedMessages = downgradeRunningTools(value.messages)
         if (!existing?.length) {
-          const rows = syncMode === 'epoch' ? value.messages
+          const rows = syncMode === 'epoch' ? cachedMessages
             .map(message => ({ ...message, ...normalizeEpochMessageContent(message) }))
-            .filter(hasEpochMessageContent) : value.messages
+            .filter(hasEpochMessageContent) : cachedMessages
           cachedHistoryKeys.add(id)
           messagesBySession.value[id] = rows
-        } else if (value.messages.some(row => row.systemEvents?.length || row.interrupted)) {
+        } else if (cachedMessages.some(row => row.systemEvents?.length || row.interrupted)) {
           messagesBySession.value = {
             ...messagesBySession.value,
-            [id]: mergeHistoryBoundaries(value.messages, existing).slice(-MAX_MESSAGES_PER_SESSION),
+            [id]: mergeHistoryBoundaries(cachedMessages, existing).slice(-MAX_MESSAGES_PER_SESSION),
           }
         }
       }
@@ -2784,10 +2808,10 @@ export const useFleetStore = defineStore('fleet', () => {
         ...msg,
         streaming: false,
         liveProgress: undefined,
-        toolCalls: msg.toolCalls?.map(tool => tool.status === 'running' ? { ...tool, status: 'error', error: '本轮已结束，工具未返回最终状态' } : tool),
         ...(durationMs !== undefined ? { durationMs } : {}),
         ...(modelLabel ? { modelLabel } : {}),
       }))
+      settleSessionRunningTools(sKey)
       if (frame.usage && typeof frame.usage === 'object') {
         const usage = { ...(frame.usage as TokenUsageInput), runId: frame.runId, requestId: frame.requestId }
         recordedUsage.record(sKey, usage, frame.seq)
@@ -2933,9 +2957,9 @@ export const useFleetStore = defineStore('fleet', () => {
         liveProgress: undefined,
         ...(failedPrompt?.startedAt ? { durationMs: Math.max(0, Date.now() - failedPrompt.startedAt) } : {}),
         ...(frame.code === 'cancelled' || frame.code === 'stream_closed' ? { interrupted: true } : {}),
-        toolCalls: msg.toolCalls?.map(tool => tool.status === 'running' ? { ...tool, status: 'error', error: errText } : tool),
         error: errText,
       }))
+      settleSessionRunningTools(sKey)
       if (frame.runId) pendingRunPrompts.delete(`${sKey}::${frame.runId}`)
       if (frame.requestId) pendingRunPrompts.delete(`${sKey}::${frame.requestId}`)
       const copy = { ...runningBySession.value }

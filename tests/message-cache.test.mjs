@@ -106,6 +106,54 @@ test('message cache silently falls back when IndexedDB throws and skips unavaila
   await assert.doesNotReject(disabled.remove(scope, 'session'))
 })
 
+test('message cache downgrades persisted running tools to completed and preserves terminal statuses', async () => {
+  const { cache, storage } = fixture()
+  const recordKey = JSON.stringify([scope, 'raw-session'])
+  storage.setItem('studiolo.messageCache.v1', JSON.stringify({
+    [recordKey]: {
+      updatedAt: 100,
+      lastSeq: 5,
+      epoch: 'epoch-1',
+      messages: [{
+        id: 'm-raw',
+        role: 'assistant',
+        text: '缓存正文',
+        at: 100,
+        streaming: false,
+        toolCalls: [
+          { id: 't-run', name: 'shell', status: 'running' },
+          { id: 't-done', name: 'read', status: 'completed' },
+          { id: 't-ok', name: 'grep', status: 'success' },
+          { id: 't-err', name: 'write', status: 'error' },
+        ],
+      }],
+    },
+  }))
+
+  for (const mode of ['legacy', 'epoch']) {
+    const read = await cache.read(scope, 'raw-session', mode)
+    assert.deepEqual(
+      read.messages[0].toolCalls.map(tool => [tool.id, tool.status]),
+      [['t-run', 'completed'], ['t-done', 'completed'], ['t-ok', 'success'], ['t-err', 'error']],
+    )
+  }
+
+  await cache.write(scope, 'written-session', [{
+    ...message,
+    id: 'm-write',
+    toolCalls: [
+      { id: 'w-run', name: 'shell', status: 'running' },
+      { id: 'w-done', name: 'read', status: 'completed' },
+      { id: 'w-err', name: 'write', status: 'error' },
+    ],
+  }], 6, null)
+  const written = await cache.read(scope, 'written-session')
+  assert.deepEqual(
+    written.messages[0].toolCalls.map(tool => [tool.id, tool.status]),
+    [['w-run', 'completed'], ['w-done', 'completed'], ['w-err', 'error']],
+  )
+})
+
 test('message cache switch off skips cache reads and writes', async () => {
   const accessed = []
   const cache = createMessageCache({

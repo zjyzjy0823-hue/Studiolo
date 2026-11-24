@@ -45,7 +45,12 @@ function cacheTool(call: ToolCallBadge): CachedToolCall {
   return {
     id: cleanText(call.id), name: cleanText(call.name), title: optionalText(call.title),
     toolKind: optionalText(call.toolKind),
-    status: status === 'completed' || status === 'success' || status === 'error' ? status : undefined,
+    // Persisted running status is not evidence of current tool activity.
+    status: status === 'running'
+      ? 'completed'
+      : status === 'completed' || status === 'success' || status === 'error'
+        ? status
+        : undefined,
     durationMs: Number.isFinite(call.durationMs) ? call.durationMs : undefined,
   }
 }
