@@ -44,6 +44,43 @@ test('epoch snapshots preserve every tool in the existing work log with client s
   assert.equal(mapEpochSnapshotMessage({ ...row, durationMs: 1234 }, context).durationMs, 1234)
 })
 
+test('Fleet filters empty assistant turns at epoch projection', async t => {
+  const server = await createServer({
+    configFile: false,
+    server: { middlewareMode: true, ws: false, watch: null },
+    optimizeDeps: { noDiscovery: true },
+  })
+  t.after(() => server.close())
+  const { useFleetStore, sessionKey } = await server.ssrLoadModule('/src/stores/fleet.ts')
+  const previousStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+    getItem: key => ({ 'studiolo:access-token': 'token', 'studiolo.syncMode': 'epoch' })[key] ?? null,
+    removeItem() {},
+  } })
+  t.after(() => {
+    if (previousStorage) Object.defineProperty(globalThis, 'localStorage', previousStorage)
+    else delete globalThis.localStorage
+  })
+  const pinia = createPinia()
+  t.after(() => disposePinia(pinia))
+  const fleet = useFleetStore(pinia)
+  const session = { nodeId: 'node', provider: 'codex', sessionId: 'empty', title: '测试', cwd: '' }
+  const key = sessionKey(session.nodeId, session.provider, session.sessionId)
+  fleet.sessionsByKey = { [key]: session }
+  fleet.wsState = 'online'
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ ...opened(), snapshot: {
+    lastSeq: 2,
+    messages: [
+      { role: 'assistant', turnId: 'empty', text: '', toolCalls: [], thought: '' },
+      { role: 'assistant', turnId: 'whitespace', text: ' ', parts: [{ type: 'thought', text: '\n ' }] },
+    ],
+  } }))
+  assert.equal(fleet.subscribeSession(key), true)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(fleet.messagesBySession[key], [])
+  assert.equal(fleet.historyStateBySession[key]?.state, 'empty')
+})
+
 test('epoch message duration omits missing or nonpositive values and keeps the existing format', () => {
   for (const durationMs of [undefined, null, 0, -1, NaN, Infinity]) {
     assert.equal(formatWorkLogDuration(durationMs), '')
@@ -245,6 +282,13 @@ test('Fleet opts in on its auth frame and falls back for only the incomplete ses
   assert.equal((html.match(/class="tool-card is-/g) ?? []).length, 2)
   assert.match(html, /工作步骤/)
   assert.doesNotMatch(html, /用时/)
+  const renderTransition = syncMode => renderToString(createSSRApp(WorkLog, {
+    steps: [{ type: 'thought', text: '有思考', id: 'thought' }], epochSnapshot: false, syncMode,
+  }).use(pinia))
+  const transition = await renderTransition('epoch')
+  assert.match(transition, /工作步骤/)
+  assert.doesNotMatch(transition, /用时未记录/)
+  assert.match(await renderTransition('legacy'), /用时未记录/)
   const withoutToolDuration = await renderLog(undefined, { stepId: log.steps[0].id })
   assert.match(withoutToolDuration, /fixture output/)
   assert.doesNotMatch(withoutToolDuration, /class="num"/)

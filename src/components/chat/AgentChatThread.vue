@@ -1052,7 +1052,8 @@ const assistantTurns = computed(() => {
     return [msg.id, {
       items,
       lastWorkLogId: workLogs.at(-1)?.id,
-      standaloneDuration: msg.epochSnapshot && !workLogs.length ? formatWorkLogDuration(msg.durationMs) : '',
+      standaloneDuration: (fleet.syncMode === 'epoch' || msg.epochSnapshot) && !workLogs.length
+        ? formatWorkLogDuration(msg.durationMs) : '',
       testResult: msg.streaming ? undefined : readTurnTestResult(msg.toolCalls),
     }]
   }))
@@ -2408,7 +2409,8 @@ async function retryTurn(msg: ChatMessage) {
       @mouseup="handleMessageSelection"
       @keyup="handleMessageSelection"
     >
-      <div ref="innerListEl" :class="mobile ? 'mmsgs-inner' : 'msgs-inner'">
+      <div v-if="effectiveMessages.length || !fleet.isRestoringEpochCache(effectiveKey)"
+        ref="innerListEl" :class="mobile ? 'mmsgs-inner' : 'msgs-inner'">
         <div v-if="historyState?.state === 'error'" class="older-history-bar" role="status">
           <span>{{ historyState.message }}</span>
           <button v-if="effectiveKey && fleet.wsState === 'online'" type="button" class="older-history-btn"
@@ -2592,6 +2594,7 @@ async function retryTurn(msg: ChatMessage) {
                           :progress="item.progress"
                           :duration-ms="assistantTurns.get(msg.id)?.lastWorkLogId === item.id ? msg.durationMs : undefined"
                           :epoch-snapshot="msg.epochSnapshot"
+                          :sync-mode="fleet.syncMode"
                           :reveal="revealedWorkLog?.logId === item.id ? revealedWorkLog : undefined"
                           @open-file="fp => emit('openFile', fp)"
                           @open-subagent="sid => emit('openSubagent', sid)"

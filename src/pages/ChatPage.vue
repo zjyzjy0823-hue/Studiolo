@@ -1541,6 +1541,7 @@ function organizeMobileSession(placement: SessionOrganization['placement'], pin 
     pinned: pin ? !mobileManagedOrganization.value.pinned : previous?.pinned,
     ...(placement === 'snoozed' ? { until: pin ? previous?.until : now + hours * 3_600_000 } : {}),
   })
+  if (placement === 'archived') fleet.removeSessionMessageCache(key)
   mobileManageDialog.value?.close()
   const message = pin ? (previous?.pinned ? '已取消置顶' : '已置顶会话')
     : { active: '已恢复会话', snoozed: '已暂缓会话', settled: '已整理会话', archived: '已归档会话' }[placement]
@@ -1553,6 +1554,7 @@ function undoMobileOrganization() {
   const change = undoOrganization.value
   if (!change) return
   organization.set(change.key, change.previous)
+  if (change.previous?.placement === 'archived') fleet.removeSessionMessageCache(change.key)
   clearTimeout(undoOrganizationTimer)
   undoOrganization.value = undefined
 }

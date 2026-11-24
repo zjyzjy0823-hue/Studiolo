@@ -4,14 +4,16 @@
 
 import { defineStore } from 'pinia'
 import { Channel, invoke } from '@tauri-apps/api/core'
-import { computed, nextTick, onScopeDispose, ref, shallowReactive, watch } from 'vue'
+import { computed, nextTick, onScopeDispose, ref, shallowReactive, toRaw, watch } from 'vue'
 import { apiRequest, ApiError } from '../api/client'
 import { androidInvoke, isAndroidLocal } from '../desktop/androidLocal'
 import { desktopPlatform } from '../desktop/platform'
 import { decodeBase64Url, downloadAndDecryptBlob, encryptAndUploadFile } from '../services/blobTransfer'
 import { normalizeCoreOrigin } from '../services/fleetUrl'
 import { FleetLocalStore, type FleetOutboxItem } from '../services/fleetLocal'
-import { mapEpochSnapshotMessage, type EpochSnapshotMessage } from '../services/epochSnapshot'
+import { messageCache, type MessageCacheRecord } from '../services/messageCache'
+import { isSessionArchived } from '../composables/useSessionOrganization'
+import { hasEpochMessageContent, mapEpochSnapshotMessage, normalizeEpochMessageContent, type EpochSnapshotMessage } from '../services/epochSnapshot'
 import { createSessionSync, readSyncMode } from '../services/sessionSync'
 import {
   buildFleetWsUrl,
@@ -276,6 +278,10 @@ export const useFleetStore = defineStore('fleet', () => {
   const attemptedOutboxSteers = new WeakMap<FleetOutboxItem, object>()
   const deliveredOutbox = new Map<string, FleetOutboxItem>()
   const cachedHistoryKeys = new Set<string>()
+  const messageCachePreviews = new Map<string, Set<ChatMessage>>()
+  const messageCacheReads = shallowReactive(new Map<string, Promise<boolean>>())
+  const messageCacheWrites = new Map<string, { messages: ChatMessage[]; cursor: Pick<MessageCacheRecord, 'lastSeq' | 'epoch'> }>()
+  let messageCacheTimer: ReturnType<typeof setTimeout> | undefined
   const cachedHistoryTimes = new Map<string, number>()
   const queuedHistoryWrites = new Set<string>()
   let historyTimer: ReturnType<typeof setTimeout> | undefined
@@ -516,6 +522,11 @@ export const useFleetStore = defineStore('fleet', () => {
     transmittingOutbox.clear()
     deliveredOutbox.clear()
     cachedHistoryKeys.clear()
+    messageCachePreviews.clear()
+    messageCacheReads.clear()
+    messageCacheWrites.clear()
+    clearTimeout(messageCacheTimer)
+    messageCacheTimer = undefined
     cachedHistoryTimes.clear()
     queuedHistoryWrites.clear()
     clearTimeout(historyTimer)
@@ -610,7 +621,12 @@ export const useFleetStore = defineStore('fleet', () => {
     wsState.value = 'disconnected'
   }
 
-  onScopeDispose(disconnectSocket)
+  onScopeDispose(() => {
+    disconnectSocket()
+    messageCacheReads.clear()
+    messageCacheWrites.clear()
+    clearTimeout(messageCacheTimer)
+  })
 
   // 当用户登出或 JWT 变更时立即清空所有内存会话与 E2EE 密钥
   watch(
@@ -648,10 +664,14 @@ export const useFleetStore = defineStore('fleet', () => {
       for (const { id, value } of cached.value) {
         cachedHistoryTimes.set(id, value.savedAt)
         if (!sessionsByKey.value[id]) sessionsByKey.value[id] = value.session
+        if (syncMode === 'epoch' && (messageCachePreviews.has(id) || historyStateBySession.value[id]?.state === 'empty')) continue
         const existing = messagesBySession.value[id]
         if (!existing?.length) {
+          const rows = syncMode === 'epoch' ? value.messages
+            .map(message => ({ ...message, ...normalizeEpochMessageContent(message) }))
+            .filter(hasEpochMessageContent) : value.messages
           cachedHistoryKeys.add(id)
-          messagesBySession.value[id] = value.messages
+          messagesBySession.value[id] = rows
         } else if (value.messages.some(row => row.systemEvents?.length || row.interrupted)) {
           messagesBySession.value = {
             ...messagesBySession.value,
@@ -692,7 +712,7 @@ export const useFleetStore = defineStore('fleet', () => {
   watch(messagesBySession, (rows, previous) => {
     if (!storage) return
     for (const [key, messages] of Object.entries(rows)) {
-      if (messages !== previous[key] && messages.length && !cachedHistoryKeys.has(key)) queuedHistoryWrites.add(key)
+      if (messages !== previous[key] && messages.length && !cachedHistoryKeys.has(key) && !messageCachePreviews.has(key)) queuedHistoryWrites.add(key)
     }
     if (queuedHistoryWrites.size && !historyTimer) historyTimer = setTimeout(persistHistory, 500)
   })
@@ -708,7 +728,7 @@ export const useFleetStore = defineStore('fleet', () => {
         if (storage !== local) return
         const session = sessionsByKey.value[key]
         const rows = messagesBySession.value[key]
-        if (!session || !rows?.length) continue
+        if (!session || !rows?.length || messageCachePreviews.has(key)) continue
         await local.saveHistory(key, session, rows)
         cachedHistoryTimes.set(key, Date.now())
       }
@@ -719,6 +739,70 @@ export const useFleetStore = defineStore('fleet', () => {
         cachedHistoryTimes.delete(key)
       }
     }).catch(() => { /* The provider remains the source of online history. */ })
+  }
+
+  function restoreMessageCache(sKey: string, session: Pick<ChatSession, 'nodeId' | 'provider'> | undefined = sessionsByKey.value[sKey]) {
+    const scope = localCacheScope.value
+    if (!session || !scope || messagesBySession.value[sKey]?.length ||
+      !messageCache.enabled() || isSessionArchived(scope, sKey)) return
+    const pending = messageCacheReads.get(sKey)
+    if (pending) return pending
+    const read = messageCache.read(scope, sKey, syncMode).then(record => {
+      if (messageCacheReads.get(sKey) !== read || localCacheScope.value !== scope) return false
+      messageCacheReads.delete(sKey)
+      if (record?.messages.length && !messagesBySession.value[sKey]?.length && !messageCacheWrites.has(sKey) &&
+        messageCache.enabled() && !isSessionArchived(scope, sKey)) {
+        const hydrated = record.messages.map(({ at, ...message }) => ({
+          ...message, createdAt: at, nodeId: session.nodeId, provider: session.provider,
+          ...(syncMode === 'epoch' && record.epoch ? { epochSnapshot: true as const } : {}),
+        }))
+        const rows = syncMode === 'epoch' ? hydrated.filter(hasEpochMessageContent) : hydrated
+        if (rows.length) {
+          messageCachePreviews.set(sKey, new Set(rows))
+          messagesBySession.value = { ...messagesBySession.value, [sKey]: rows }
+        }
+      }
+      return true
+    })
+    messageCacheReads.set(sKey, read)
+    return read
+  }
+
+  function isRestoringEpochCache(sKey: string) {
+    return syncMode === 'epoch' && messageCacheReads.has(sKey)
+  }
+
+  function queueMessageCacheWrite(sKey: string, messages: ChatMessage[],
+    cursor: Pick<MessageCacheRecord, 'lastSeq' | 'epoch'> = { lastSeq: lastSeqBySession.value[sKey] ?? 0, epoch: null },
+  ) {
+    const scope = localCacheScope.value
+    if (!scope || !sessionsByKey.value[sKey] || !messageCache.enabled() || isSessionArchived(scope, sKey)) return
+    messageCacheWrites.set(sKey, { messages, cursor })
+    messageCacheTimer ??= setTimeout(() => {
+      messageCacheTimer = undefined
+      if (localCacheScope.value === scope) {
+        for (const [key, { messages, cursor }] of messageCacheWrites) {
+          const settled = messages.filter(row => !row.streaming && !row.interrupted && !row.error &&
+            row.delivery !== 'sending' && row.delivery !== 'failed')
+          const rows = syncMode === 'epoch' ? settled.map(row => ({ ...row, ...normalizeEpochMessageContent(row) })) : settled
+          void messageCache.write(scope, key, rows, cursor.lastSeq, cursor.epoch)
+        }
+      }
+      messageCacheWrites.clear()
+    }, 500)
+  }
+
+  function removeSessionMessageCache(sKey: string) {
+    messageCacheReads.delete(sKey)
+    messageCacheWrites.delete(sKey)
+    const preview = messageCachePreviews.get(sKey)
+    if (preview) {
+      messageCachePreviews.delete(sKey)
+      messagesBySession.value = { ...messagesBySession.value,
+        [sKey]: (messagesBySession.value[sKey] ?? []).filter(row => !preview.has(toRaw(row))) }
+    }
+    const scope = localCacheScope.value
+    if (scope) void messageCache.remove(scope, sKey)
   }
 
   // ---------------- REST Node Lifecycle ----------------
@@ -1457,7 +1541,7 @@ export const useFleetStore = defineStore('fleet', () => {
     }
   }
 
-  function applyWsEvent(frame: FleetWsEvent, epochMessages?: ChatMessage[]) {
+  function applyWsEvent(frame: FleetWsEvent, epochMessages?: ChatMessage[], cacheCursor?: Pick<MessageCacheRecord, 'lastSeq' | 'epoch'>) {
     const etype = frame.type
     const seq = frame.seq ?? frame.sequence
     pushAudit({
@@ -1501,7 +1585,9 @@ export const useFleetStore = defineStore('fleet', () => {
       for (const key of new Set([activeSessionKey.value, ...Object.keys(runningBySession.value), ...snapshotFollowIntent.keys(), ...[...streamStateBySession].filter(([, state]) => state.phase !== 'live').map(([key]) => key)])) {
         if (key) subscribeSession(key)
       }
-      if (activeSessionKey.value) loadSessionHistory(activeSessionKey.value, cachedHistoryKeys.has(activeSessionKey.value))
+      if (syncMode === 'legacy' && activeSessionKey.value) {
+        loadSessionHistory(activeSessionKey.value, cachedHistoryKeys.has(activeSessionKey.value))
+      }
       void flushOutbox()
       return
     }
@@ -1842,20 +1928,27 @@ export const useFleetStore = defineStore('fleet', () => {
       } else if (!frame.beforeCursor) {
         historyStateBySession.value[k] = { state: 'empty' }
       }
-      const existing = messagesBySession.value[k] ?? []
+      const rendered = messagesBySession.value[k] ?? []
+      const preview = messageCachePreviews.get(k)
+      const existing = preview && !frame.beforeCursor ? rendered.filter(row => !preview.has(toRaw(row))) : rendered
       const liveRunId = runningBySession.value[k]
       const hasLiveHistory = frame.messages.some(m => m.runId || m.thought || m.toolCalls?.length)
+      if (epochMessages) cachedHistoryKeys.delete(k)
       if (!frame.messages.length) {
         if (!frame.beforeCursor) {
-          if (snapshot) messagesBySession.value = { ...messagesBySession.value,
-            [k]: existing.filter(message => message.role === 'system' || Boolean(liveRunId && message.runId === liveRunId)) }
+          if (snapshot || preview) messagesBySession.value = { ...messagesBySession.value, [k]: snapshot
+            ? existing.filter(message => (message.role === 'system' || Boolean(liveRunId && message.runId === liveRunId)) &&
+              (!epochMessages || hasEpochMessageContent(message)))
+            : existing }
+          messageCachePreviews.delete(k)
           finishSnapshotHistory(k, frame.requestId, true)
+          queueMessageCacheWrite(k, [], cacheCursor)
         }
         return
       }
       // 支持向上分页加载更早历史：当新拉取条数多于当前内存条数时允许替换刷新
       const hasSystemHistory = frame.messages.some(m => m.systemEvents?.length)
-      if (!forced && !frame.beforeCursor && !hasLiveHistory && !hasSystemHistory && existing.some(m => m.role !== 'system') &&
+      if (!preview && !forced && !frame.beforeCursor && !hasLiveHistory && !hasSystemHistory && existing.some(m => m.role !== 'system') &&
         frame.messages.length <= existing.length) return
       cachedHistoryKeys.delete(k)
       const hydrated: ChatMessage[] = epochMessages ?? frame.messages.map((m, idx) => {
@@ -1924,20 +2017,21 @@ export const useFleetStore = defineStore('fleet', () => {
         messagesBySession.value = { ...messagesBySession.value, [k]: [
           ...hydrated.filter(row => !existingIds.has(row.id)), ...existing,
         ].slice(-MAX_MESSAGES_PER_SESSION) }
+        if (!preview) queueMessageCacheWrite(k, messagesBySession.value[k], cacheCursor)
         return
       }
+      messageCachePreviews.delete(k)
       if (liveRunId) {
         for (const message of existing) {
           if ((message.runId === liveRunId || message.requestId === liveRunId)
+            && (!epochMessages || hasEpochMessageContent(message))
             && !hydrated.some(row => row.role === message.role && (row.runId === liveRunId || row.requestId === liveRunId))) {
             hydrated.push(message)
           }
         }
       }
-      messagesBySession.value = {
-        ...messagesBySession.value,
-        [k]: mergeHistoryBoundaries(existing, hydrated).slice(-MAX_MESSAGES_PER_SESSION),
-      }
+      const merged = mergeHistoryBoundaries(existing, hydrated).slice(-MAX_MESSAGES_PER_SESSION)
+      messagesBySession.value = { ...messagesBySession.value, [k]: merged }
       const curSess = sessionsByKey.value[k]
       if (curSess && isGenericSessionTitle(curSess.title)) {
         const firstUser = hydrated.find(x => x.role === 'user' && x.text.trim())
@@ -1950,6 +2044,7 @@ export const useFleetStore = defineStore('fleet', () => {
         }
       }
       finishSnapshotHistory(k, frame.requestId, true)
+      queueMessageCacheWrite(k, merged, cacheCursor)
       return
     }
 
@@ -2416,6 +2511,7 @@ export const useFleetStore = defineStore('fleet', () => {
     }
 
     if (etype === 'SessionDeleted') {
+      removeSessionMessageCache(sKey)
       forgetFollowIntent(sKey)
       clearSubscribe(sKey)
       clearHistory(sKey)
@@ -2652,6 +2748,11 @@ export const useFleetStore = defineStore('fleet', () => {
         })
       } else {
         void drainNextQueuedPrompt(sKey)
+      }
+      if (!messageCachePreviews.has(sKey)) {
+        queueMessageCacheWrite(sKey, messagesBySession.value[sKey], {
+          lastSeq: seq ?? lastSeqBySession.value[sKey] ?? 0, epoch: null,
+        })
       }
       void flushOutbox()
       return
@@ -2964,6 +3065,7 @@ export const useFleetStore = defineStore('fleet', () => {
     if (!nid) throw new Error('请先选择控制节点')
     const node = nodes.value.find(n => n.id === nid)
     const prov = options.provider ?? selectedProvider.value
+    if (options.sessionId) void restoreMessageCache(sessionKey(nid, prov, options.sessionId), { nodeId: nid, provider: prov })
     const cwd =
       options.cwd && (!node?.allowedRoots?.length || isCwdWithinNodeRoots(node, options.cwd))
         ? options.cwd
@@ -3008,7 +3110,7 @@ export const useFleetStore = defineStore('fleet', () => {
       selectedNodeId.value = sess.nodeId
       selectedProvider.value = sess.provider
       applyDefaultModelPref(sKey, sess.nodeId, sess.provider)
-      loadSessionHistory(sKey, cachedHistoryKeys.has(sKey))
+      if (syncMode === 'legacy') loadSessionHistory(sKey, cachedHistoryKeys.has(sKey))
       subscribeSession(sKey)
       if (!diffBySession.value[sKey]) {
         requestSessionDiff(sKey)
@@ -3036,11 +3138,28 @@ export const useFleetStore = defineStore('fleet', () => {
 
   function subscribeSession(sKey: string) {
     const sess = sessionsByKey.value[sKey]
-    if (!sess || wsState.value !== 'online') return false
+    if (!sess) return false
+    const cached = restoreMessageCache(sKey)
+    if (cached) {
+      void cached.then(async valid => {
+        if (!valid) return
+        // Commit the cached timeline before starting the epoch snapshot request.
+        if (syncMode === 'epoch') await nextTick()
+        subscribeLiveSession(sKey)
+      })
+      return wsState.value === 'online'
+    }
+    return subscribeLiveSession(sKey)
+  }
+
+  function subscribeLiveSession(sKey: string) {
+    if (!sessionsByKey.value[sKey] || wsState.value !== 'online') return false
     const state = streamState(sKey)
     if (pendingStreamResync.has(sKey) || state.timer || state.snapshot) return true
     state.retries = 0
-    return sendSubscribe(sKey)
+    const sent = sendSubscribe(sKey)
+    if (sent && syncMode === 'legacy' && messageCachePreviews.has(sKey)) loadSessionHistory(sKey, true)
+    return sent
   }
 
   function retrySubscribe(sKey: string) {
@@ -3109,16 +3228,22 @@ export const useFleetStore = defineStore('fleet', () => {
     const requestId = createRequestId()
     state.phase = 'gap'
     pendingStreamResync.set(sKey, requestId)
+    pendingHistoryPages.value[sKey] ??= requestId
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 50_000)
 
+    let cacheCursor: Pick<MessageCacheRecord, 'lastSeq' | 'epoch'> | undefined
     const sessionSync = createSessionSync({
       mode: syncMode,
-      rpc: () => apiRequest<unknown>(
-        `/api/v1/fleet/nodes/${encodeURIComponent(sess.nodeId)}/session/snapshot`,
-        { method: 'POST', body: JSON.stringify({ sessionId: sess.sessionId, provider: sess.provider }), signal: controller.signal },
-        route.token, route.origin,
-      ),
+      rpc: async () => {
+        const result = await apiRequest<Pick<MessageCacheRecord, 'lastSeq' | 'epoch'>>(
+          `/api/v1/fleet/nodes/${encodeURIComponent(sess.nodeId)}/session/snapshot`,
+          { method: 'POST', body: JSON.stringify({ sessionId: sess.sessionId, provider: sess.provider }), signal: controller.signal },
+          route.token, route.origin,
+        )
+        cacheCursor = result
+        return result
+      },
       apply: (_, value) => {
         if (fleetRoute.value !== route || pendingStreamResync.get(sKey) !== requestId) return
         const snapshot = value as {
@@ -3140,15 +3265,17 @@ export const useFleetStore = defineStore('fleet', () => {
           fallbackId: `hist-${requestId}-${index}`,
           fallbackCreatedAt: startedAt.get(message.turnId ?? '') ?? now,
           liveRunId: snapshot.running ? snapshot.runId : undefined,
-        }))
-        clearHistory(sKey)
-        pendingHistoryPages.value[sKey] = requestId
+        })).filter(hasEpochMessageContent)
+        if (pendingHistoryPages.value[sKey] !== requestId) {
+          clearHistory(sKey)
+          pendingHistoryPages.value[sKey] = requestId
+        }
         forcedHistoryRequests.add(requestId)
         state.snapshot = { streamId, lastSeq, requestId }
         const intent = snapshotFollowIntent.get(sKey)
         if (intent && !intent.settled) intent.requestId = requestId
         reconcileRuntime(sKey, { type: 'SessionHistory', active: snapshot.running, runId: snapshot.runId })
-        applyWsEvent({ type: 'SessionHistory', ...sess, requestId, messages }, messages)
+        applyWsEvent({ type: 'SessionHistory', ...sess, requestId, messages }, messages, cacheCursor)
         clearSubscribe(sKey)
         void flushOutbox()
       },
@@ -3185,8 +3312,22 @@ export const useFleetStore = defineStore('fleet', () => {
   }
 
   function loadSessionHistory(sKey: string, force = false) {
+    if (syncMode === 'epoch' && !force) {
+      subscribeSession(sKey)
+      return
+    }
+    const cached = force ? undefined : restoreMessageCache(sKey)
+    if (cached) {
+      void cached.then(valid => { if (valid) sendSessionHistory(sKey, force) })
+      return
+    }
+    return sendSessionHistory(sKey, force)
+  }
+
+  function sendSessionHistory(sKey: string, force: boolean) {
     const sess = sessionsByKey.value[sKey]
-    if (wsState.value === 'online' && sess && !pendingHistoryPages.value[sKey] && (force || !messagesBySession.value[sKey]?.length)) {
+    if (wsState.value === 'online' && sess && !pendingHistoryPages.value[sKey] &&
+      (force || messageCachePreviews.has(sKey) || !messagesBySession.value[sKey]?.length)) {
       const limit = historyLimitBySession.value[sKey] ?? 60
       historyLimitBySession.value = { ...historyLimitBySession.value, [sKey]: limit }
       const requestId = createRequestId()
@@ -4686,6 +4827,7 @@ export const useFleetStore = defineStore('fleet', () => {
 
   return {
     nodes,
+    syncMode,
     coreWorkspaceRoute: fleetRoute,
     coreSignInUrl,
     signInToCoreFleet,
@@ -4704,6 +4846,7 @@ export const useFleetStore = defineStore('fleet', () => {
     currentSession,
     messagesBySession,
     currentMessages,
+    isRestoringEpochCache,
     pendingApprovalsList,
     nodesWithApprovalPending,
     runningBySession,
@@ -4841,6 +4984,7 @@ export const useFleetStore = defineStore('fleet', () => {
     compactSession,
     renameSession,
     deleteSession,
+    removeSessionMessageCache,
     editMessageAndBranch,
     regenerateAssistantMessage,
     switchBranch,

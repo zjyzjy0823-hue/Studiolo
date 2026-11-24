@@ -7,6 +7,14 @@ export interface SessionOrganization {
   changedAt: number
 }
 
+function organizationKey(scope: string) {
+  return `studiolo:fleet:organization:${scope}`
+}
+
+export function isSessionArchived(scope: string, sessionKey: string): boolean {
+  return readOrganization(organizationKey(scope))[sessionKey]?.placement === 'archived'
+}
+
 function readOrganization(key: string): Record<string, SessionOrganization> {
   try {
     const raw = JSON.parse(localStorage.getItem(key) ?? '{}')
@@ -24,7 +32,7 @@ export function useSessionOrganization(scope: Readonly<Ref<string>>) {
   const rows = ref<Record<string, SessionOrganization>>({})
   const now = ref(Date.now())
   let expiry: ReturnType<typeof setTimeout> | undefined
-  const storageKey = () => scope.value ? `studiolo:fleet:organization:${scope.value}` : ''
+  const storageKey = () => scope.value ? organizationKey(scope.value) : ''
 
   watch(scope, () => {
     const key = storageKey()

@@ -14,6 +14,27 @@ export type EpochSnapshotMessage = Omit<HistoryMessage, 'toolCalls'> & {
   toolCalls?: SnapshotToolCall[] | null
 }
 
+type EpochMessageContent = Pick<ChatMessage, 'text' | 'thought' | 'parts'>
+
+export function normalizeEpochMessageContent(message: Partial<EpochMessageContent>): Pick<ChatMessage, 'text' | 'thought'> {
+  const parts = Array.isArray(message.parts) ? message.parts : []
+  const read = (field: 'text' | 'thought') => {
+    const value = message[field]
+    if (typeof value === 'string' && value.trim()) return value
+    return parts.flatMap(part => part?.type === field && typeof part.text === 'string' ? [part.text] : []).join('')
+  }
+  return { text: read('text'), thought: read('thought') || undefined }
+}
+
+export function hasEpochMessageContent(message: ChatMessage): boolean {
+  return message.role !== 'assistant' || Boolean(
+    message.text?.trim() || message.thought?.trim() || message.toolCalls?.length ||
+    message.parts?.some(part => part.type !== 'tool' && part.text.trim()) ||
+    message.media?.length || message.systemEvents?.length || message.error ||
+    message.forms?.length || message.approvals?.length || message.artifacts?.length,
+  )
+}
+
 export function mapEpochSnapshotMessage(message: EpochSnapshotMessage, context: {
   session: Pick<ChatSession, 'nodeId' | 'provider'>
   fallbackId: string

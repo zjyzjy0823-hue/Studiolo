@@ -2,6 +2,7 @@
 import { computed, ref, watch, type ObjectDirective } from 'vue'
 import { describeToolCall, formatElapsedTime, formatWorkLogDuration } from '../../services/chatHelpers'
 import type { WorkLogProgress, WorkLogStep } from '../../services/messageSegments'
+import type { SyncMode } from '../../services/sessionSync'
 import OpusIcon from '../ui/OpusIcon.vue'
 import ThoughtPulseIcon from './ThoughtPulseIcon.vue'
 import ToolCallCard from './ToolCallCard.vue'
@@ -11,6 +12,7 @@ const props = defineProps<{
   progress?: WorkLogProgress
   durationMs?: number
   epochSnapshot?: boolean
+  syncMode?: SyncMode
   reveal?: { stepId: string }
 }>()
 
@@ -20,6 +22,7 @@ const emit = defineEmits<{
 }>()
 
 const isOpen = ref(false)
+const isEpoch = computed(() => props.syncMode === 'epoch' || props.epochSnapshot)
 watch(() => props.epochSnapshot && props.steps.some(step => step.type === 'tool'), showTools => {
   if (showTools) isOpen.value = true
 }, { immediate: true })
@@ -61,7 +64,7 @@ const label = computed(() => {
   if (currentTool.value) return currentTool.value.label
   if (isThinking.value) return '思考中'
   if (props.progress?.type === 'text') return '回复中'
-  if (props.epochSnapshot) return formatWorkLogDuration(props.durationMs) || '工作步骤'
+  if (isEpoch.value) return formatWorkLogDuration(props.durationMs) || '工作步骤'
   const elapsed = formatElapsedTime(props.durationMs)
   if (elapsed) return `用时 ${elapsed}`
   const durations = tools.value.flatMap(({ durationMs }) =>
