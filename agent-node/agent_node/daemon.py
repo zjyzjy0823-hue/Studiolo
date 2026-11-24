@@ -33,6 +33,7 @@ from .crypto_chunks import generate_file_key
 from .hermes_media import CAPABILITY as HERMES_MEDIA_CAPABILITY, MediaError, relay_hermes_attachment
 from .terminal_session import TerminalManager
 from .port_preview import PortPreviewManager
+from .session_events import EventStore, PromptEvents, SessionEventLog
 from .transfer import (
     DirectArtifactStore,
     create_direct_transfer_app,
@@ -98,7 +99,7 @@ def _history_cursor(message: dict[str, Any], previous: dict[str, Any]) -> str:
 
 
 class AgentNodeDaemon:
-    """运行在每台受控机器上的轻量级节点守护进程（聊天正文仅驻留上游或内存）。"""
+    """运行在每台受控机器上的轻量级节点守护进程。"""
 
     def __init__(
         self,
@@ -137,6 +138,9 @@ class AgentNodeDaemon:
         self._alist_cache: dict[tuple[str, int, int], PublishResult] = {}
         self._command_scope = sha256(f"{config.core_url}\n{config.node_token}".encode()).hexdigest()
         self._send_lock = asyncio.Lock()
+        self._session_event_log = (
+            SessionEventLog(EventStore()) if os.getenv("STUDIOLO_SESSION_EVENTS") == "1" else None
+        )
 
     def _load_trust_patterns(self) -> list[str]:
         try:
@@ -339,8 +343,20 @@ class AgentNodeDaemon:
             "transferEndpoints": self.build_transfer_endpoints(),
         }
 
-    async def _send_ws(self, ws: Any, frame: dict[str, Any]) -> None:
+    async def _send_ws(
+        self, ws: Any, frame: dict[str, Any], *, prompt: PromptEvents | None = None, forward: bool = True,
+        stream: SessionStream | None = None, provider: str | None = None,
+    ) -> None:
         async with self._send_lock:
+            if self._session_event_log is not None:
+                event_frame = {"provider": provider, **frame} if provider is not None else frame
+                await asyncio.to_thread(self._session_event_log.record, event_frame, prompt)
+            if not forward:
+                return
+            if stream is not None:
+                frame = stream.append(frame)
+            if provider is not None:
+                frame = {"provider": provider, **frame}
             sequence = frame.get("seq")
             audit_event(
                 "node",
@@ -402,6 +418,8 @@ class AgentNodeDaemon:
             self._pending_approvals.pop(call_id, None)
             self._pending_approval_cmds.pop(call_id, None)
             self._pending_approval_events.pop(call_id, None)
+        if self._session_event_log is not None:
+            await self._send_ws(ws, {**event, "type": "ApprovalResolved", "decision": decision}, forward=False)
         if decision == "allow_session":
             if risk != "high" and command:
                 allowed = self._session_allowed_commands.setdefault(session, set())
@@ -1335,6 +1353,7 @@ class AgentNodeDaemon:
                 before_tree = await asyncio.to_thread(
                     create_git_checkpoint, session_dir, self.config.allowed_roots
                 )
+                prompt = PromptEvents(eff_req_id, text, atts) if self._session_event_log is not None else None
                 base_emit, on_approval = self._build_run_callbacks(ws, provider=provider, options=options)
                 turn_state: dict[str, Any] = {"runId": None, "checkpointed": False}
                 run_key = (provider, sid)
@@ -1363,6 +1382,8 @@ class AgentNodeDaemon:
                     if evt.get("runId"):
                         turn_state["runId"] = str(evt["runId"])
                         stream.run_id = turn_state["runId"]
+                        if prompt is not None:
+                            prompt.turn_id = stream.run_id
                     if evt.get("type") == "Completed" and not turn_state["checkpointed"]:
                         turn_state["checkpointed"] = True
                         if before_tree and not options.get("readOnly"):
@@ -1411,7 +1432,10 @@ class AgentNodeDaemon:
                                         **diff_data,
                                     }
                                 )
-                    await base_emit(stream.append(evt))
+                    if prompt is None:
+                        await base_emit(stream.append(evt))
+                    else:
+                        await self._send_ws(ws, evt, provider=provider, stream=stream, prompt=prompt)
                     if watch_idle:
                         if evt.get("type") == "Accepted":
                             self._idle_transcripts.setdefault(sid, IdleTranscript())
@@ -1625,6 +1649,8 @@ class AgentNodeDaemon:
         finally:
             await self.terminal_manager.close_all()
             await asyncio.gather(*(a.close() for a in self.adapters.values()), return_exceptions=True)
+            if self._session_event_log is not None:
+                await asyncio.to_thread(self._session_event_log.store.close)
             if direct_server is not None:
                 direct_server.should_exit = True
             if direct_task is not None:
