@@ -33,8 +33,8 @@ interface ToastItem {
   out: boolean
 }
 
-const props = defineProps<{ page: string; mobile: boolean; hideMobileTabbar?: boolean; toast: string; toastKey?: number; theme: WorkbenchTheme; mode: string; reducedMotion?: boolean }>()
-const emit = defineEmits<{ navigate: [page: string]; 'mobile-tab': [page: string]; create: [kind: string]; action: [message: string]; openSpace: [spaceId?: string]; syncSettings: []; back: []; toggleMode: []; toggleTheme: []; setTheme: [theme: WorkbenchTheme]; toggleReducedMotion: [] }>()
+const props = defineProps<{ page: string; downloadsActive: boolean; mobile: boolean; hideMobileTabbar?: boolean; toast: string; toastKey?: number; theme: WorkbenchTheme; mode: string; reducedMotion?: boolean }>()
+const emit = defineEmits<{ navigate: [page: string, section?: 'downloads']; 'mobile-tab': [page: string]; create: [kind: string]; action: [message: string]; openSpace: [spaceId?: string]; syncSettings: []; back: []; toggleMode: []; toggleTheme: []; setTheme: [theme: WorkbenchTheme]; toggleReducedMotion: [] }>()
 const auth = useAuthStore()
 const automation = useAutomationStore()
 const fleet = useFleetStore()
@@ -260,12 +260,12 @@ async function moveCommand(step: number) {
   await nextTick()
   palette.value?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' })
 }
-function go(page: string, mobileTab = false) {
+function go(page: string, mobileTab = false, section?: 'downloads') {
   palette.value?.close()
   panelOpen.value = false
   add.value = ''
   if (mobileTab) emit('mobile-tab', page)
-  else emit('navigate', page)
+  else emit('navigate', page, section)
 }
 function openPalette() {
   query.value = ''
@@ -455,7 +455,10 @@ onUnmounted(() => {
                 </button>
               </template>
               <div class="nav-foot">
-                <button v-for="item in footer" :key="item.page" class="nav-item" type="button" :title="item.label" :aria-current="page === item.page ? 'page' : undefined" @click="go(item.page)"><OpusIcon :name="item.icon" /><span class="label">{{ item.label }}</span><span v-if="item.page === 'Settings' && syncStatus?.conflicts" class="count alert">{{ syncStatus.conflicts }}</span></button>
+                <button v-for="item in footer" :key="item.page" class="nav-item" type="button" :title="item.label" :aria-current="page === item.page && !downloadsActive ? 'page' : undefined" @click="go(item.page)"><OpusIcon :name="item.icon" /><span class="label">{{ item.label }}</span><span v-if="item.page === 'Settings' && syncStatus?.conflicts" class="count alert">{{ syncStatus.conflicts }}</span></button>
+                <button class="nav-item" type="button" title="下载记录" :aria-current="downloadsActive ? 'page' : undefined" @click="go('Settings', false, 'downloads')">
+                  <OpusIcon name="download" /><span class="label">下载记录</span>
+                </button>
                 <button
                   class="nav-item nav-item--collapse"
                   type="button"

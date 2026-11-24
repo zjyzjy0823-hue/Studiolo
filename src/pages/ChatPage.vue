@@ -30,7 +30,7 @@ import type { AdapterProvider, AgentNode, ArtifactRef, ChatSession, ProjectPermi
 const props = defineProps<{ mobile?: boolean }>()
 
 const emit = defineEmits<{
-  navigate: [page: string]
+  navigate: [page: string, section?: 'downloads']
   action: [message: string]
   mobileFullscreen: [fullscreen: boolean]
 }>()
@@ -1913,6 +1913,10 @@ function handleClearMemory() {
               <button type="button" class="m-fmenu-item" @click="showArchivedSessions = !showArchivedSessions; mobileMoreMenuOpen = false">
                 <OpusIcon name="folder" class="m-fmenu-ic" />
                 <span>{{ showArchivedSessions ? '隐藏已归档' : '显示已归档' }}</span>
+              </button>
+              <button type="button" class="m-fmenu-item" @click="mobileMoreMenuOpen = false; emit('navigate', 'Settings', 'downloads')">
+                <OpusIcon name="download" class="m-fmenu-ic" />
+                <span>下载记录</span>
               </button>
               <button v-if="fleet.pendingApprovalsList.length" type="button" class="m-fmenu-item"
                 @click="mobileApprovalsExpanded = !mobileApprovalsExpanded; mobileMoreMenuOpen = false">

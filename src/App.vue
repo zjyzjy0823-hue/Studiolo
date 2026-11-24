@@ -41,6 +41,7 @@ import type { WorkbenchTheme } from './composables/useWorkbenchTheme'
 import { applyThemeToRoot, resolveThemeState } from './theme/registry'
 
 type Page = 'Home' | 'Dashboard' | 'Websites' | 'Devices' | 'Agents' | 'Data' | 'Ledger' | 'Automation' | 'API' | 'Settings' | 'Space' | 'Chat'
+type SettingsDestination = 'sync' | 'downloads'
 const pagePaths: Record<Page, string> = {
   Home: '/', Dashboard: '/dashboard', Websites: '/websites', Devices: '/devices', Agents: '/agents',
   Data: '/data', Ledger: '/ledger', Automation: '/automation', API: '/api', Settings: '/settings', Space: '/space', Chat: '/chat',
@@ -50,6 +51,9 @@ function pageFromLocation(): Page {
   const legacyHash = window.location.hash.slice(1).toLowerCase()
   const path = window.location.pathname.toLowerCase().replace(/\/+$/, '') || '/'
   return pageByPath[legacyHash] ?? pageByPath[path] ?? 'Home'
+}
+function settingsSectionFromLocation() {
+  return new URLSearchParams(window.location.search).get('section')
 }
 
 const currentPage = ref<Page>(pageFromLocation())
@@ -66,7 +70,8 @@ const prefersDark = ref(systemDark.matches)
 const supportsBackdropFilter = typeof CSS !== 'undefined' && typeof CSS.supports === 'function'
   ? (CSS.supports('backdrop-filter', 'blur(1px)') || CSS.supports('-webkit-backdrop-filter', 'blur(1px)'))
   : true
-const syncSettings = ref(new URLSearchParams(window.location.search).get('section') === 'sync')
+const settingsSection = ref(currentPage.value === 'Settings' ? settingsSectionFromLocation() : null)
+const settingsPageKey = ref(0)
 const mobileMedia = window.matchMedia('(max-width: 700px)')
 const mobile = ref(android || (mobileMedia.matches && !desktop))
 const motionMedia = window.matchMedia('(prefers-reduced-motion: reduce)')
@@ -202,9 +207,12 @@ function appHistoryDepth(): number {
 
 let waitingForBack = false
 
-async function showPage(target: Page, toSync: boolean) {
+async function showPage(target: Page, section: string | null) {
+  if (target === 'Settings' && currentPage.value === 'Settings' && section !== settingsSection.value) {
+    settingsPageKey.value++
+  }
   currentPage.value = target
-  syncSettings.value = toSync
+  settingsSection.value = section
   libraryDetailOpen.value = false
   if (!libraryItems.some(item => item.page === target)) libraryQuery.value = ''
   await nextTick()
@@ -213,20 +221,20 @@ async function showPage(target: Page, toSync: boolean) {
   document.querySelector('.mpage')?.scrollTo(0, 0)
 }
 
-async function navigate(page: string, section?: 'sync', mode: 'push' | 'replace' = 'push') {
+async function navigate(page: string, section?: SettingsDestination, mode: 'push' | 'replace' = 'push') {
   if (!Object.hasOwn(pagePaths, page)) return
   const target = page as Page
-  const toSync = target === 'Settings' && section === 'sync'
-  const url = pagePaths[target] + (toSync ? '?section=sync' : '')
+  const targetSection = target === 'Settings' ? section ?? null : null
+  const url = pagePaths[target] + (targetSection ? `?section=${targetSection}` : '')
   if (window.location.pathname + window.location.search === url && !window.location.hash) return
 
   const state = { studioloDepth: appHistoryDepth() + (mode === 'push' ? 1 : 0) }
   if (mode === 'replace') window.history.replaceState(state, '', url)
   else window.history.pushState(state, '', url)
   if (!mobile.value && document.startViewTransition && !motionReduced.value) {
-    await document.startViewTransition(() => showPage(target, toSync)).updateCallbackDone
+    await document.startViewTransition(() => showPage(target, targetSection)).updateCallbackDone
   } else {
-    await showPage(target, toSync)
+    await showPage(target, targetSection)
   }
 }
 async function openQuickSpace(spaceId?: string) {
@@ -237,8 +245,8 @@ async function openQuickSpace(spaceId?: string) {
 function onLocationChange() {
   waitingForBack = false
   const target = pageFromLocation()
-  const toSync = target === 'Settings' && new URLSearchParams(window.location.search).get('section') === 'sync'
-  if (target !== currentPage.value || toSync !== syncSettings.value) void showPage(target, toSync)
+  const section = target === 'Settings' ? settingsSectionFromLocation() : null
+  if (target !== currentPage.value || section !== settingsSection.value) void showPage(target, section)
 }
 
 async function openSyncSettings() {
@@ -364,7 +372,7 @@ onUnmounted(() => {
       </div>
     </div>
   </template>
-  <OpusShell v-else ref="shellRef" :page="currentPage" :mobile="mobile" :hide-mobile-tabbar="hideMobileTabbar" :toast="toast" :toast-key="toastKey" :theme="theme" :mode="mode" :reduced-motion="motionReduced"
+  <OpusShell v-else ref="shellRef" :page="currentPage" :downloads-active="currentPage === 'Settings' && settingsSection === 'downloads'" :mobile="mobile" :hide-mobile-tabbar="hideMobileTabbar" :toast="toast" :toast-key="toastKey" :theme="theme" :mode="mode" :reduced-motion="motionReduced"
     @navigate="navigate" @mobile-tab="navigate($event, undefined, 'replace')" @create="create" @action="showToast" @open-space="openQuickSpace" @sync-settings="openSyncSettings" @back="back" @toggle-mode="toggleColorMode" @toggle-theme="toggleWorkbenchTheme" @set-theme="setThemeWithToast" @toggle-reduced-motion="setReducedMotionWithToast(!motionReduced)">
     <template #default="{ syncStatus, syncLabel, syncKind, openSync, inLibrary }">
       <TodayPage v-if="currentPage === 'Home'" :mobile="mobile" :sync-status="syncStatus" :sync-label="syncLabel" :sync-kind="syncKind" @navigate="navigate" @action="showToast" @create="create" @sync="openSync" @ask-agent="shellRef?.openDock()" />
@@ -382,7 +390,7 @@ onUnmounted(() => {
         </template>
         <component :is="currentComponent" :key="currentPage" ref="pageRef" mobile :search="libraryQuery" @action="showToast" @mobile-detail="libraryDetailOpen = $event" />
       </div>
-      <SettingsPage v-else-if="currentPage === 'Settings'" ref="settingsPageRef" :sync-status="syncStatus" :sync-label="syncLabel" :mobile="mobile" :reduced-motion="motionReduced" :open-sync="syncSettings" @update:reduced-motion="setReducedMotion" @section-change="syncSettings = $event === 'sync'" @action="showToast" @navigate="navigate" @back="back" />
+      <SettingsPage v-else-if="currentPage === 'Settings'" :key="settingsPageKey" ref="settingsPageRef" :sync-status="syncStatus" :sync-label="syncLabel" :mobile="mobile" :reduced-motion="motionReduced" :open-sync="settingsSection === 'sync'" @update:reduced-motion="setReducedMotion" @section-change="settingsSection = $event" @action="showToast" @navigate="navigate" @back="back" />
       <DataPage v-else-if="currentPage === 'Data'" ref="pageRef" @action="showToast" />
       <div v-else :class="mobile ? 'opus-subpage-host' : 'page'">
         <component :is="currentComponent" :key="currentPage" ref="pageRef" :mobile="mobile" @action="showToast" @navigate="navigate" @back="back" />
