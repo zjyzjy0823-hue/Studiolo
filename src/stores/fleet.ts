@@ -12,6 +12,7 @@ import { decodeBase64Url, downloadAndDecryptBlob, encryptAndUploadFile } from '.
 import { normalizeCoreOrigin } from '../services/fleetUrl'
 import { FleetLocalStore, type FleetOutboxItem } from '../services/fleetLocal'
 import { messageCache, type MessageCacheRecord } from '../services/messageCache'
+import { applySystemNotices } from '../services/systemNotices'
 import { isSessionArchived } from '../composables/useSessionOrganization'
 import { hasEpochMessageContent, mapEpochSnapshotMessage, normalizeEpochMessageContent, type EpochSnapshotMessage } from '../services/epochSnapshot'
 import { createSessionSync, readSyncMode } from '../services/sessionSync'
@@ -895,7 +896,7 @@ export const useFleetStore = defineStore('fleet', () => {
           ...message, createdAt: at, nodeId: session.nodeId, provider: session.provider,
           ...(syncMode === 'epoch' && record.epoch ? { epochSnapshot: true as const } : {}),
         }))
-        const rows = syncMode === 'epoch' ? hydrated.filter(hasEpochMessageContent) : hydrated
+        const rows = applySystemNotices(syncMode === 'epoch' ? hydrated.filter(hasEpochMessageContent) : hydrated)
         if (rows.length) {
           messageCachePreviews.set(sKey, new Set(rows))
           messagesBySession.value = { ...messagesBySession.value, [sKey]: rows }
@@ -2153,9 +2154,9 @@ export const useFleetStore = defineStore('fleet', () => {
       })
       if (frame.beforeCursor) {
         const existingIds = new Set(existing.map(row => row.id))
-        messagesBySession.value = { ...messagesBySession.value, [k]: [
+        messagesBySession.value = { ...messagesBySession.value, [k]: applySystemNotices([
           ...hydrated.filter(row => !existingIds.has(row.id)), ...existing,
-        ].slice(-MAX_MESSAGES_PER_SESSION) }
+        ]).slice(-MAX_MESSAGES_PER_SESSION) }
         if (!preview) queueMessageCacheWrite(k, messagesBySession.value[k], cacheCursor)
         return
       }
@@ -2169,7 +2170,7 @@ export const useFleetStore = defineStore('fleet', () => {
           }
         }
       }
-      const merged = mergeHistoryBoundaries(existing, hydrated).slice(-MAX_MESSAGES_PER_SESSION)
+      const merged = applySystemNotices(mergeHistoryBoundaries(existing, hydrated)).slice(-MAX_MESSAGES_PER_SESSION)
       messagesBySession.value = { ...messagesBySession.value, [k]: merged }
       const curSess = sessionsByKey.value[k]
       if (curSess && isGenericSessionTitle(curSess.title)) {

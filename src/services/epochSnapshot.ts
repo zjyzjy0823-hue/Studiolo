@@ -1,5 +1,6 @@
 import type { ChatMessage, ChatSession, FleetWsEvent, MessageMediaItem, MessagePart, ToolCallBadge } from '../types/fleet'
 import { appendMessagePart } from './chatHelpers.ts'
+import { classifySystemNotice } from './systemNotices.ts'
 
 type HistoryMessage = NonNullable<FleetWsEvent['messages']>[number]
 type SnapshotToolCall = Omit<ToolCallBadge, 'id' | 'status' | 'durationMs'> & {
@@ -45,6 +46,8 @@ export function mapEpochSnapshotMessage(message: EpochSnapshotMessage, context: 
   const { durationMs, thought, systemEvents } = message
   const runId = message.turnId ?? message.runId
   const role = message.role === 'user' || message.role === 'system' ? message.role : 'assistant'
+  const notice = role === 'user' ? classifySystemNotice(message.text) : null
+  const effectiveRole = notice ? 'system' as const : role
   const toolCalls = message.toolCalls?.map<ToolCallBadge>(({ durationMs, status, ...tool }, index) => ({
     ...tool,
     id: tool.callId || tool.id || `${fallbackId}-tool-${index}`,
@@ -76,7 +79,7 @@ export function mapEpochSnapshotMessage(message: EpochSnapshotMessage, context: 
 
   return {
     id: message.id || (runId ? `hist-${message.role}-${runId}` : fallbackId),
-    role,
+    role: effectiveRole,
     nodeId: session.nodeId,
     provider: session.provider,
     runId,
@@ -89,7 +92,7 @@ export function mapEpochSnapshotMessage(message: EpochSnapshotMessage, context: 
     ...(parts?.length ? { parts } : {}),
     ...(mediaByUrl.size ? { media: [...mediaByUrl.values()] } : {}),
     ...(durationMs != null && durationMs > 0 && Number.isFinite(durationMs) ? { durationMs } : {}),
-    streaming: Boolean(runId && role === 'assistant' && runId === liveRunId),
+    streaming: Boolean(runId && effectiveRole === 'assistant' && runId === liveRunId),
     createdAt: message.createdAt ?? fallbackCreatedAt,
   }
 }
