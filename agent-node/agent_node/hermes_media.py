@@ -5,17 +5,23 @@ from collections.abc import Awaitable, Callable, Iterable, Set
 from contextlib import contextmanager
 from pathlib import Path
 import json
+import logging
 import os
 import re
 import stat
+import time
 from typing import Any
 
 import httpx
 
+from .alist_publish import LinkPublisher
 from .config import NodeConfig, ensure_allowed_path
 
+_LOG = logging.getLogger(__name__)
 CAPABILITY = "hermes-media-v1"
 CHUNK_BYTES = 64 * 1024
+_MAX_EXTERNAL_CACHE_ENTRIES = 256
+_EXTERNAL_LINK_CACHE: dict[tuple[str, int, int], Any] = {}
 _MEDIA_TAG = re.compile(
     r"""[`"']?(?:MEDIA|@file|@image):\s*(?:"([^"]+)"|'([^']+)'|`([^`]+)`|((?:~|/|[A-Za-z]:[/\\]|\.{1,2}[/\\])[^\s`"')]*))[`"']?""",
     re.IGNORECASE,
@@ -154,7 +160,7 @@ def transcript_attachment_paths(rows: Iterable[Any], session_id: str, *, require
 
 
 @contextmanager
-def open_session_file(reference: str, cwd: str, roots: tuple[Path, ...], max_bytes: int):
+def open_session_file(reference: str, cwd: str, roots: tuple[Path, ...], max_bytes: int | None):
     """Pin the checked file and disallow symlink swaps during the open."""
     try:
         base = ensure_allowed_path(cwd, roots)
@@ -185,11 +191,20 @@ def open_session_file(reference: str, cwd: str, roots: tuple[Path, ...], max_byt
         info = os.fstat(handle.fileno())
         if not stat.S_ISREG(info.st_mode):
             raise MediaError("media_forbidden")
-        if info.st_size > max_bytes:
+        if max_bytes is not None and info.st_size > max_bytes:
             raise MediaError("media_too_large")
         if info.st_size == 0:
             raise MediaError("media_empty")
         yield path, handle, info.st_size
+
+
+def _prune_external_cache(cache: dict[tuple[str, int, int], Any], now: float) -> None:
+    expired = [key for key, item in cache.items() if getattr(item, "expires_at", 0) <= now]
+    for key in expired:
+        cache.pop(key, None)
+    while len(cache) >= _MAX_EXTERNAL_CACHE_ENTRIES:
+        oldest = next(iter(cache))
+        cache.pop(oldest, None)
 
 
 def _require_success(response: httpx.Response) -> None:
@@ -211,6 +226,9 @@ async def relay_hermes_attachment(
     restore_written_paths: Callable[[str, str], Awaitable[Set[str]]] | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
     core_transport: httpx.AsyncBaseTransport | None = None,
+    publisher: Any | None = None,
+    publish_cache: dict[tuple[str, int, int], Any] | None = None,
+    clock: Callable[[], float] = time.time,
 ) -> dict[str, Any]:
     settings = config.hermes_media
     if settings is None or not node_id or frame.get("nodeId") != node_id or frame.get("provider") != "hermes":
@@ -264,8 +282,45 @@ async def relay_hermes_attachment(
                     ):
                         raise MediaError("media_forbidden")
 
-                with open_session_file(reference, metadata["cwd"], config.allowed_roots,
-                                       min(limit, settings.max_bytes)) as (path, source, size):
+                relay_limit = min(limit, settings.max_bytes)
+                open_limit = None if config.alist is not None else relay_limit
+                with open_session_file(reference, metadata["cwd"], config.allowed_roots, open_limit) as (path, source, size):
+                    if config.alist is not None and size > config.alist.threshold_bytes:
+                        try:
+                            file_stat = os.fstat(source.fileno())
+                            cache_key = (str(path), file_stat.st_mtime_ns, size)
+                            cache = _EXTERNAL_LINK_CACHE if publish_cache is None else publish_cache
+                            now = clock()
+                            cached = cache.get(cache_key)
+                            if cached is not None and cached.expires_at > now:
+                                published = cached
+                            else:
+                                if cached is not None:
+                                    cache.pop(cache_key, None)
+                                active_publisher = publisher if publisher is not None else LinkPublisher(config.alist)
+                                published = await asyncio.to_thread(active_publisher.publish, path)
+                                if not isinstance(published.url, str) or not published.url:
+                                    raise ValueError("AList publisher returned empty URL")
+                                after_now = clock()
+                                if published.expires_at > after_now:
+                                    _prune_external_cache(cache, after_now)
+                                    cache[cache_key] = published
+                            return {
+                                "external": True,
+                                "url": published.url,
+                                "expiresAt": int(published.expires_at),
+                                "sizeBytes": size,
+                                "fileName": Path(reference).name,
+                            }
+                        except Exception as exc:
+                            _LOG.warning(
+                                "AList publish failed for %s (%d bytes), falling back to relay: %s",
+                                Path(reference).name, size, exc,
+                            )
+
+                    if size > relay_limit:
+                        raise MediaError("media_too_large")
+
                     async with upstream.stream("GET", "/api/files/download", params={"path": str(path)}) as download:
                         _require_success(download)
 

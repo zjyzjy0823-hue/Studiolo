@@ -9,6 +9,14 @@ import socket
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from .alist_publish import (
+    DEFAULT_PROBE_BYTES,
+    DEFAULT_PROBE_TTL,
+    DEFAULT_THRESHOLD_BYTES,
+    DEFAULT_TTL_SECONDS,
+    PublishConfig,
+)
+
 
 class PathOutsideAllowedRootsError(PermissionError):
     """请求路径越出了节点本地白名单 allowedRoots。"""
@@ -38,6 +46,7 @@ class NodeConfig:
     direct: DirectTransferConfig = field(default_factory=DirectTransferConfig)
     providers: dict[str, dict[str, Any]] = field(default_factory=dict)
     hermes_media: HermesMediaConfig | None = None
+    alist: PublishConfig | None = None
 
     @property
     def ws_url(self) -> str:
@@ -133,6 +142,59 @@ def load_hermes_media_config(raw: dict[str, Any], env: dict[str, str]) -> Hermes
     return HermesMediaConfig(base, Path(str(token_file)).expanduser(), max_bytes, timeout)
 
 
+def load_alist_config(raw: Any, env: dict[str, str]) -> PublishConfig | None:
+    """加载可选的 AList 外链发布配置；未配置 baseUrl 时返回 None 保持原有中继行为。"""
+    section = raw if isinstance(raw, dict) else {}
+    url = str(env.get("STUDIOLO_ALIST_URL") or section.get("baseUrl") or "").strip()
+    if not url:
+        return None
+    allow_insecure = env.get("STUDIOLO_ALLOW_INSECURE_CORE", "").lower() in ("1", "true")
+    base_url = validate_core_base_url(url, allow_insecure=allow_insecure)
+    token = str(env.get("STUDIOLO_ALIST_TOKEN") or section.get("token") or "").strip()
+    if not token:
+        raise ValueError("Alist config requires token")
+    mount_raw = str(env.get("STUDIOLO_ALIST_MOUNT_PATH") or section.get("mountPath") or "/dl").strip() or "/dl"
+    mount_path = "/" + mount_raw.lstrip("/")
+
+    env_hosts = env.get("STUDIOLO_ALIST_HOSTS")
+    if env_hosts is not None and env_hosts.strip():
+        raw_hosts: list[Any] = [item for item in env_hosts.split(",") if item.strip()]
+    else:
+        configured_hosts = section.get("hosts")
+        if configured_hosts is None:
+            raw_hosts = []
+        elif isinstance(configured_hosts, (list, tuple)):
+            raw_hosts = [item for item in configured_hosts if isinstance(item, str) and item.strip()]
+        else:
+            raise ValueError("Alist hosts must be a list of URLs")
+    hosts = tuple(validate_core_base_url(str(item), allow_insecure=allow_insecure) for item in raw_hosts)
+
+    ttl_raw = env.get("STUDIOLO_ALIST_TTL_SECONDS")
+    ttl_seconds = int(ttl_raw) if ttl_raw else int(
+        DEFAULT_TTL_SECONDS if section.get("ttlSeconds") is None else section["ttlSeconds"]
+    )
+    threshold_raw = env.get("STUDIOLO_ALIST_THRESHOLD_BYTES")
+    threshold_bytes = int(threshold_raw) if threshold_raw else int(
+        DEFAULT_THRESHOLD_BYTES if section.get("thresholdBytes") is None else section["thresholdBytes"]
+    )
+    probe_bytes = int(DEFAULT_PROBE_BYTES if section.get("probeBytes") is None else section["probeBytes"])
+    probe_ttl_seconds = int(
+        DEFAULT_PROBE_TTL if section.get("probeTtlSeconds") is None else section["probeTtlSeconds"]
+    )
+    if min(ttl_seconds, threshold_bytes, probe_bytes, probe_ttl_seconds) <= 0:
+        raise ValueError("Alist ttlSeconds, thresholdBytes, probeBytes and probeTtlSeconds must be positive")
+    return PublishConfig(
+        base_url=base_url,
+        token=token,
+        mount_path=mount_path,
+        hosts=hosts,
+        ttl_seconds=ttl_seconds,
+        threshold_bytes=threshold_bytes,
+        probe_bytes=probe_bytes,
+        probe_ttl_seconds=probe_ttl_seconds,
+    )
+
+
 def load_node_config(config_path: str | Path | None = None, environ: dict[str, str] | None = None) -> NodeConfig:
     env = dict(os.environ if environ is None else environ)
     raw: dict[str, Any] = {}
@@ -175,4 +237,5 @@ def load_node_config(config_path: str | Path | None = None, environ: dict[str, s
         direct=direct_cfg,
         providers=providers,
         hermes_media=load_hermes_media_config(raw.get("hermesMedia") or {}, env),
+        alist=load_alist_config(raw.get("alist"), env),
     )

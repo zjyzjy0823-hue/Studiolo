@@ -1,17 +1,22 @@
 """Short-lived, single-use Hermes attachment relay scoped to a Fleet session."""
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
+import math
 import mimetypes
 from tempfile import TemporaryFile
-from typing import BinaryIO, Literal
-from urllib.parse import quote
+import time
+from typing import Any, BinaryIO, Literal
+from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.requests import ClientDisconnect
+
+from .audit import audit_media_external
 
 CAPABILITY = "hermes-media-v1"
 MAX_TRANSFERS = 8
@@ -33,6 +38,7 @@ MEDIA_ERRORS = {
     "media_changed": (409, "附件在读取时发生变化"),
     "media_busy": (503, "附件中转繁忙"),
     "media_ticket_gone": (410, "附件票据已使用或过期"),
+    "media_external_no_bytes": (409, "外链附件不接收中继字节流"),
 }
 
 MediaPurpose = Literal["preview", "download"]
@@ -59,6 +65,32 @@ class MediaTicketInput(BaseModel):
     ticket: str = Field(pattern=r"^[0-9a-f]{32}$")
 
 
+def _valid_filename(filename: Any) -> bool:
+    return (
+        isinstance(filename, str)
+        and 0 < len(filename) <= 255
+        and filename not in (".", "..")
+        and not any(c in "/\\" or ord(c) < 32 or ord(c) == 127 for c in filename)
+    )
+
+
+def _valid_external_url(url: Any) -> str | None:
+    if not isinstance(url, str) or not 0 < len(url) <= 4096:
+        return None
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url):
+        return None
+    try:
+        parts = urlsplit(url)
+        _ = parts.port
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return None
+    if parts.username is not None or parts.password is not None:
+        return None
+    return url
+
+
 @dataclass
 class MediaTransfer:
     scope: tuple[str, int, str]
@@ -70,6 +102,12 @@ class MediaTransfer:
     size: int = 0
     filename: str = ""
     content_type: str = ""
+    external_url: str | None = None
+    expires_at: float | None = None
+
+    @property
+    def is_external(self) -> bool:
+        return self.external_url is not None
 
 
 class MediaDownload(StreamingResponse):
@@ -99,10 +137,18 @@ class MediaDownload(StreamingResponse):
 
 
 class MediaRelay:
-    def __init__(self, max_bytes: int, timeout_seconds: int, ticket_seconds: int):
+    def __init__(
+        self,
+        max_bytes: int,
+        timeout_seconds: int,
+        ticket_seconds: int,
+        *,
+        clock: Callable[[], float] = time.time,
+    ):
         self.max_bytes = max_bytes
         self.timeout_seconds = timeout_seconds
         self.ticket_seconds = ticket_seconds
+        self._clock = clock
         self.transfers: dict[str, MediaTransfer] = {}
 
     def reserve(self, scope: tuple[str, int, str], payload: MediaResolveInput) -> str:
@@ -112,6 +158,51 @@ class MediaRelay:
         timer = asyncio.get_running_loop().call_later(self.timeout_seconds, self.discard, transfer_id)
         self.transfers[transfer_id] = MediaTransfer(scope, payload.sessionId, payload.purpose, timer)
         return transfer_id
+
+    def register_external(
+        self,
+        scope: tuple[str, int, str],
+        session_id: str,
+        purpose: MediaPurpose,
+        *,
+        url: str,
+        expires_at: int | float,
+        size: int,
+        filename: str,
+        content_type: str | None = None,
+    ) -> str:
+        """登记不接收中继字节流的外链型 transfer，返回一次性票据。"""
+        if len(self.transfers) >= MAX_TRANSFERS:
+            raise media_error("media_busy")
+        validated_url = _valid_external_url(url)
+        if (
+            validated_url is None
+            or not _valid_filename(filename)
+            or type(size) is not int
+            or size <= 0
+            or isinstance(expires_at, bool)
+            or not isinstance(expires_at, (int, float))
+            or not math.isfinite(expires_at)
+            or expires_at <= 0
+        ):
+            raise media_error("media_relay_failed")
+        resolved_type = content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        if purpose == "preview" and resolved_type not in PREVIEW_TYPES:
+            raise media_error("media_preview_unsupported")
+        ticket = uuid4().hex
+        timer = asyncio.get_running_loop().call_later(self.ticket_seconds, self.discard, ticket)
+        self.transfers[ticket] = MediaTransfer(
+            scope=scope,
+            session_id=session_id,
+            purpose=purpose,
+            timer=timer,
+            size=size,
+            filename=filename,
+            content_type=resolved_type,
+            external_url=validated_url,
+            expires_at=float(expires_at),
+        )
+        return ticket
 
     def discard(self, transfer_id: str) -> None:
         transfer = self.transfers.pop(transfer_id, None)
@@ -125,6 +216,8 @@ class MediaRelay:
         kind, node_id, user_id, workspace_id = actor
         if transfer is None or kind != "node" or transfer.scope != (workspace_id, user_id, node_id):
             raise media_error("media_forbidden")
+        if transfer.is_external:
+            raise media_error("media_external_no_bytes")
         if transfer.receiving or transfer.file is not None or transfer.filename:
             raise media_error("media_relay_failed")
         length = request.headers.get("content-length", "")
@@ -163,10 +256,46 @@ class MediaRelay:
     def issue(self, transfer_id: str, result: dict) -> str:
         transfer = self.transfers.get(transfer_id)
         filename = result.get("fileName")
-        if (transfer is None or transfer.file is None or transfer.session_id != result.get("sessionId")
+        if result.get("external") is True:
+            validated_url = _valid_external_url(result.get("url"))
+            size_bytes = result.get("sizeBytes")
+            expires_at = result.get("expiresAt")
+            if (
+                transfer is None
+                or transfer.receiving
+                or transfer.file is not None
+                or transfer.is_external
+                or transfer.session_id != result.get("sessionId")
+                or validated_url is None
+                or not _valid_filename(filename)
+                or type(size_bytes) is not int
+                or size_bytes <= 0
+                or isinstance(expires_at, bool)
+                or not isinstance(expires_at, (int, float))
+                or not math.isfinite(expires_at)
+                or expires_at <= 0
+            ):
+                raise media_error("media_relay_failed")
+            content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+            if transfer.purpose == "preview" and content_type not in PREVIEW_TYPES:
+                raise media_error("media_preview_unsupported")
+
+            ticket = uuid4().hex
+            self.transfers.pop(transfer_id)
+            transfer.timer.cancel()
+            transfer.timer = asyncio.get_running_loop().call_later(self.ticket_seconds, self.discard, ticket)
+            transfer.size = size_bytes
+            transfer.filename = filename
+            transfer.content_type = content_type
+            transfer.external_url = validated_url
+            transfer.expires_at = float(expires_at)
+            self.transfers[ticket] = transfer
+            return ticket
+
+        if (transfer is None or transfer.file is None or transfer.is_external
+                or transfer.session_id != result.get("sessionId")
                 or transfer.size != result.get("sizeBytes")
-                or not isinstance(filename, str) or not 0 < len(filename) <= 255
-                or filename in (".", "..") or any(c in "/\\" or ord(c) < 32 or ord(c) == 127 for c in filename)):
+                or not _valid_filename(filename)):
             raise media_error("media_relay_failed")
         content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
         if transfer.purpose == "preview" and content_type not in PREVIEW_TYPES:
@@ -186,10 +315,29 @@ class MediaRelay:
         if (transfer is None or not transfer.filename or transfer.timer.cancelled()
                 or transfer.timer.when() <= asyncio.get_running_loop().time()):
             raise media_error("media_ticket_gone")
+        if transfer.is_external and transfer.expires_at is not None and transfer.expires_at <= self._clock():
+            self.discard(ticket)
+            raise media_error("media_ticket_gone")
         if transfer.scope[:2] != (workspace_id, user_id):
             raise media_error("media_forbidden")
         return transfer
 
-    def redeem(self, ticket: str, transfer: MediaTransfer) -> MediaDownload:
+    def redeem(self, ticket: str, transfer: MediaTransfer) -> MediaDownload | RedirectResponse:
+        if transfer.is_external:
+            if transfer.expires_at is not None and transfer.expires_at <= self._clock():
+                self.discard(ticket)
+                raise media_error("media_ticket_gone")
+            url = transfer.external_url
+            assert url is not None
+            size = transfer.size
+            expires_at = transfer.expires_at or 0
+            session_id = transfer.session_id
+            self.discard(ticket)
+            audit_media_external(session_id=session_id, url=url, size=size, expires_at=expires_at)
+            return RedirectResponse(
+                url=url,
+                status_code=307,
+                headers={"Cache-Control": "no-store"},
+            )
         transfer.timer.cancel()
         return MediaDownload(self, ticket, transfer)

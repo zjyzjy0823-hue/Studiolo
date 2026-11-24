@@ -26,6 +26,7 @@ from .adapters.base import AgentAdapter, ApprovalCallback, EventEmitter
 from .adapters.hermes import HermesAdapter
 from .adapters.hermes_ws import HermesWsAdapter
 from .adapters.registry import build_adapter_registry
+from .alist_publish import LinkPublisher, PublishResult
 from .audit import audit_event
 from .config import NodeConfig, PathOutsideAllowedRootsError, detect_lan_urls, ensure_allowed_path
 from .crypto_chunks import generate_file_key
@@ -130,6 +131,10 @@ class AgentNodeDaemon:
         self._project_permissions_file = self._command_db.with_name("project-permissions.json")
         self._project_permissions = self._load_project_permissions()
         self._adapter_capabilities: dict[str, tuple[str, ...]] = {}
+        self._alist_publisher: LinkPublisher | None = (
+            LinkPublisher(config.alist) if config.alist is not None else None
+        )
+        self._alist_cache: dict[tuple[str, int, int], PublishResult] = {}
         self._command_scope = sha256(f"{config.core_url}\n{config.node_token}".encode()).hexdigest()
         self._send_lock = asyncio.Lock()
 
@@ -524,6 +529,8 @@ class AgentNodeDaemon:
                     self.config, frame, node_id, history,
                     written_paths=adapter.attachment_writes(sid) if isinstance(sid, str) else frozenset(),
                     restore_written_paths=adapter.restore_attachment_writes if isinstance(adapter, HermesWsAdapter) else None,
+                    publisher=self._alist_publisher,
+                    publish_cache=self._alist_cache,
                 ), ok=True)
             except MediaError as exc:
                 result.update(ok=False, code=str(exc))

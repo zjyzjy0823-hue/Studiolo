@@ -4,6 +4,8 @@ import logging
 import os
 import time
 from logging.handlers import RotatingFileHandler
+from typing import Any
+from urllib.parse import urlsplit
 
 
 _AUDIT_LOGGER: logging.Logger | None = None
@@ -44,16 +46,47 @@ def audit_event(
     event_type: str | None = "",
     call_id: str | None = "",
     queued: int | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     try:
         logger = audit_logger()
         if logger is not None:
+            suffix = f" queued={queued}" if queued is not None else ""
+            if extra:
+                for key, value in extra.items():
+                    if value is None:
+                        continue
+                    rendered = value if type(value) is int else _field(str(value))
+                    suffix += f" {key}={rendered}"
             logger.info(
-                "side=%s session=%s run=%s stream=%s seq=%s type=%s call=%s"
-                + (f" queued={queued}" if queued is not None else ""),
+                "side=%s session=%s run=%s stream=%s seq=%s type=%s call=%s" + suffix,
                 side, _field(session_id, 8), _field(run_id, 8), _field(stream_id, 8),
                 seq if type(seq) is int else _field(seq), _field(event_type), _field(call_id, 8),
             )
     except Exception:
         # 审计故障不应影响事件转发。
         pass
+
+
+def audit_media_external(
+    *,
+    session_id: str | None,
+    url: str,
+    size: int,
+    expires_at: int | float,
+) -> None:
+    """记录外链附件下发审计事件，只保留 host 与 path，绝不记录签名查询参数。"""
+    parts = urlsplit(url)
+    host = parts.netloc or parts.hostname or "-"
+    path = parts.path or "/"
+    audit_event(
+        "core",
+        session_id=session_id,
+        event_type="media_external",
+        extra={
+            "host": host,
+            "path": path,
+            "size": int(size),
+            "expiresAt": int(expires_at),
+        },
+    )
