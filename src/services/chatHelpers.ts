@@ -925,3 +925,21 @@ export function isGenericSessionTitle(title?: string): boolean {
   return /^(?:codex|opencode|hermes|antigravity|dsh|openclaw|mock)\s*(?:·|\()\s*.+$/i.test(t)
     || /^(?:new session|untitled|新建会话|新会话|新对话|ses_[a-z0-9]+|oc-[a-z0-9]+)$/i.test(t)
 }
+
+/**
+ * 本地待发消息是本地事实：任何历史/快照刷新都不许把它删掉。
+ *
+ * 刷新是按服务端返回重建列表的，而服务端此刻还没落库这条消息，于是乐观气泡被丢掉，
+ * 用户看到「消息消失，过一会才出现」。这里把仍在发送中/发送失败的本地用户消息补回去。
+ */
+export function preservePendingMessages(existing: ChatMessage[], next: ChatMessage[]): ChatMessage[] {
+  const pending = existing.filter(row => row.role === 'user' && (row.delivery === 'sending' || row.delivery === 'failed'))
+  if (!pending.length) return next
+  const represented = (row: ChatMessage) => next.some(candidate => candidate.role === 'user' && (
+    (row.requestId && candidate.requestId === row.requestId) ||
+    (row.id && candidate.id === row.id) ||
+    sameTurnContent(candidate, row)
+  ))
+  const missing = pending.filter(row => !represented(row))
+  return missing.length ? [...next, ...missing] : next
+}

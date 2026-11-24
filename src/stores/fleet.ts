@@ -82,6 +82,7 @@ import {
   mergeHistoryBoundaries,
   normalizeToolStatus,
   sameTurnContent,
+  preservePendingMessages,
   switchMessageBranch,
 } from '../services/chatHelpers'
 import { loadSoundPref, playCueSound, saveSoundPref } from '../services/soundCue'
@@ -2170,7 +2171,7 @@ export const useFleetStore = defineStore('fleet', () => {
           }
         }
       }
-      const merged = applySystemNotices(mergeHistoryBoundaries(existing, hydrated)).slice(-MAX_MESSAGES_PER_SESSION)
+      const merged = preservePendingMessages(existing, applySystemNotices(mergeHistoryBoundaries(existing, hydrated))).slice(-MAX_MESSAGES_PER_SESSION)
       messagesBySession.value = { ...messagesBySession.value, [k]: merged }
       const curSess = sessionsByKey.value[k]
       if (curSess && isGenericSessionTitle(curSess.title)) {
