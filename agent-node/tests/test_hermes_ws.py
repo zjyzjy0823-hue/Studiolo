@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from agent_node.adapters.hermes import HermesAdapter
-from agent_node.adapters.hermes_ws import HermesWsAdapter
+from agent_node.adapters.hermes_ws import HermesWsAdapter, ProviderError
 from agent_node.adapters.registry import build_adapter_registry
 from agent_node.config import DirectTransferConfig, HermesMediaConfig, NodeConfig, load_node_config
 from agent_node.daemon import AgentNodeDaemon, SessionStream
@@ -69,6 +69,108 @@ def wire_adapter(monkeypatch, tmp_path):
         return HermesWsAdapter((tmp_path,)), sockets
 
     return make
+
+
+@pytest.fixture(params=[
+    ("processes", "process.list", {"processes": [{"session_id": "proc_1", "command": "printf hello"}]}),
+    ("subagents", "subagent.list", {"subagents": [], "delegations": [{"status": "done"}]}),
+], ids=["processes", "subagents"])
+def session_list(request):
+    return request.param
+
+
+@pytest.mark.parametrize("canonical", [False, True], ids=["standalone", "authority"])
+def test_session_lists_resume_before_using_runtime_id(tmp_path, wire_adapter, session_list, canonical):
+    name, rpc_method, result = session_list
+    calls = []
+
+    def dispatch(_, request):
+        method, params = request["method"], request["params"]
+        if method == "client.capabilities":
+            return {"result": {}}
+        calls.append(method)
+        if method == "session.resume":
+            expected = {"session_id": "ui-session", "omit_messages": True}
+            if not canonical:
+                expected["lazy"] = True
+            assert params == expected
+            return {"result": {"session_id": "runtime-id", "session_key": "ui-session",
+                               "info": {"cwd": str(tmp_path)}}}
+        assert method == rpc_method
+        assert params == {"session_id": "runtime-id"}
+        return {"result": result}
+
+    async def run():
+        adapter, _ = wire_adapter(dispatch, canonical=canonical)
+        try:
+            read = getattr(adapter, name)
+            assert await read("ui-session") == result
+            assert await read("ui-session") == result
+            assert calls == ["session.resume", rpc_method, rpc_method]
+        finally:
+            await adapter.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", [None, "session.resume", "list", "invalid-result"])
+def test_session_list_daemon_rpc(tmp_path, wire_adapter, session_list, failure):
+    name, rpc_method, result = session_list
+    calls = []
+
+    def dispatch(_, request):
+        method = request["method"]
+        if method == "client.capabilities":
+            return {"result": {}}
+        calls.append(method)
+        if method == failure or (failure == "list" and method == rpc_method):
+            return {"error": {"code": -32000, "message": "session not found"}}
+        if method == "session.resume":
+            return {"result": {"session_id": "runtime-id", "info": {"cwd": str(tmp_path)}}}
+        assert method == rpc_method
+        return {"result": {} if failure == "invalid-result" else result}
+
+    async def run():
+        adapter, _ = wire_adapter(dispatch, canonical=True)
+        config = NodeConfig("https://core.example", "test", (tmp_path,), direct=DirectTransferConfig(enabled=False))
+        node = AgentNodeDaemon(config, adapters={"hermes": adapter}, staging_dir=tmp_path)
+        try:
+            if failure:
+                with pytest.raises(ProviderError) as error:
+                    await getattr(adapter, name)("ui-session")
+                assert calls == (["session.resume"] if failure == "session.resume" else ["session.resume", rpc_method])
+                expected = {"ok": False, "code": "provider_error", "error": str(error.value)}
+            else:
+                expected = {**result, "provider": "hermes"}
+            ws = AsyncMock()
+            await node.handle_command(ws, {"type": f"session.{name}", "session_id": "ui-session", "_rpcId": "rpc"})
+            ws.send.assert_awaited_once()
+            assert json.loads(ws.send.await_args.args[0]) == {
+                "type": "SessionReplayResult", "_rpcId": "rpc", "result": expected,
+            }
+        finally:
+            await adapter.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("provider", ["codex", "hermes", None])
+def test_session_list_daemon_unsupported(tmp_path, session_list, provider):
+    name, _, _ = session_list
+    config = NodeConfig("https://core.example", "test", (tmp_path,), direct=DirectTransferConfig(enabled=False))
+    node = AgentNodeDaemon(config, adapters={"hermes": HermesAdapter((tmp_path,))}, staging_dir=tmp_path)
+
+    async def run():
+        ws = AsyncMock()
+        await node.handle_command(ws, {
+            "type": f"session.{name}", "session_id": "ui-session", "_rpcId": "rpc", "provider": provider,
+        })
+        ws.send.assert_awaited_once()
+        assert json.loads(ws.send.await_args.args[0]) == {
+            "type": "SessionReplayResult", "_rpcId": "rpc", "result": {"unsupported": True},
+        }
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(("scenario", "expected"), [

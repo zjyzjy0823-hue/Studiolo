@@ -24,7 +24,7 @@ import websockets
 
 from .adapters.base import AgentAdapter, ApprovalCallback, EventEmitter
 from .adapters.hermes import HermesAdapter
-from .adapters.hermes_ws import HermesWsAdapter
+from .adapters.hermes_ws import HermesWsAdapter, ProviderError
 from .adapters.jsonrpc import JsonRpcError
 from .adapters.registry import build_adapter_registry
 from .alist_publish import LinkPublisher, PublishResult
@@ -578,6 +578,25 @@ class AgentNodeDaemon:
         events = await asyncio.to_thread(log.store.events_since, session_id, epoch, last_seq, min(limit + 1, MAX_SESSION_SEQ))
         return {**result, "epoch": epoch, "events": events[:limit], "hasMore": len(events) > limit}
 
+    async def _read_session_list(self, frame: dict[str, Any]) -> dict[str, Any]:
+        session_id = frame.get("session_id")
+        provider = frame.get("provider")
+        if (not isinstance(session_id, str) or not session_id.strip()
+                or (provider is not None and (not isinstance(provider, str) or not provider.strip()))):
+            return {"ok": False, "code": "invalid_params", "error": "Invalid session ID or provider"}
+        if provider is None:
+            provider = next((p for p, sid in self._session_cwds if sid == session_id), "hermes")
+        adapter = self.adapters.get(provider)
+        if not isinstance(adapter, HermesWsAdapter):
+            return {"unsupported": True}
+
+        read = adapter.processes if frame["type"] == "session.processes" else adapter.subagents
+        try:
+            result = await read(session_id)
+        except ProviderError as exc:
+            return {"ok": False, "code": "provider_error", "error": str(exc)}
+        return {**result, "provider": "hermes"}
+
     async def handle_command(self, ws: Any, frame: dict[str, Any], *, node_id: str | None = None) -> None:
         cmd = str(frame.get("type") or "")
         req_id = frame.get("requestId")
@@ -602,6 +621,14 @@ class AgentNodeDaemon:
             except (OSError, sqlite3.Error, ValueError):
                 _LOG.exception("Cannot read node session event log")
                 result = {"code": "node_execution_error", "source": "node"}
+            await send_back({"type": "SessionReplayResult", "_rpcId": rpc_id, "result": result})
+            return
+
+        if cmd in ("session.processes", "session.subagents"):
+            rpc_id = frame.get("_rpcId")
+            if not isinstance(rpc_id, str) or not rpc_id:
+                return
+            result = await self._read_session_list(frame)
             await send_back({"type": "SessionReplayResult", "_rpcId": rpc_id, "result": result})
             return
 

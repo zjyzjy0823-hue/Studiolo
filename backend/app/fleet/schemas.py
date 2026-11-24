@@ -6,7 +6,7 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 NodePlatform = Literal["macos", "windows", "linux", "android", "ios"]
@@ -34,6 +34,13 @@ class SessionEventsSinceInput(BaseModel):
     epoch: str = Field(min_length=1)
     lastSeq: int = Field(strict=True, ge=0, le=MAX_SESSION_SEQ)
     limit: int | None = Field(default=None, strict=True, gt=0, le=MAX_SESSION_SEQ)
+
+
+class SessionListInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str = Field(min_length=1, validation_alias=AliasChoices("session_id", "sessionId"))
+    provider: AdapterProvider | None = None
 
 
 def validate_endpoint_url(value: str, *, allow_insecure: bool = False) -> str:

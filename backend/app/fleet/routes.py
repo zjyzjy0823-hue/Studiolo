@@ -38,6 +38,7 @@ from .schemas import (
     NodePatchInput,
     NodeTokenOut,
     SessionEventsSinceInput,
+    SessionListInput,
     SessionSnapshotInput,
     SubscriptionQuota,
     TransferEndpoint,
@@ -157,7 +158,7 @@ async def read_subscription_quota(
 
 
 async def _session_replay_rpc(
-    node_id: str, method: str, payload: SessionSnapshotInput | SessionEventsSinceInput,
+    node_id: str, method: str, payload: SessionSnapshotInput | SessionEventsSinceInput | SessionListInput,
     user: User, db: Session, response: Response,
 ) -> dict[str, Any]:
     workspace = get_personal_workspace(db, user)
@@ -165,7 +166,7 @@ async def _session_replay_rpc(
     response.headers["Cache-Control"] = "no-store"
     if node.revoked_at is not None:
         return {"ok": False, "code": "node_offline", "error": "Target device node is offline"}
-    # Replay payloads are opaque to Core, including the owner-generated epoch and seq.
+    # Session RPC results are opaque to Core, including the owner-generated epoch and seq.
     return await fleet_hub.call_node_rpc(
         workspace.id, node.id, {"type": method, **payload.model_dump(exclude_none=True)}, timeout=45,
     )
@@ -185,6 +186,22 @@ async def session_events_since(
     user: User = Depends(current_user), db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     return await _session_replay_rpc(node_id, "session.events.since", payload, user, db, response)
+
+
+@router.post("/nodes/{node_id}/session/processes", response_model=None)
+async def session_processes(
+    node_id: str, payload: SessionListInput, response: Response,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return await _session_replay_rpc(node_id, "session.processes", payload, user, db, response)
+
+
+@router.post("/nodes/{node_id}/session/subagents", response_model=None)
+async def session_subagents(
+    node_id: str, payload: SessionListInput, response: Response,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return await _session_replay_rpc(node_id, "session.subagents", payload, user, db, response)
 
 
 @router.post("/nodes", status_code=201, response_model=NodeTokenOut)

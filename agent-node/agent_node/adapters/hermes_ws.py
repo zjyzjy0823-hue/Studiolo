@@ -51,6 +51,10 @@ def _loopback(host: str) -> bool:
         return host == "localhost"
 
 
+class ProviderError(RuntimeError):
+    """A Hermes provider request could not be completed."""
+
+
 class _GatewayConnection:
     """Correlate RPCs on one physical connection, with a dedicated receive loop."""
 
@@ -536,6 +540,29 @@ class HermesWsAdapter(HermesAdapter):
             session.seq = result.get("last_sequence") or 0
         self._require_cwd(sid)
         return session
+
+    async def _session_list(self, session_id: str, method: str, *list_fields: str) -> dict[str, Any]:
+        try:
+            async with asyncio.timeout(40):
+                connection = await self._online()
+                async with self._history_lock:
+                    session = await self._session(connection, session_id)
+                result = await connection.call(method, {"session_id": session.runtime_id})
+        except JsonRpcError as exc:
+            raise ProviderError(f"Hermes {method}: {exc.message}") from exc
+        except PathOutsideAllowedRootsError as exc:
+            raise ProviderError(str(exc)) from exc
+        except (*_TRANSPORT_ERRORS, KeyError, TypeError, ValueError) as exc:
+            raise ProviderError(f"Hermes {method} failed ({type(exc).__name__})") from exc
+        if any(not isinstance(result.get(field), list) for field in list_fields):
+            raise ProviderError(f"Hermes {method} returned an invalid result")
+        return result
+
+    async def processes(self, session_id: str) -> dict[str, Any]:
+        return await self._session_list(session_id, "process.list", "processes")
+
+    async def subagents(self, session_id: str) -> dict[str, Any]:
+        return await self._session_list(session_id, "subagent.list", "subagents", "delegations")
 
     async def read_session_replay(
         self, session_id: str, *, epoch: str | None, last_seq: int, limit: int,
