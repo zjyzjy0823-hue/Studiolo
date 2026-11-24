@@ -312,7 +312,8 @@ async def redeem_hermes_media(
     if node.user_id != user.id or node.revoked_at is not None:
         raise media.media_error("media_forbidden")
     db.close()
-    return relay.redeem(payload.ticket, transfer)
+    as_json = request.headers.get("x-studiolo-media-link", "").strip() == "1"
+    return relay.redeem(payload.ticket, transfer, as_json=as_json)
 
 
 # ---------------- 加密分块文件总线（/chat 附件与后续 Shared Space 共用） ----------------

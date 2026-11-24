@@ -12,7 +12,7 @@ from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.requests import ClientDisconnect
 
@@ -322,7 +322,7 @@ class MediaRelay:
             raise media_error("media_forbidden")
         return transfer
 
-    def redeem(self, ticket: str, transfer: MediaTransfer) -> MediaDownload | RedirectResponse:
+    def redeem(self, ticket: str, transfer: MediaTransfer, *, as_json: bool = False) -> MediaDownload | RedirectResponse | JSONResponse:
         if transfer.is_external:
             if transfer.expires_at is not None and transfer.expires_at <= self._clock():
                 self.discard(ticket)
@@ -332,8 +332,22 @@ class MediaRelay:
             size = transfer.size
             expires_at = transfer.expires_at or 0
             session_id = transfer.session_id
+            filename = transfer.filename
             self.discard(ticket)
             audit_media_external(session_id=session_id, url=url, size=size, expires_at=expires_at)
+            if as_json:
+                # fetch(redirect: 'manual') 在浏览器里只会得到 opaque-redirect（状态 0、读不到 Location），
+                # 所以给客户端一个显式的 JSON 模式，而不是依赖重定向头。
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "url": url,
+                        "expiresAt": int(expires_at),
+                        "sizeBytes": size,
+                        "fileName": filename,
+                    },
+                    headers={"Cache-Control": "no-store"},
+                )
             return RedirectResponse(
                 url=url,
                 status_code=307,

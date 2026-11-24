@@ -7,6 +7,7 @@ import { saveBlobToDevice } from '../../services/saveDownload'
 import { useFleetStore } from '../../stores/fleet'
 import type { ArtifactRef } from '../../types/fleet'
 import OpusIcon from '../ui/OpusIcon.vue'
+import { openExternal } from '../../utils/openExternal'
 import { formatBytes } from './providerMeta'
 
 const props = defineProps<{
@@ -96,8 +97,9 @@ async function loadHermesPreview() {
   loadingPreview.value = true
   mediaError.value = ''
   try {
-    const blob = await fleet.readHermesAttachment(key, reference, 'preview', controller.signal)
-    if (!controller.signal.aborted) hermesPreviewUrl.value = URL.createObjectURL(blob)
+    const media = await fleet.readHermesAttachment(key, reference, 'preview', controller.signal)
+    if (media.kind !== 'blob') throw new Error('该文件过大，无法内联预览，请直接下载')
+    if (!controller.signal.aborted) hermesPreviewUrl.value = URL.createObjectURL(media.blob)
   } catch (error) {
     if (!controller.signal.aborted) mediaError.value = error instanceof Error ? error.message : '图片预览失败'
   } finally {
@@ -197,8 +199,14 @@ async function handleDownload() {
       emit('status', android ? androidStatus : `已解密下载 ${fileName}`)
     } else if (reference) {
       if (!props.sessionKey) throw new Error('找不到附件所属的 Hermes 会话')
-      const blob = await fleet.readHermesAttachment(props.sessionKey, reference, 'download')
-      await saveBlobToDevice(blob, fileName)
+      const media = await fleet.readHermesAttachment(props.sessionKey, reference, 'download')
+      if (media.kind === 'external') {
+        // 大文件：服务端已经把文件放到 VPS，交给系统下载器（有进度、可续传）
+        await openExternal(media.url)
+        emit('status', android ? '已交给系统下载器' : `已交给下载器 ${fileName}`)
+        return
+      }
+      await saveBlobToDevice(media.blob, fileName)
       emit('status', android ? androidStatus : `正在下载 ${fileName}`)
     } else if (url) {
       const blob = await readDownloadBlob(url).catch(error => {

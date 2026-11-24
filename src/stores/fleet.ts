@@ -3714,11 +3714,11 @@ export const useFleetStore = defineStore('fleet', () => {
       adapter.provider === 'hermes' && adapter.capabilities.includes('hermes-media-v1'),
     )) throw new Error('当前节点未提供预览或下载服务')
     const route = requireFleetRoute()
-    const blob = await fetchHermesMedia(route.token, route.origin, {
+    const media = await fetchHermesMedia(route.token, route.origin, {
       nodeId: session.nodeId, sessionId: session.sessionId, reference, purpose,
     }, signal)
     checkFleetRoute(route)
-    return blob
+    return media
   }
 
   function requestFilesList(query = '', limit = 60, sKey?: string) {

@@ -257,3 +257,75 @@ def test_hermes_media_external_rejects_mixed_relay_bytes(client, users):
         resolved = pending.result(timeout=5)
         assert resolved.status_code == 502
         assert resolved.json()["detail"]["code"] == "media_relay_failed"
+
+
+def test_hermes_media_external_json_mode_returns_link_instead_of_redirect(client, users, monkeypatch, caplog):
+    owner, _stranger = users
+    node, node_auth = create_node(client, owner, "Hermes External JSON")
+    hello = {"adapters": [{"provider": "hermes", "status": "ready", "capabilities": ["hermes-media-v1"]}]}
+    payload = {
+        "nodeId": node,
+        "provider": "hermes",
+        "sessionId": "native-chat",
+        "reference": "./archive.tar.gz",
+        "purpose": "download",
+    }
+    signed_url = "https://dl.isidel.com/p/dl/abcd1234-archive.tar.gz?sign=SECRET_SIG_TOKEN:4102444800"
+    expires_at = int(time()) + 3600
+    big_size = 64 * 1024 * 1024
+
+    audit_log = logging.getLogger("test.studiolo.audit.core.json")
+    audit_log.setLevel(logging.INFO)
+    audit_log.propagate = True
+    monkeypatch.setattr("app.fleet.audit.audit_logger", lambda: audit_log)
+
+    with client.websocket_connect("/ws/fleet/node") as ws, ThreadPoolExecutor() as pool:
+        ws.send_json({"type": "auth", "token": node_auth["Authorization"].split()[1], "hello": hello})
+        assert ws.receive_json()["type"] == "NodeReady"
+
+        pending = pool.submit(client.post, f"{MEDIA}/resolve", headers=owner, json=payload)
+        command = ws.receive_json()
+        assert command["type"] == "hermes.media.relay"
+        ws.send_json({
+            "type": "HermesMediaResult",
+            "_rpcId": command["_rpcId"],
+            "ok": True,
+            "external": True,
+            "sessionId": command["sessionId"],
+            "url": signed_url,
+            "expiresAt": expires_at,
+            "sizeBytes": big_size,
+            "fileName": "archive.tar.gz",
+        })
+        resolved = pending.result(timeout=5)
+        assert resolved.status_code == 200
+        ticket = resolved.json()["ticket"]
+
+        with caplog.at_level(logging.INFO, logger="test.studiolo.audit.core.json"):
+            link = client.post(
+                f"{MEDIA}/redeem",
+                headers={**owner, "X-Studiolo-Media-Link": "1"},
+                json={"ticket": ticket},
+                follow_redirects=False,
+            )
+        assert link.status_code == 200
+        assert link.headers["Cache-Control"] == "no-store"
+        body = link.json()
+        assert body["url"] == signed_url
+        assert body["sizeBytes"] == big_size
+        assert body["fileName"] == "archive.tar.gz"
+        assert body["expiresAt"] == expires_at
+
+        # 票据一次性：JSON 模式也消费掉票据，再次兑换 410
+        again = client.post(
+            f"{MEDIA}/redeem",
+            headers={**owner, "X-Studiolo-Media-Link": "1"},
+            json={"ticket": ticket},
+            follow_redirects=False,
+        )
+        assert again.status_code == 410
+
+        # 审计同样只记 host + path，不泄漏签名
+        records = [r for r in caplog.records if "media_external" in r.getMessage()]
+        assert records, "expected media_external audit record"
+        assert "SECRET_SIG_TOKEN" not in records[-1].getMessage()
