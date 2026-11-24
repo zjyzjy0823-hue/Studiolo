@@ -9,8 +9,9 @@ import pytest
 from agent_node.adapters.hermes import HermesAdapter
 from agent_node.adapters.hermes_ws import HermesWsAdapter
 from agent_node.adapters.registry import build_adapter_registry
-from agent_node.config import DirectTransferConfig, NodeConfig, load_node_config
+from agent_node.config import DirectTransferConfig, HermesMediaConfig, NodeConfig, load_node_config
 from agent_node.daemon import AgentNodeDaemon, SessionStream
+from agent_node.hermes_media import relay_hermes_attachment
 
 
 class GatewaySocket:
@@ -68,6 +69,153 @@ def wire_adapter(monkeypatch, tmp_path):
         return HermesWsAdapter((tmp_path,)), sockets
 
     return make
+
+
+@pytest.mark.parametrize(("scenario", "expected"), [
+    ("live-basename", None),
+    ("live-full-path", None),
+    ("tool-only", "media_forbidden"),
+    ("text-only", "media_forbidden"),
+    ("different-turn", "media_forbidden"),
+    ("other-session", "media_forbidden"),
+    ("same-basename", "media_forbidden"),
+    ("url-argument", "media_forbidden"),
+    ("invalid-first-argument", "media_forbidden"),
+    ("failed-tool", "media_forbidden"),
+    ("outside-root", "media_forbidden"),
+    ("too-large", "media_too_large"),
+    ("restart", None),
+    ("restart-paged", None),
+    ("restart-failed-tool", "media_forbidden"),
+    ("restart-other-session", "media_forbidden"),
+    ("restart-ancestor", "media_forbidden"),
+])
+def test_tool_written_attachment_relay(tmp_path, monkeypatch, wire_adapter, scenario, expected):
+    allowed = tmp_path.resolve() / "allowed"
+    allowed.mkdir()
+    source = (allowed.parent if scenario == "outside-root" else allowed) / "report.html"
+    document = b"<p>Hermes report</p>"
+    source.write_bytes(document)
+    if scenario == "same-basename":
+        alternate = allowed / "other" / source.name
+        alternate.parent.mkdir()
+        alternate.write_bytes(b"Another file with the same name")
+    if scenario == "too-large":
+        with source.open("r+b") as file:
+            file.truncate(32 * 1024 * 1024 + 1)
+    token = allowed / "token"
+    token.write_text("test-token")
+    config = NodeConfig("https://core.example", "sn_live_test", (allowed,),
+                        direct=DirectTransferConfig(enabled=False),
+                        hermes_media=HermesMediaConfig("http://127.0.0.1", token))
+
+    session_id = "other" if scenario == "other-session" else "stored"
+    reference = str(source) if scenario in ("live-full-path", "outside-root") else "./report.html"
+    basename_or_path = reference if scenario == "live-full-path" else source.name
+    body = "The work is done." if scenario in ("tool-only", "different-turn") else f"Saved {basename_or_path}."
+    tool_name = "read_file" if scenario == "text-only" else "ExPoRt_report"
+    failed = scenario in ("failed-tool", "restart-failed-tool")
+    args = {"filePath": None, "path": f" {reference} ", "filename": "unused.html"}
+    if scenario == "url-argument":
+        args["filePath"] = f"file://{source}"
+    elif scenario == "invalid-first-argument":
+        args["filePath"] = 0
+    metadata = {"id": session_id, "cwd": str(allowed)}
+    row_owner = "older" if scenario in ("restart-other-session", "restart-ancestor") else "stored"
+    rows = [
+        {"role": "user", "text": "Create a report", "session_id": row_owner, "row_id": 1},
+        {"role": "tool", "name": tool_name, "args": args, "session_id": row_owner,
+         "tool_call_id": "write-1", "content": json.dumps({"error": "failed"} if failed else {"ok": True})},
+        {"role": "assistant", "text": body, "content": None, "session_id": row_owner, "row_id": 3},
+    ]
+    if scenario == "restart-ancestor":
+        metadata["parent_session_id"] = row_owner
+        rows = [{key: value for key, value in row.items() if key != "session_id"} for row in rows]
+    stamp = {"session_id": "stored", "admission_id": "admission-a", "execution_generation": 7}
+    calls, uploaded, download_paths = [], [], []
+    run = 0
+
+    def dispatch(socket, message):
+        nonlocal run
+        method, params = message["method"], message["params"]
+        if method == "session.transcript":
+            calls.append(params["session_id"])
+            page = {"session_id": params["session_id"], "rows": rows if scenario.startswith("restart") else []}
+            if scenario == "restart-paged":
+                if params.get("cursor") == "older":
+                    page["rows"] = rows[:2]
+                else:
+                    page.update(rows=[rows[2], *({"role": "user", "text": "Later prompt"} for _ in range(499))],
+                                next_cursor="older")
+            return {"result": page}
+        if method == "session.resume":
+            return {"result": {"session_id": "stored", "info": {"cwd": str(allowed)}}}
+        if method == "prompt.submit":
+            run += 1
+            if run == 1:
+                socket.event("tool.start", {"tool_id": "write-1", "name": tool_name}, **stamp)
+                socket.event("tool.complete", {"tool_id": "write-1", "args": args,
+                                                "result": {"error": "failed"} if failed else {"ok": True}}, **stamp)
+            socket.event("message.complete", {"text": body if run == 1 else "I mentioned report.html."}, **stamp)
+            return {"result": {"status": "started", "admission_id": "admission-a", "execution_generation": 7}}
+        return {"result": {}}
+
+    async def upstream(request):
+        if request.url.path == f"/api/sessions/{session_id}":
+            return httpx.Response(200, json=metadata)
+        if request.url.path == f"/api/sessions/{session_id}/messages":
+            return httpx.Response(200, json={"messages": []})
+        assert request.url.path == "/api/files/download"
+        download_paths.append(request.url.params["path"])
+        return httpx.Response(200, content=document)
+
+    async def core(request):
+        uploaded.append(await request.aread())
+        return httpx.Response(204)
+
+    async def relay(*args, **kwargs):
+        return await relay_hermes_attachment(*args, **kwargs, transport=httpx.MockTransport(upstream),
+                                            core_transport=httpx.MockTransport(core))
+
+    async def exercise():
+        adapter, _ = wire_adapter(dispatch, canonical=True)
+        daemon = AgentNodeDaemon(config, adapters={"hermes": adapter}, staging_dir=tmp_path)
+        ws = AsyncMock()
+        monkeypatch.setattr("agent_node.daemon.relay_hermes_attachment", relay)
+        try:
+            if scenario.startswith("restart"):
+                assert adapter.attachment_writes("stored") == set()
+            else:
+                for turn in range(2 if scenario == "different-turn" else 1):
+                    await adapter.send_prompt(session_id="stored", text="Report", request_id=f"req-{turn}",
+                                              emit=AsyncMock(), request_approval=AsyncMock())
+                calls.clear()
+
+            await daemon.handle_command(ws, {
+                "type": "hermes.media.relay", "_rpcId": "relay-1", "nodeId": "node", "provider": "hermes",
+                "sessionId": session_id, "reference": "./other/report.html" if scenario == "same-basename" else reference,
+                "transferId": "0" * 32, "maxBytes": 64 * 1024 * 1024,
+            }, node_id="node")
+            ws.send.assert_awaited_once()
+            result = json.loads(ws.send.await_args.args[0])
+            assert result["type"] == "HermesMediaResult"
+            if expected:
+                assert result["ok"] is False and result["code"] == expected
+                assert uploaded == download_paths == []
+            else:
+                assert result["ok"] is True and result["sizeBytes"] == len(document)
+                assert result["fileName"] == source.name
+                assert uploaded == [document]
+                assert download_paths == [str(source)]
+            if scenario in ("restart", "restart-paged"):
+                assert calls == ["stored"] * (2 if scenario == "restart-paged" else 1)
+                assert adapter.attachment_writes("stored") == {reference}
+            if scenario.startswith("live") or scenario == "restart-ancestor":
+                assert calls == []
+        finally:
+            await adapter.close()
+
+    asyncio.run(exercise())
 
 
 def test_idle_transcript_relays_only_latest_new_assistant_once(tmp_path, wire_adapter):

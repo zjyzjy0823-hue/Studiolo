@@ -520,7 +520,11 @@ class AgentNodeDaemon:
             history = adapter.live_attachment_history(sid) if isinstance(sid, str) else []
             result = {"type": "HermesMediaResult", "_rpcId": rpc_id, "sessionId": sid}
             try:
-                result.update(await relay_hermes_attachment(self.config, frame, node_id, history), ok=True)
+                result.update(await relay_hermes_attachment(
+                    self.config, frame, node_id, history,
+                    written_paths=adapter.attachment_writes(sid) if isinstance(sid, str) else frozenset(),
+                    restore_written_paths=adapter.restore_attachment_writes if isinstance(adapter, HermesWsAdapter) else None,
+                ), ok=True)
             except MediaError as exc:
                 result.update(ok=False, code=str(exc))
             await send_back(result)

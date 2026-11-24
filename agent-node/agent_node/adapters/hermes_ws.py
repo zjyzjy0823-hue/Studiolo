@@ -24,6 +24,7 @@ import websockets
 from websockets.asyncio.client import ClientConnection
 
 from ..config import HermesMediaConfig, PathOutsideAllowedRootsError, ensure_allowed_path
+from ..hermes_media import transcript_attachment_paths
 from .base import (
     AdapterProbe, ApprovalCallback, EventEmitter, build_todo_updated_event,
     build_token_usage_event, build_tool_call_update, compaction_frame, compaction_record,
@@ -535,37 +536,59 @@ class HermesWsAdapter(HermesAdapter):
         return session
 
     async def _read_transcript(self, connection: _GatewayConnection, session: _Session,
-                               limit: int = _HISTORY_LIMIT) -> list[dict[str, Any]]:
+                               limit: int = _HISTORY_LIMIT, *, attachment_reference: str | None = None) -> list[dict[str, Any]]:
         rows: deque[dict[str, Any]] = deque()
         history: list[dict[str, Any]] = []
         cursor: str | None = None
         seen = set()
+        raw = attachment_reference is not None
+        project = list if raw else _transcript_history
         try:
-            while len(history) < limit:
+            while raw or len(history) < limit:
                 params: dict[str, Any] = {"session_id": session.stored_id, "order": "latest", "limit": limit}
                 if cursor:
                     params["cursor"] = cursor
                 result = await connection.call("session.transcript", params, timeout=30)
+                if raw and result.get("session_id", session.stored_id) != session.stored_id:
+                    return []
                 page = result.get("rows") or []
-                rows.extendleft(reversed(page))
-                history = _transcript_history(list(rows))
-                next_cursor = result.get("next_cursor")
+                if raw and not isinstance(page, list):
+                    return []
                 if result.get("reset") and cursor:
                     # A rotation invalidated the page being assembled. The fresh
                     # page replaces everything fetched under its previous cursor.
-                    return _transcript_history(page)[-limit:]
+                    # Attachment checks fall back to rows with explicit session ownership.
+                    return [] if raw else _transcript_history(page)[-limit:]
+                rows.extendleft(reversed(page))
+                history = project(list(rows))
+                if raw and attachment_reference in transcript_attachment_paths(history, session.stored_id):
+                    break
+                next_cursor = result.get("next_cursor")
                 if not page or not next_cursor or next_cursor in seen:
                     break
                 seen.add(next_cursor)
                 cursor = next_cursor
         except JsonRpcError as exc:
-            if self._canonical or exc.code != -32601:
+            if raw or self._canonical or exc.code != -32601:
                 # A legacy fresh session may not have been persisted yet. Its history
                 # comes from session.history when the transcript verb is unavailable.
                 raise
             result = await connection.call("session.history", {"session_id": session.runtime_id})
             history = _transcript_history(result.get("messages") or [])
-        return history[-limit:]
+        return history if raw else history[-limit:]
+
+    async def restore_attachment_writes(self, session_id: str, reference: str) -> set[str]:
+        try:
+            async with asyncio.timeout(5):
+                connection = await self._online()
+                # session.transcript reads a stored session without attaching to its runtime.
+                rows = await self._read_transcript(connection, _Session(session_id), attachment_reference=reference)
+        except (*_TRANSPORT_ERRORS, ConnectionError, JsonRpcError):
+            return set()
+        paths = transcript_attachment_paths(rows, session_id)
+        if paths:
+            self._attachment_writes.setdefault(session_id, set()).update(paths)
+        return paths
 
     async def _recover(self, connection: _GatewayConnection, sid: str, session: _Session) -> None:
         turn = self._active.get(sid)
@@ -906,7 +929,7 @@ class HermesWsAdapter(HermesAdapter):
                 session.connection = None
                 await connection.call("session.delete", {"session_id": session.stored_id})
             self._runtime_sessions.pop(session.runtime_id, None)
-            for cache in (self._sessions, self._session_cwds, self._history, self._context_usage,
+            for cache in (self._sessions, self._session_cwds, self._history, self._attachment_writes, self._context_usage,
                           self._model_by_session, self._effort_current):
                 cache.pop(session_id, None)
 
@@ -1011,6 +1034,7 @@ class HermesWsAdapter(HermesAdapter):
             while not await self._handle_event(sid, session, turn, await turn.events.get()):
                 pass
         finally:
+            self._remember_attachment_writes(sid, request_id)
             self._active.pop(sid, None)
             self._turns.pop(sid, None)
             turn.admitted.set()
@@ -1183,10 +1207,9 @@ class HermesWsAdapter(HermesAdapter):
                       tool_input=payload.get("args"), output=output, duration_ms=duration_ms,
                       error=_tool_output(error) if error else None)
         update = build_tool_call_update(**params, delta_output=payload.get("message") if kind == "tool.progress" else None)
-        if kind != "tool.progress":
-            self._record_history_update(self._history[sid], "tool_call" if kind == "tool.start" else "tool_call_update",
-                                        None, {key: value for key, value in update.items()
-                                               if key not in ("type", "sessionId")}, turn.request_id)
+        self._record_history_update(self._history[sid], "tool_call" if kind == "tool.start" else "tool_call_update",
+                                    None, {key: value for key, value in update.items()
+                                           if key not in ("type", "sessionId", "deltaOutput")}, turn.request_id)
         if kind == "tool.start":
             turn.reply_tail = ""
             await self._emit_turn(sid, turn, {"type": "ToolCall", "callId": str(call_id),

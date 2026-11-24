@@ -1,8 +1,10 @@
 """Serve an attachment referenced by a Hermes assistant turn through the Core relay."""
 
 import asyncio
+from collections.abc import Awaitable, Callable, Iterable, Set
 from contextlib import contextmanager
 from pathlib import Path
+import json
 import os
 import re
 import stat
@@ -20,27 +22,135 @@ _MEDIA_TAG = re.compile(
 )
 _SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _TRANSFER_ID = re.compile(r"[A-Za-z0-9_-]{32,64}")
+_WRITE_TOOL_NAMES = ("write", "create", "save", "export")
+_TOOL_PATH_KEYS = ("filePath", "path", "file", "target_file", "filename")
+_FAILED_TOOL_STATUSES = ("error", "failed", "declined", "cancelled", "canceled")
+_COMPLETED_TOOL_STATUSES = ("completed", "succeeded", "done")
 
 
 class MediaError(Exception):
     """A stable result code that can safely cross the control channel."""
 
 
+def _assistant_text(message: Any) -> str:
+    if (not isinstance(message, dict) or message.get("role") != "assistant"
+            or message.get("display_kind") == "hidden"):
+        return ""
+    content = message.get("content", message.get("text"))
+    if isinstance(content, list):
+        return "".join(part["text"] for part in content if isinstance(part, dict)
+                       and part.get("type") in ("text", "output_text") and isinstance(part.get("text"), str))
+    return content if isinstance(content, str) else ""
+
+
 def references_attachment(messages: list[Any], reference: str) -> bool:
+    return any(
+        next(group for group in match.groups() if group is not None).strip() == reference
+        for message in messages for match in _MEDIA_TAG.finditer(_assistant_text(message))
+    )
+
+
+def written_attachment_paths(messages: Iterable[dict[str, Any]], *, active: bool = False) -> set[str]:
+    """Mirror collectMessageInlineAttachments on the merged assistant tool calls."""
+    paths: set[str] = set()
     for message in messages:
-        if (not isinstance(message, dict) or message.get("role") != "assistant"
-                or message.get("display_kind") == "hidden"):
+        body = _assistant_text(message)
+        if not body:
             continue
-        content = message.get("content", message.get("text"))
-        if isinstance(content, list):
-            content = "".join(part["text"] for part in content if isinstance(part, dict)
-                              and part.get("type") in ("text", "output_text") and isinstance(part.get("text"), str))
-        if isinstance(content, str) and any(
-            next(group for group in match.groups() if group is not None).strip() == reference
-            for match in _MEDIA_TAG.finditer(content)
-        ):
-            return True
-    return False
+        for tool in message.get("toolCalls") or ():
+            status = str(tool.get("status") or "").strip().lower()
+            if status in _FAILED_TOOL_STATUSES or (not active and status and status not in _COMPLETED_TOOL_STATUSES):
+                continue
+            name, arguments = tool.get("name"), tool.get("input")
+            if not isinstance(name, str) or not any(verb in name.lower() for verb in _WRITE_TOOL_NAMES):
+                continue
+            if not isinstance(arguments, dict):
+                continue
+            raw = next((arguments[key] for key in _TOOL_PATH_KEYS if arguments.get(key) is not None), None)
+            if not isinstance(raw, str) or not (path := raw.strip()) or "://" in raw:
+                continue
+            basename = path.replace("\\", "/").rsplit("/", 1)[-1] or path
+            if path in body or basename in body:
+                paths.add(path)
+    return paths
+
+
+def _decoded_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def transcript_attachment_paths(rows: Iterable[Any], session_id: str, *, require_owner: bool = False) -> set[str]:
+    """Rebuild live assistant messages from Hermes's persisted tool-call and tool-result rows."""
+    paths: set[str] = set()
+    body: list[str] = []
+    calls: dict[str, dict[str, Any]] = {}
+    after_tool = False
+
+    def flush() -> None:
+        nonlocal after_tool
+        if body and calls:
+            paths.update(written_attachment_paths([{"role": "assistant", "text": "\n".join(body),
+                                                    "toolCalls": calls.values()}]))
+        after_tool = False
+        body.clear()
+        calls.clear()
+
+    for row in rows:
+        if (not isinstance(row, dict) or row.get("session_id", None if require_owner else session_id) != session_id
+                or row.get("display_kind") == "hidden" or row.get("row_kind") == "compaction"):
+            flush()
+            continue
+        role = row.get("role")
+        if role == "assistant":
+            if not after_tool:
+                flush()
+            # A tool result followed by a reply is one assistant message in the live event stream.
+            text = row["text"] if isinstance(row.get("text"), str) else _assistant_text(row)
+            if text:
+                body.append(text)
+            after_tool = False
+            tools = row.get("toolCalls") or row.get("tool_calls")
+            tools = tools if isinstance(tools, list) else []
+            content = row.get("content")
+            if isinstance(content, list):
+                tools = [*tools, *(part for part in content if isinstance(part, dict)
+                                    and part.get("type") in ("tool", "tool_use"))]
+            for tool in tools:
+                if not isinstance(tool, dict):
+                    continue
+                call_id = tool.get("callId") or tool.get("toolCallId") or tool.get("id")
+                if not isinstance(call_id, str) or not call_id:
+                    continue
+                function = _decoded_object(tool.get("function"))
+                calls[call_id] = {
+                    "name": tool.get("name") or function.get("name"),
+                    "input": tool.get("input", _decoded_object(function.get("arguments"))),
+                    "status": tool.get("status"),
+                }
+        elif role == "tool":
+            call_id = row.get("tool_call_id") or row.get("callId") or row.get("row_id")
+            if not isinstance(call_id, (str, int)) or not call_id:
+                continue
+            tool = calls.setdefault(str(call_id), {})
+            name = row.get("name") or row.get("tool_name")
+            if name and name != "tool":
+                tool["name"] = name
+            if row.get("args") is not None:
+                tool["input"] = row["args"]
+            if row.get("error") or _decoded_object(row.get("content")).get("error"):
+                tool["status"] = "error"
+            elif str(tool.get("status") or "").strip().lower() not in _FAILED_TOOL_STATUSES:
+                tool["status"] = row.get("status") or "completed"
+            after_tool = True
+        else:
+            flush()
+    flush()
+    return paths
 
 
 @contextmanager
@@ -97,6 +207,8 @@ async def relay_hermes_attachment(
     node_id: str | None,
     live_history: list[dict[str, Any]],
     *,
+    written_paths: Set[str] = frozenset(),
+    restore_written_paths: Callable[[str, str], Awaitable[Set[str]]] | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
     core_transport: httpx.AsyncBaseTransport | None = None,
 ) -> dict[str, Any]:
@@ -130,7 +242,12 @@ async def relay_hermes_attachment(
                 if (not isinstance(metadata, dict) or metadata.get("id") != session_id
                         or not isinstance(metadata.get("cwd"), str) or not metadata["cwd"]):
                     raise MediaError("media_forbidden")
-                if not references_attachment(live_history, reference):
+                authorized = references_attachment(live_history, reference) or reference in written_paths
+                if (not authorized and restore_written_paths is not None
+                        and not metadata.get("parent_session_id") and metadata.get("end_reason") != "compression"):
+                    # A stored transcript can include rows of older compression segments without row owners.
+                    authorized = reference in await restore_written_paths(session_id, reference)
+                if not authorized:
                     history = await upstream.get(f"{session_url}/messages", params={
                         "limit": 500, "order": "latest", "include_compacted": "true", "inline_images": "false",
                     })
@@ -139,9 +256,11 @@ async def relay_hermes_attachment(
                     rows = data.get("messages") if isinstance(data, dict) else None
                     # Hermes can project compression ancestors into the requested transcript.
                     # Each attachment must still belong to the original session row.
-                    if not isinstance(rows, list) or not references_attachment(
-                        [row for row in rows if isinstance(row, dict) and row.get("session_id") == session_id],
-                        reference,
+                    if not isinstance(rows, list) or not (
+                        references_attachment(
+                            [row for row in rows if isinstance(row, dict) and row.get("session_id") == session_id],
+                            reference,
+                        ) or reference in transcript_attachment_paths(rows, session_id, require_owner=True)
                     ):
                         raise MediaError("media_forbidden")
 

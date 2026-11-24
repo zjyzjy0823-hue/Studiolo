@@ -14,6 +14,7 @@ import httpx
 import websockets
 
 from ..config import PathOutsideAllowedRootsError, ensure_allowed_path
+from ..hermes_media import written_attachment_paths
 from .base import (
     AdapterProbe,
     AgentAdapter,
@@ -167,6 +168,7 @@ class HermesAdapter(AgentAdapter):
         self._history_replays: dict[str, deque[dict[str, Any]]] = {}
         self._history_updated: dict[str, asyncio.Event] = {}
         self._history: OrderedDict[str, deque[dict[str, Any]]] = OrderedDict()
+        self._attachment_writes: dict[str, set[str]] = {}
         self._context_usage: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._context_waiters: dict[str, asyncio.Event] = {}
         self._turns: dict[str, tuple[str, EventEmitter]] = {}
@@ -333,6 +335,21 @@ class HermesAdapter(AgentAdapter):
 
     def live_attachment_history(self, session_id: str) -> list[dict[str, Any]]:
         return [row for row in self._history.get(session_id, ()) if row.get("runId")]
+
+    def _remember_attachment_writes(self, session_id: str, run_id: str) -> None:
+        paths = written_attachment_paths(
+            row for row in self._history.get(session_id, ()) if row.get("runId") == run_id
+        )
+        if paths:
+            self._attachment_writes.setdefault(session_id, set()).update(paths)
+
+    def attachment_writes(self, session_id: str) -> set[str]:
+        paths = self._attachment_writes.get(session_id, set())
+        if turn := self._turns.get(session_id):
+            return paths | written_attachment_paths(
+                (row for row in self._history.get(session_id, ()) if row.get("runId") == turn[0]), active=True
+            )
+        return paths.copy()
 
     async def _get_models_from_session(self, proc: StdioJsonRpcProcess, sid: str) -> None:
         async with self._history_lock:
@@ -711,6 +728,7 @@ class HermesAdapter(AgentAdapter):
             else:
                 await emit({"type": "Completed", "sessionId": session_id, "runId": request_id, "requestId": request_id})
         finally:
+            self._remember_attachment_writes(session_id, request_id)
             self._turns.pop(session_id, None)
             self._approvals.pop(session_id, None)
             for key in [key for key in self._tool_starts if key[0] == session_id]:
@@ -741,7 +759,8 @@ class HermesAdapter(AgentAdapter):
                     break
                 for call in message.get("toolCalls", []):
                     if call["callId"] == tool["callId"]:
-                        call.update({k: v for k, v in tool.items() if v is not None})
+                        call.update({k: v for k, v in tool.items()
+                                     if v is not None and (k != "name" or v != "tool")})
                         return True
 
         if not messages or messages[-1]["role"] != role or messages[-1].get("runId") != run_id:
