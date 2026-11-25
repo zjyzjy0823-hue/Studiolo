@@ -27,6 +27,16 @@ class SessionSnapshotInput(BaseModel):
     provider: AdapterProvider | None = None
 
 
+class SessionOlderInput(BaseModel):
+    """P10：窗口化后的向上分页（beforeCursor 来自上一次窗口的返回值）。"""
+    model_config = ConfigDict(extra="forbid")
+
+    sessionId: str = Field(min_length=1)
+    provider: AdapterProvider | None = None
+    beforeCursor: str = Field(min_length=1)
+    limit: int = Field(default=120, ge=1, le=500)
+
+
 class SessionEventsSinceInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

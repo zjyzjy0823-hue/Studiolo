@@ -8,7 +8,7 @@ import { renderToString } from 'vue/server-renderer'
 import { formatWorkLogDuration, readTurnTestResult } from '../src/services/chatHelpers.ts'
 import { mapEpochSnapshotMessage } from '../src/services/epochSnapshot.ts'
 import { buildThreadRenderItems } from '../src/services/messageSegments.ts'
-import { createSessionSync, readSyncMode } from '../src/services/sessionSync.ts'
+import { createSessionSync, fetchOlder, readSyncMode } from '../src/services/sessionSync.ts'
 
 const snapshot = { messages: [{ role: 'assistant', text: '回答' }] }
 const event = (seq, text = String(seq)) => ({ seq, text })
@@ -304,4 +304,255 @@ test('Fleet opts in on its auth frame and falls back for only the incomplete ses
   fleet.subscribeSession(incomplete)
   assert.equal(requests.length, 2)
   assert.equal(sent.filter(frame => frame.type === 'session.history').length, 2)
+})
+
+test('fetchOlder calls session.older with aligned params and parses snapshot or flat responses', async () => {
+  const calls = []
+  const olderMessages = [
+    { id: 'm1', role: 'user', text: 'older 1' },
+    { id: 'm2', role: 'assistant', text: 'older 2' },
+  ]
+  const responses = [
+    {
+      epoch: 'one',
+      lastSeq: 120,
+      snapshot: { messages: olderMessages, lastSeq: 120 },
+      hasMoreBefore: true,
+      beforeCursor: 'id:m1',
+    },
+    {
+      messages: [{ id: 'm0', role: 'user', text: 'earliest' }],
+      hasMoreBefore: false,
+      beforeCursor: null,
+    },
+    { code: 'invalid_cursor', error: 'Cursor not found' },
+  ]
+  const rpc = async (method, params) => {
+    calls.push([method, params])
+    return responses.shift()
+  }
+
+  const first = await fetchOlder({ rpc, sessionKey: 'sess-1', beforeCursor: 'id:m3', limit: 60 })
+  assert.deepEqual(first, { messages: olderMessages, hasMoreBefore: true, beforeCursor: 'id:m1' })
+
+  const second = await fetchOlder({ rpc, sessionKey: 'sess-1', beforeCursor: 'id:m1' })
+  assert.deepEqual(second, {
+    messages: [{ id: 'm0', role: 'user', text: 'earliest' }],
+    hasMoreBefore: false,
+  })
+  assert.equal(second.beforeCursor, undefined)
+
+  await assert.rejects(
+    fetchOlder({ rpc, sessionKey: 'sess-1', beforeCursor: 'bad' }),
+    /invalid_cursor: Cursor not found/,
+  )
+
+  assert.deepEqual(calls, [
+    ['session.older', { sessionKey: 'sess-1', beforeCursor: 'id:m3', limit: 60 }],
+    ['session.older', { sessionKey: 'sess-1', beforeCursor: 'id:m1' }],
+    ['session.older', { sessionKey: 'sess-1', beforeCursor: 'bad' }],
+  ])
+})
+
+async function createFleetOlderFixture(t, { syncMode = 'epoch', withVue = false, onFetch } = {}) {
+  const server = await createServer({
+    configFile: false,
+    ...(withVue ? { plugins: [vue()] } : {}),
+    server: { middlewareMode: true, ws: false, watch: null },
+    optimizeDeps: { noDiscovery: true },
+  })
+  t.after(() => server.close())
+  const { useFleetStore, sessionKey } = await server.ssrLoadModule('/src/stores/fleet.ts')
+  const AgentChatThread = withVue
+    ? (await server.ssrLoadModule('/src/components/chat/AgentChatThread.vue')).default
+    : null
+  const sent = []
+  let socket
+  class MockSocket {
+    static OPEN = 1
+    readyState = MockSocket.OPEN
+    constructor() { socket = this }
+    send(raw) { sent.push(JSON.parse(raw)) }
+    close() {}
+  }
+  const fetchCalls = []
+  t.mock.method(globalThis, 'fetch', async (url, init = {}) => {
+    const body = typeof init.body === 'string' ? JSON.parse(init.body) : undefined
+    fetchCalls.push([url, body])
+    if (onFetch) return onFetch(url, body)
+    return Response.json({})
+  })
+  const storeMap = new Map([
+    ['studiolo:access-token', 'token'],
+    ['studiolo.syncMode', syncMode],
+  ])
+  for (const [name, value] of Object.entries({
+    WebSocket: MockSocket,
+    localStorage: {
+      getItem: key => (storeMap.has(key) ? storeMap.get(key) : null),
+      setItem: (key, val) => { storeMap.set(key, String(val)) },
+      removeItem: key => { storeMap.delete(key) },
+    },
+  })) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, name)
+    Object.defineProperty(globalThis, name, { configurable: true, value })
+    t.after(() => {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor)
+      else delete globalThis[name]
+    })
+  }
+  const pinia = createPinia()
+  const fleet = useFleetStore(pinia)
+  t.after(() => { fleet.disconnectSocket(); disposePinia(pinia) })
+  const session = { nodeId: 'node', provider: 'hermes', sessionId: 'sess-older', title: '测试', cwd: '' }
+  const key = sessionKey(session.nodeId, session.provider, session.sessionId)
+  fleet.sessionsByKey = { [key]: session }
+  fleet.connectSocket()
+  socket.onopen()
+  fleet.handleWsEvent({ type: 'FleetSnapshot', nodes: [] })
+  fleet.handleWsEvent({ type: 'Ready', serverCapabilities: ['session.events.v1'] })
+  return { fleet, pinia, session, key, sent, fetchCalls, AgentChatThread }
+}
+
+const makeRawMessages = (start, count) => Array.from({ length: count }, (_, idx) => {
+  const num = start + idx
+  return {
+    id: `m${num}`,
+    role: num % 2 === 1 ? 'user' : 'assistant',
+    text: `message-${num}`,
+    createdAt: num * 1000,
+  }
+})
+
+test('epoch mode requestOlderHistory prepends and deduplicates by id in chronological order', async t => {
+  const initial20 = makeRawMessages(26, 20) // m26..m45
+  const older30With5Overlap = makeRawMessages(1, 30) // m1..m30 (m26..m30 overlap)
+  const { fleet, key, fetchCalls } = await createFleetOlderFixture(t, {
+    syncMode: 'epoch',
+    onFetch: async url => {
+      if (url.endsWith('/session/snapshot')) {
+        return Response.json({
+          ...opened('one', 45),
+          snapshot: { lastSeq: 45, messages: initial20 },
+          hasMoreBefore: true,
+          beforeCursor: 'id:m26',
+        })
+      }
+      if (url.endsWith('/session/older')) {
+        return Response.json({
+          ...opened('one', 45),
+          snapshot: { lastSeq: 45, messages: older30With5Overlap },
+          hasMoreBefore: true,
+          beforeCursor: 'id:m1',
+        })
+      }
+      throw new Error(`unexpected url: ${url}`)
+    },
+  })
+
+  assert.equal(fleet.subscribeSession(key), true)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(fleet.messagesBySession[key].length, 20)
+  assert.equal(fleet.historyCursorBySession[key], 'id:m26')
+
+  assert.equal(fleet.requestOlderHistory(key), true)
+  await new Promise(resolve => setImmediate(resolve))
+
+  const merged = fleet.messagesBySession[key]
+  assert.equal(merged.length, 45)
+  assert.deepEqual(merged.map(m => m.id), Array.from({ length: 45 }, (_, i) => `m${i + 1}`))
+  assert.equal(fleet.historyCursorBySession[key], 'id:m1')
+  assert.deepEqual(fetchCalls.at(-1), [
+    '/api/v1/fleet/nodes/node/session/older',
+    { sessionId: 'sess-older', provider: 'hermes', beforeCursor: 'id:m26', limit: 60 },
+  ])
+})
+
+test('epoch mode hides load-older button when hasMoreBefore is false', async t => {
+  const { fleet, pinia, key, fetchCalls, AgentChatThread } = await createFleetOlderFixture(t, {
+    syncMode: 'epoch',
+    withVue: true,
+    onFetch: async url => {
+      if (url.endsWith('/session/snapshot')) {
+        return Response.json({
+          ...opened('one', 10),
+          snapshot: { lastSeq: 10, messages: makeRawMessages(6, 5) },
+          hasMoreBefore: true,
+          beforeCursor: 'id:m6',
+        })
+      }
+      if (url.endsWith('/session/older')) {
+        return Response.json({
+          ...opened('one', 10),
+          snapshot: { lastSeq: 10, messages: makeRawMessages(1, 5) },
+          hasMoreBefore: false,
+          beforeCursor: null,
+        })
+      }
+      throw new Error(`unexpected url: ${url}`)
+    },
+  })
+
+  assert.equal(fleet.subscribeSession(key), true)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(fleet.historyCursorBySession[key], 'id:m6')
+  const beforeHtml = await renderToString(createSSRApp(AgentChatThread, { mobile: true, sessionKey: key }).use(pinia))
+  assert.match(beforeHtml, /加载更早历史消息/)
+
+  assert.equal(fleet.requestOlderHistory(key), true)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(fleet.historyCursorBySession[key], null)
+  assert.equal(fleet.messagesBySession[key].length, 10)
+  const afterHtml = await renderToString(createSSRApp(AgentChatThread, { mobile: true, sessionKey: key }).use(pinia))
+  assert.doesNotMatch(afterHtml, /加载更早历史消息/)
+
+  const callsBefore = fetchCalls.length
+  assert.equal(fleet.requestOlderHistory(key), false)
+  assert.equal(fetchCalls.length, callsBefore)
+})
+
+test('epoch mode requestOlderHistory failure keeps existing messages intact and reports lastError', async t => {
+  const initial20 = makeRawMessages(26, 20)
+  const { fleet, key } = await createFleetOlderFixture(t, {
+    syncMode: 'epoch',
+    onFetch: async url => {
+      if (url.endsWith('/session/snapshot')) {
+        return Response.json({
+          ...opened('one', 45),
+          snapshot: { lastSeq: 45, messages: initial20 },
+          hasMoreBefore: true,
+          beforeCursor: 'id:m26',
+        })
+      }
+      if (url.endsWith('/session/older')) {
+        return Response.json({ code: 'invalid_cursor', error: 'Cursor not found' })
+      }
+      throw new Error(`unexpected url: ${url}`)
+    },
+  })
+
+  assert.equal(fleet.subscribeSession(key), true)
+  await new Promise(resolve => setImmediate(resolve))
+  const beforeIds = fleet.messagesBySession[key].map(m => m.id)
+  assert.equal(beforeIds.length, 20)
+
+  assert.equal(fleet.requestOlderHistory(key), true)
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.deepEqual(fleet.messagesBySession[key].map(m => m.id), beforeIds)
+  assert.match(fleet.lastError ?? '', /invalid_cursor/)
+  assert.equal(fleet.pendingHistoryPages[key], undefined)
+  assert.equal(fleet.historyCursorBySession[key], 'id:m26')
+})
+
+test('legacy mode requestOlderHistory does not call session.older', async t => {
+  const { fleet, key, sent, fetchCalls } = await createFleetOlderFixture(t, {
+    syncMode: 'legacy',
+  })
+  fleet.historyCursorBySession[key] = 'legacy-cursor'
+  assert.equal(fleet.requestOlderHistory(key), true)
+  assert.equal(fetchCalls.length, 0)
+  const historyReq = sent.find(frame => frame.type === 'session.history')
+  assert.ok(historyReq)
+  assert.equal(historyReq.beforeCursor, 'legacy-cursor')
 })

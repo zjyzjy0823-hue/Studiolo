@@ -72,3 +72,18 @@ def test_core_passes_through_session_lists(client, path, params, result):
             assert response.status_code == 200
             assert response.headers["Cache-Control"] == "no-store"
             assert response.json() == reply
+
+
+def test_session_older_input_accepts_cursor_and_limit():
+    """P10：/session/older 必须接受 beforeCursor 与 limit（早先误用 snapshot schema 会 422）。"""
+    from app.fleet.schemas import SessionOlderInput
+
+    parsed = SessionOlderInput.model_validate({"sessionId": "s1", "beforeCursor": "c1", "limit": 80})
+    assert parsed.beforeCursor == "c1"
+    assert parsed.limit == 80
+
+    default = SessionOlderInput.model_validate({"sessionId": "s1", "beforeCursor": "c1"})
+    assert default.limit == 120
+
+    with pytest.raises(Exception):
+        SessionOlderInput.model_validate({"sessionId": "s1"})

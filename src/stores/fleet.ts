@@ -15,7 +15,7 @@ import { messageCache, type MessageCacheRecord } from '../services/messageCache'
 import { applySystemNotices } from '../services/systemNotices'
 import { isSessionArchived } from '../composables/useSessionOrganization'
 import { hasEpochMessageContent, mapEpochSnapshotMessage, normalizeEpochMessageContent, type EpochSnapshotMessage } from '../services/epochSnapshot'
-import { createSessionSync, readSyncMode } from '../services/sessionSync'
+import { createSessionSync, fetchOlder, readSyncMode } from '../services/sessionSync'
 import { retainSessionProcesses } from '../services/sessionActivity'
 import {
   buildFleetWsUrl,
@@ -3409,15 +3409,20 @@ export const useFleetStore = defineStore('fleet', () => {
     const timeout = setTimeout(() => controller.abort(), 50_000)
 
     let cacheCursor: Pick<MessageCacheRecord, 'lastSeq' | 'epoch'> | undefined
+    let snapshotPagination: { hasMoreBefore?: boolean; beforeCursor?: string | null } | undefined
     const sessionSync = createSessionSync({
       mode: syncMode,
       rpc: async () => {
-        const result = await apiRequest<Pick<MessageCacheRecord, 'lastSeq' | 'epoch'>>(
+        const result = await apiRequest<Pick<MessageCacheRecord, 'lastSeq' | 'epoch'> & {
+          hasMoreBefore?: boolean
+          beforeCursor?: string | null
+        }>(
           `/api/v1/fleet/nodes/${encodeURIComponent(sess.nodeId)}/session/snapshot`,
           { method: 'POST', body: JSON.stringify({ sessionId: sess.sessionId, provider: sess.provider }), signal: controller.signal },
           route.token, route.origin,
         )
         cacheCursor = result
+        snapshotPagination = result
         return result
       },
       apply: (_, value) => {
@@ -3450,8 +3455,26 @@ export const useFleetStore = defineStore('fleet', () => {
         state.snapshot = { streamId, lastSeq, requestId }
         const intent = snapshotFollowIntent.get(sKey)
         if (intent && !intent.settled) intent.requestId = requestId
+        let historyCursor: string | null | undefined
+        if (snapshotPagination?.hasMoreBefore === true) {
+          historyCursor = typeof snapshotPagination.beforeCursor === 'string' && snapshotPagination.beforeCursor
+            ? snapshotPagination.beforeCursor
+            : null
+        } else if (snapshotPagination?.hasMoreBefore === false) {
+          historyCursor = null
+        } else if (typeof snapshotPagination?.beforeCursor === 'string' && snapshotPagination.beforeCursor) {
+          historyCursor = snapshotPagination.beforeCursor
+        } else if (snapshotPagination?.beforeCursor === null) {
+          historyCursor = null
+        }
         reconcileRuntime(sKey, { type: 'SessionHistory', active: snapshot.running, runId: snapshot.runId })
-        applyWsEvent({ type: 'SessionHistory', ...sess, requestId, messages }, messages, cacheCursor)
+        applyWsEvent({
+          type: 'SessionHistory',
+          ...sess,
+          requestId,
+          messages,
+          ...(historyCursor !== undefined ? { historyCursor } : {}),
+        }, messages, cacheCursor)
         clearSubscribe(sKey)
         void flushOutbox()
       },
@@ -3524,9 +3547,90 @@ export const useFleetStore = defineStore('fleet', () => {
     }
   }
 
+  function requestEpochOlderHistory(sess: ChatSession, sKey: string) {
+    const route = fleetRoute.value
+    const beforeCursor = historyCursorBySession.value[sKey]
+    if (!route || !beforeCursor) return false
+    const requestId = createRequestId()
+    lastError.value = null
+    pendingHistoryPages.value[sKey] = requestId
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 50_000)
+    let snapshotTurns: Array<{ turnId: string; startedAt?: number | null }> | undefined
+    let olderCursor: Pick<MessageCacheRecord, 'lastSeq' | 'epoch'> | undefined
+
+    void fetchOlder({
+      rpc: async (_method, params) => {
+        const { beforeCursor: cursor, limit } = params as { sessionKey: string; beforeCursor: string; limit?: number }
+        const result = await apiRequest<{
+          epoch?: string
+          lastSeq?: number
+          snapshot?: { turns?: Array<{ turnId: string; startedAt?: number | null }> }
+        }>(
+          `/api/v1/fleet/nodes/${encodeURIComponent(sess.nodeId)}/session/older`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              sessionId: sess.sessionId,
+              provider: sess.provider,
+              beforeCursor: cursor,
+              ...(limit !== undefined ? { limit } : {}),
+            }),
+            signal: controller.signal,
+          },
+          route.token,
+          route.origin,
+        )
+        snapshotTurns = result?.snapshot?.turns
+        if (typeof result?.epoch === 'string' && typeof result?.lastSeq === 'number') {
+          olderCursor = { epoch: result.epoch, lastSeq: Math.max(lastSeqBySession.value[sKey] ?? 0, result.lastSeq) }
+        }
+        return result
+      },
+      sessionKey: sKey,
+      beforeCursor,
+      limit: 60,
+    }).then(page => {
+      if (fleetRoute.value !== route || pendingHistoryPages.value[sKey] !== requestId) return
+      clearHistory(sKey)
+      const startedAt = new Map(snapshotTurns?.map(turn => [turn.turnId, turn.startedAt]))
+      const now = Date.now()
+      const liveRunId = runningBySession.value[sKey]
+      const older = page.messages.map((message, index) => mapEpochSnapshotMessage(message as unknown as EpochSnapshotMessage, {
+        session: sess,
+        fallbackId: `hist-${requestId}-${index}`,
+        fallbackCreatedAt: startedAt.get((message as unknown as EpochSnapshotMessage).turnId ?? '') ?? now,
+        liveRunId,
+      })).filter(hasEpochMessageContent)
+      const existing = messagesBySession.value[sKey] ?? []
+      const seen = new Set(existing.map(row => row.id))
+      const uniqueOlder: ChatMessage[] = []
+      for (const row of older) {
+        if (seen.has(row.id)) continue
+        seen.add(row.id)
+        uniqueOlder.push(row)
+      }
+      const merged = applySystemNotices([...uniqueOlder, ...existing])
+      messagesBySession.value = { ...messagesBySession.value, [sKey]: merged }
+      historyCursorBySession.value[sKey] = page.hasMoreBefore && page.beforeCursor ? page.beforeCursor : null
+      if (merged.length && historyStateBySession.value[sKey]?.state !== 'ready') {
+        historyStateBySession.value[sKey] = { state: 'ready' }
+      }
+      if (!messageCachePreviews.has(sKey) && olderCursor) queueMessageCacheWrite(sKey, merged, olderCursor)
+    }).catch(err => {
+      if (fleetRoute.value !== route || pendingHistoryPages.value[sKey] !== requestId) return
+      clearHistory(sKey)
+      lastError.value = err instanceof Error && err.message ? err.message : '加载更早历史消息失败'
+    }).finally(() => clearTimeout(timeout))
+    return true
+  }
+
   function requestOlderHistory(sKey: string) {
     const sess = sessionsByKey.value[sKey]
     if (!sess || pendingHistoryPages.value[sKey] || historyCursorBySession.value[sKey] === null) return false
+    if (syncMode === 'epoch' && !(fleetRoute.value && legacySnapshotSessions.get(fleetRoute.value)?.has(sKey))) {
+      return requestEpochOlderHistory(sess, sKey)
+    }
     const beforeCursor = historyCursorBySession.value[sKey]
     const curLimit = historyLimitBySession.value[sKey] ?? Math.max(60, messagesBySession.value[sKey]?.length ?? 60)
     const nextLimit = Math.min(MAX_MESSAGES_PER_SESSION, curLimit + 60)
@@ -3550,6 +3654,10 @@ export const useFleetStore = defineStore('fleet', () => {
 
   function searchOlderHistory(sKey: string) {
     if (wsState.value !== 'online' || pendingHistoryPages.value[sKey]) return
+    if (syncMode === 'epoch' && historyCursorBySession.value[sKey]) {
+      void requestOlderHistory(sKey)
+      return
+    }
     historyLimitBySession.value[sKey] = MAX_MESSAGES_PER_SESSION
     loadSessionHistory(sKey, true)
   }

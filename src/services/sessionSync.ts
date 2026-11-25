@@ -1,3 +1,5 @@
+import type { ChatMessage } from '../types/fleet'
+
 export type SyncMode = 'legacy' | 'epoch'
 
 export interface SessionSync {
@@ -103,6 +105,42 @@ export function createSessionSync(opts: {
     async syncAll() {
       await Promise.all(Array.from(lastSeqBySession.keys(), resume))
     },
+  }
+}
+
+export async function fetchOlder(opts: {
+  rpc: (method: string, params: unknown) => Promise<unknown>
+  sessionKey: string
+  beforeCursor: string
+  limit?: number
+}): Promise<{ messages: ChatMessage[]; hasMoreBefore: boolean; beforeCursor?: string }> {
+  const params: { sessionKey: string; beforeCursor: string; limit?: number } = {
+    sessionKey: opts.sessionKey,
+    beforeCursor: opts.beforeCursor,
+    ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+  }
+  const result = rpcResult(await opts.rpc('session.older', params))
+  const snapshot = result.snapshot && typeof result.snapshot === 'object' && !Array.isArray(result.snapshot)
+    ? result.snapshot as Record<string, unknown>
+    : undefined
+  const rawMessages = Array.isArray(result.messages)
+    ? result.messages
+    : Array.isArray(snapshot?.messages)
+      ? snapshot.messages
+      : null
+  if (!rawMessages || typeof result.hasMoreBefore !== 'boolean') {
+    throw new Error('Invalid session older response')
+  }
+  if (result.beforeCursor !== undefined && result.beforeCursor !== null && typeof result.beforeCursor !== 'string') {
+    throw new Error('Invalid session older response')
+  }
+  const beforeCursor = typeof result.beforeCursor === 'string' && result.beforeCursor
+    ? result.beforeCursor
+    : undefined
+  return {
+    messages: rawMessages as ChatMessage[],
+    hasMoreBefore: result.hasMoreBefore,
+    ...(beforeCursor !== undefined ? { beforeCursor } : {}),
   }
 }
 

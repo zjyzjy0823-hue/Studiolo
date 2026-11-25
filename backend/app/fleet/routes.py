@@ -39,6 +39,7 @@ from .schemas import (
     NodeTokenOut,
     SessionEventsSinceInput,
     SessionListInput,
+    SessionOlderInput,
     SessionSnapshotInput,
     SubscriptionQuota,
     TransferEndpoint,
@@ -158,7 +159,7 @@ async def read_subscription_quota(
 
 
 async def _session_replay_rpc(
-    node_id: str, method: str, payload: SessionSnapshotInput | SessionEventsSinceInput | SessionListInput,
+    node_id: str, method: str, payload: SessionSnapshotInput | SessionEventsSinceInput | SessionListInput | SessionOlderInput,
     user: User, db: Session, response: Response,
 ) -> dict[str, Any]:
     workspace = get_personal_workspace(db, user)
@@ -182,7 +183,7 @@ async def session_snapshot(
 
 @router.post("/nodes/{node_id}/session/older", response_model=None)
 async def session_older(
-    node_id: str, payload: SessionSnapshotInput, response: Response,
+    node_id: str, payload: SessionOlderInput, response: Response,
     user: User = Depends(current_user), db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """P10：按 beforeCursor 翻更早一页（窗口化后的向上分页）。"""
