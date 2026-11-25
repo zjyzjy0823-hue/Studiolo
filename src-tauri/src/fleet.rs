@@ -31,7 +31,10 @@ type FleetSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 #[serde(tag = "event", rename_all = "snake_case")]
 pub(crate) enum FleetEvent {
     Frame { frame: Value },
-    Reconnecting,
+    Reconnecting {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     Unauthorized,
 }
 
@@ -389,9 +392,19 @@ async fn send(socket: &mut FleetSocket, frame: Value) -> bool {
 }
 
 enum Disconnected {
-    Retry,
+    Retry { reason: Option<String> },
     Unauthorized,
     Stopped,
+}
+
+fn classify_tungstenite_error(error: &tokio_tungstenite::tungstenite::Error) -> String {
+    use tokio_tungstenite::tungstenite::Error as WsError;
+    match error {
+        WsError::Tls(tls) => format!("TLS: {tls}"),
+        WsError::Io(io) => format!("IO: {io}"),
+        WsError::Http(response) => format!("HTTP {}", response.status()),
+        other => other.to_string(),
+    }
 }
 
 async fn run_connection(
@@ -424,10 +437,15 @@ async fn run_connection(
                     )
                     .await
                 } else {
-                    Disconnected::Retry
+                    Disconnected::Retry { reason: None }
                 }
             }
-            _ => Disconnected::Retry,
+            Err(_) => Disconnected::Retry {
+                reason: Some("handshake timeout".into()),
+            },
+            Ok(Err(e)) => Disconnected::Retry {
+                reason: Some(classify_tungstenite_error(&e)),
+            },
         };
         online.store(false, Ordering::Release);
         // Queued writes can be retried by the caller against the next connection.
@@ -438,8 +456,8 @@ async fn run_connection(
                 break;
             }
             Disconnected::Stopped => break,
-            Disconnected::Retry => {
-                let _ = events.send(FleetEvent::Reconnecting);
+            Disconnected::Retry { reason } => {
+                let _ = events.send(FleetEvent::Reconnecting { reason });
                 update_foreground_notice(&app, Some("reconnecting"), &runs).await;
                 time::sleep(Duration::from_secs(RECONNECT_DELAYS[retry])).await;
                 retry = (retry + 1).min(RECONNECT_DELAYS.len() - 1);
@@ -468,23 +486,23 @@ async fn process_socket(
     let mut active_run_inventory = false;
     loop {
         tokio::select! {
-            _ = time::sleep_until(deadline) => return Disconnected::Retry,
+            _ = time::sleep_until(deadline) => return Disconnected::Retry { reason: None },
             _ = heartbeat.tick(), if ready => {
                 if !matches!(time::timeout(HANDSHAKE_TIMEOUT, socket.send(Message::Ping(Vec::new().into()))).await, Ok(Ok(()))) {
-                    return Disconnected::Retry;
+                    return Disconnected::Retry { reason: None };
                 }
             }
             command = commands.recv(), if ready => match command {
                 Some(frame) => {
                     if !send(socket, frame).await {
-                        return Disconnected::Retry;
+                        return Disconnected::Retry { reason: None };
                     }
                 }
                 None => return Disconnected::Stopped,
             },
             incoming = socket.next() => {
                 let Ok(message) = incoming.unwrap_or(Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed)) else {
-                    return Disconnected::Retry;
+                    return Disconnected::Retry { reason: None };
                 };
                 if ready {
                     deadline = Instant::now() + CONNECTION_TIMEOUT;
@@ -494,7 +512,7 @@ async fn process_socket(
                         return if frame.is_some_and(|frame| u16::from(frame.code) == 4401) {
                             Disconnected::Unauthorized
                         } else {
-                            Disconnected::Retry
+                            Disconnected::Retry { reason: None }
                         };
                     }
                     Message::Text(raw) => raw,
@@ -534,7 +552,7 @@ async fn process_socket(
                     };
                     for subscription in subscriptions {
                         if !send(socket, subscription).await {
-                            return Disconnected::Retry;
+                            return Disconnected::Retry { reason: None };
                         }
                     }
                     for node in nodes {
@@ -543,7 +561,7 @@ async fn process_socket(
                             "type": "session.active.list", "nodeId": node,
                             "requestId": format!("{INTERNAL_REQUEST}{request_number}"),
                         })).await {
-                            return Disconnected::Retry;
+                            return Disconnected::Retry { reason: None };
                         }
                     }
                 }
@@ -601,5 +619,44 @@ mod tests {
         }), &Value::Null, &mut notices);
         assert_eq!(runs.active.len(), 1);
         assert!(notices.is_empty());
+    }
+
+    #[test]
+    fn reconnecting_event_serializes_with_optional_reason() {
+        let with_reason = FleetEvent::Reconnecting {
+            reason: Some("handshake timeout".into()),
+        };
+        let serialized = serde_json::to_value(&with_reason).unwrap();
+        assert_eq!(
+            serialized,
+            json!({
+                "event": "reconnecting",
+                "reason": "handshake timeout"
+            })
+        );
+
+        let without_reason = FleetEvent::Reconnecting { reason: None };
+        let serialized_none = serde_json::to_value(&without_reason).unwrap();
+        assert_eq!(
+            serialized_none,
+            json!({
+                "event": "reconnecting"
+            })
+        );
+    }
+
+    #[test]
+    fn classify_tungstenite_error_handles_categories() {
+        use std::io;
+        use tokio_tungstenite::tungstenite::Error as WsError;
+
+        let io_err = WsError::Io(io::Error::new(io::ErrorKind::ConnectionRefused, "refused"));
+        assert!(classify_tungstenite_error(&io_err).starts_with("IO: refused"));
+
+        let utf8_err = WsError::Utf8("invalid byte".into());
+        assert_eq!(
+            classify_tungstenite_error(&utf8_err),
+            "UTF-8 encoding error: invalid byte"
+        );
     }
 }

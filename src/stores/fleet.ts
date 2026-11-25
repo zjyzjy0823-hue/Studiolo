@@ -19,6 +19,13 @@ import { createSessionSync, fetchOlder, readSyncMode } from '../services/session
 import { createConnectionHealthMonitor } from '../services/connectionHealth'
 import { retainSessionProcesses } from '../services/sessionActivity'
 import {
+  type CoreSessionRecord,
+  loadCoreSession,
+  saveCoreSession,
+  clearCoreSession,
+  coreSessionMatches,
+} from '../services/coreSessionStore'
+import {
   buildFleetWsUrl,
   createFleetNode,
   deleteFleetNode,
@@ -130,7 +137,8 @@ type StreamState = {
 const DESKTOP_NOTIFICATION_PREF = 'studiolo:fleet-system-notifications'
 type NativeFleetEvent =
   | { event: 'frame'; frame: FleetWsEvent }
-  | { event: 'reconnecting' | 'unauthorized' }
+  | { event: 'reconnecting'; reason?: string | null }
+  | { event: 'unauthorized' }
 
 type AuditEntry = {
   t: number
@@ -168,21 +176,45 @@ export function createRequestId(): string {
   return `req-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`
 }
 
+let lastRouteTrace = ''
+export function traceFleetRoute(reason: string, detail: Record<string, unknown> = {}): void {
+  const signature = `${reason}|${JSON.stringify(detail)}`
+  if (signature === lastRouteTrace) return
+  lastRouteTrace = signature
+  console.info(`[fleet] 路由不可用：${reason}`, detail)
+}
+
 export const useFleetStore = defineStore('fleet', () => {
   const auth = useAuthStore()
   const useLinkedCore = computed(() => auth.mode === 'local' && auth.workstation)
   const linkedCore = computed(() => useLinkedCore.value && auth.coreConnection?.connected ? auth.coreConnection : null)
   type FleetRoute = { origin: string; token: string }
-  const coreSession = ref<(FleetRoute & { localToken: string; workspaceId: string; coreUrl: string }) | null>(null)
+  const coreSession = ref<CoreSessionRecord | null>(loadCoreSession())
   const fleetRoute = computed<FleetRoute | null>((previous) => {
-    if (!auth.token || (useLinkedCore.value && !auth.coreConnection)) return null
+    if (!auth.token || (useLinkedCore.value && !auth.coreConnection)) {
+      traceFleetRoute('缺少本地凭证或 Core 连接尚未就绪', {
+        hasLocalToken: Boolean(auth.token),
+        hasCoreConnection: Boolean(auth.coreConnection),
+        useLinkedCore: useLinkedCore.value,
+      })
+      return null
+    }
     const core = linkedCore.value
     const session = coreSession.value
     const target = core
-      ? session?.localToken === auth.token && session.workspaceId === core.workspaceId && session.coreUrl === core.coreUrl
+      ? coreSessionMatches(session, { localToken: auth.token, workspaceId: core.workspaceId, coreUrl: core.coreUrl })
         ? session : null
       : { origin: getApiBaseUrl(), token: auth.token }
-    if (!target) return null
+    if (!target) {
+      traceFleetRoute('Core 会话未就绪或与当前工作区不匹配', {
+        hasLocalToken: Boolean(auth.token),
+        hasCoreConnection: Boolean(auth.coreConnection),
+        sessionWorkspaceId: session?.workspaceId ?? null,
+        coreWorkspaceId: core?.workspaceId ?? null,
+        localTokenMatches: session?.localToken === auth.token,
+      })
+      return null
+    }
     return previous?.token === target.token && previous.origin === target.origin
       ? previous : { origin: target.origin, token: target.token }
   })
@@ -217,6 +249,7 @@ export const useFleetStore = defineStore('fleet', () => {
     if (workspace.id !== core.workspaceId) throw new Error('该 Core 账号与本机已连接的工作区不匹配。')
     if (localToken !== auth.token || linkedCore.value?.coreUrl !== core.coreUrl || linkedCore.value.workspaceId !== core.workspaceId) return
     coreSession.value = { origin, token, localToken, workspaceId: core.workspaceId, coreUrl: core.coreUrl }
+    saveCoreSession(coreSession.value)
   }
 
   function requireFleetRoute(): FleetRoute {
@@ -813,8 +846,12 @@ export const useFleetStore = defineStore('fleet', () => {
   watch(
     () => auth.token,
     (nextToken, prevToken) => {
-      if (!nextToken || nextToken !== prevToken) {
+      if (nextToken === prevToken) return
+      if (!nextToken || coreSession.value?.localToken !== nextToken) {
         coreSession.value = null
+        clearCoreSession()
+      }
+      if (!nextToken || (prevToken && nextToken !== prevToken)) {
         clearSessionMemory()
         nodes.value = []
       }
@@ -1015,7 +1052,10 @@ export const useFleetStore = defineStore('fleet', () => {
       }
     } catch (err) {
       if (fleetRoute.value !== route) return
-      if (linkedCore.value && err instanceof ApiError && err.status === 401) coreSession.value = null
+      if (linkedCore.value && err instanceof ApiError && err.status === 401) {
+        coreSession.value = null
+        clearCoreSession()
+      }
       lastError.value = err instanceof Error ? err.message : '加载节点列表失败'
     } finally {
       if (fleetRoute.value === route) nodesLoading.value = false
@@ -1298,7 +1338,10 @@ export const useFleetStore = defineStore('fleet', () => {
     if (code === 4401) {
       snapshotFollowIntent.clear()
       wsState.value = 'disconnected'
-      if (linkedCore.value) coreSession.value = null
+      if (linkedCore.value) {
+        coreSession.value = null
+        clearCoreSession()
+      }
       lastError.value = 'Fleet 会话认证失败或登录已过期'
     } else {
       wsState.value = 'reconnecting'
@@ -1358,15 +1401,24 @@ export const useFleetStore = defineStore('fleet', () => {
       } else if (message.event === 'unauthorized') {
         nativeConnectionId = null
         connectionLost(4401)
+      } else if (message.event === 'reconnecting') {
+        if (message.reason) {
+          lastError.value = `Fleet 重连中：${message.reason}`
+        }
+        connectionLost()
       } else {
         connectionLost()
       }
     })
-    void invoke('fleet_connect', { id, url: buildFleetWsUrl(route.origin), token: route.token, events }).catch(error => {
+    const url = buildFleetWsUrl(route.origin)
+    console.info('[fleet] 发起原生连接', { url, id })
+    void invoke('fleet_connect', { id, url, token: route.token, events }).catch(error => {
+      console.error('[fleet] fleet_connect 失败', error)
       if (nativeConnectionId !== id || fleetRoute.value !== route) return
       nativeConnectionId = null
       wsState.value = 'disconnected'
-      lastError.value = typeof error === 'string' ? error : 'Fleet 连接无法启动'
+      const detail = error instanceof Error ? error.message : typeof error === 'string' ? error : (error ? String(error) : '')
+      lastError.value = detail ? `Fleet 连接无法启动：${detail}` : 'Fleet 连接无法启动'
     })
   }
 

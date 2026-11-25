@@ -16,6 +16,7 @@ async function signIn() {
   busy.value = true
   try {
     await fleet.signInToCoreFleet(username.value.trim(), password.value)
+    fleet.connectSocket()
   } catch (cause) {
     error.value = cause instanceof ApiError && cause.status === 401 ? 'Core 用户名或密码不正确。'
       : cause instanceof Error ? cause.message : 'Core 登录失败。'
