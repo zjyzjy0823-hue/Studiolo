@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
+from hashlib import sha256
 from itertools import groupby
 import json
 import os
@@ -44,6 +45,9 @@ _EVENT_TYPES = frozenset({
 _TURN_TYPES = _EVENT_TYPES - {"session.created", "session.running", "notice", "snapshot.ready"}
 _NODE_EPOCH = str(uuid4())
 MAX_SESSION_SEQ = (1 << 63) - 1
+DEFAULT_WINDOW_TURNS = 40
+DEFAULT_WINDOW_MESSAGES = 120
+MAX_WINDOW_LIMIT = 500
 
 
 def validate_event(event: SessionEvent) -> None:
@@ -347,6 +351,258 @@ def fold_ordered(events: Iterable[SessionEvent]) -> Snapshot:
             if name in turn["usage"]:
                 snapshot.usage[name] = snapshot.usage.get(name, 0) + turn["usage"][name]
     return snapshot
+
+
+@dataclass(frozen=True)
+class MessageWindow:
+    messages: list[dict[str, Any]]
+    start_index: int
+    end_index: int
+    has_more_before: bool
+    before_cursor: str | None
+    kept_turn_ids: frozenset[str]
+
+
+def history_cursor(message: dict[str, Any], previous: dict[str, Any]) -> str:
+    anchor = [(row.get("role"), row.get("id") if row.get("systemEvents") else row.get("text"))
+              for row in (previous, message)]
+    return sha256(json.dumps(anchor, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _turn_id_of(message: dict[str, Any]) -> str | None:
+    for key in ("turnId", "runId"):
+        value = message.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _group_turn_blocks(messages: list[dict[str, Any]]) -> list[tuple[int, int, set[str]]]:
+    """Partition chronological messages into atomic turn blocks so windowing never splits a turn."""
+    n = len(messages)
+    last_index: dict[str, int] = {}
+    for idx, msg in enumerate(messages):
+        tid = _turn_id_of(msg)
+        if tid is not None:
+            last_index[tid] = idx
+
+    blocks: list[tuple[int, int, set[str]]] = []
+    i = 0
+    while i < n:
+        tid = _turn_id_of(messages[i])
+        if tid is not None:
+            block_start = i
+            block_end = last_index[tid]
+            tids = {tid}
+            j = i + 1
+            while j <= block_end:
+                other = _turn_id_of(messages[j])
+                if other is not None:
+                    tids.add(other)
+                    if last_index[other] > block_end:
+                        block_end = last_index[other]
+                j += 1
+            blocks.append((block_start, block_end + 1, tids))
+            i = block_end + 1
+            continue
+
+        role = messages[i].get("role")
+        if role == "system":
+            blocks.append((i, i + 1, set()))
+            i += 1
+            continue
+
+        block_start = i
+        j = i + 1
+        while j < n and _turn_id_of(messages[j]) is None and messages[j].get("role") not in ("user", "system"):
+            j += 1
+        blocks.append((block_start, j, set()))
+        i = j
+
+    return blocks
+
+
+def _make_before_cursor(messages: list[dict[str, Any]], start_idx: int, *, anchor_hash: bool = False) -> str:
+    current = messages[start_idx]
+    msg_id = current.get("id")
+    if (isinstance(msg_id, str) and msg_id.strip()) or type(msg_id) is int:
+        id_str = str(msg_id)
+        if sum(1 for row in messages if row.get("id") is not None and str(row.get("id")) == id_str) == 1:
+            return f"id:{id_str}"
+    turn_id = _turn_id_of(current)
+    if turn_id is not None and all(_turn_id_of(row) != turn_id for row in messages[:start_idx]):
+        return f"turn:{turn_id}"
+    if anchor_hash and start_idx > 0:
+        return history_cursor(current, messages[start_idx - 1])
+    return f"idx:{start_idx}"
+
+
+def resolve_before_cursor(messages: list[dict[str, Any]], before_cursor: str) -> int:
+    """Resolve a window cursor to the exclusive end index of the older page, or -1 if not found."""
+    if not isinstance(before_cursor, str) or not before_cursor:
+        return -1
+    if before_cursor.startswith("id:"):
+        target = before_cursor[3:]
+        return next(
+            (i for i in range(len(messages) - 1, -1, -1)
+             if messages[i].get("id") is not None and str(messages[i]["id"]) == target),
+            -1,
+        )
+    if before_cursor.startswith("turn:"):
+        target = before_cursor[5:]
+        return next((i for i, row in enumerate(messages) if _turn_id_of(row) == target), -1)
+    if before_cursor.startswith("idx:"):
+        raw = before_cursor[4:]
+        if raw.isdigit():
+            idx = int(raw)
+            if 0 <= idx <= len(messages):
+                return idx
+        return -1
+
+    hash_match = next(
+        (i for i in range(len(messages) - 1, 0, -1)
+         if history_cursor(messages[i], messages[i - 1]) == before_cursor),
+        -1,
+    )
+    if hash_match >= 0:
+        return hash_match
+
+    id_match = next(
+        (i for i in range(len(messages) - 1, -1, -1)
+         if messages[i].get("id") is not None and str(messages[i]["id"]) == before_cursor),
+        -1,
+    )
+    if id_match >= 0:
+        return id_match
+
+    turn_match = next((i for i, row in enumerate(messages) if _turn_id_of(row) == before_cursor), -1)
+    if turn_match >= 0:
+        return turn_match
+
+    if before_cursor.isdigit():
+        idx = int(before_cursor)
+        if 0 <= idx <= len(messages):
+            return idx
+    return -1
+
+
+def window_messages(
+    messages: list[dict[str, Any]],
+    *,
+    end_index: int | None = None,
+    max_turns: int = DEFAULT_WINDOW_TURNS,
+    max_messages: int = DEFAULT_WINDOW_MESSAGES,
+    running_turn_id: str | None = None,
+    include_last_turn_running: bool = False,
+    anchor_hash: bool = False,
+) -> MessageWindow:
+    """Slice a transport window at turn boundaries without mutating underlying history."""
+    total = len(messages)
+    end = total if end_index is None else max(0, min(end_index, total))
+    if end == 0:
+        return MessageWindow([], 0, 0, False, None, frozenset())
+
+    blocks = _group_turn_blocks(messages[:end])
+    mandatory_from = len(blocks)
+    if end == total:
+        if running_turn_id:
+            for idx, (_, _, tids) in enumerate(blocks):
+                if running_turn_id in tids:
+                    mandatory_from = idx
+                    break
+        if mandatory_from == len(blocks) and include_last_turn_running:
+            mandatory_from = len(blocks) - 1
+
+    start_block = len(blocks)
+    turn_count = 0
+    msg_count = 0
+    for idx in range(len(blocks) - 1, -1, -1):
+        b_start, b_end, _ = blocks[idx]
+        b_len = b_end - b_start
+        must_include = idx >= mandatory_from or start_block == len(blocks)
+        if not must_include and (turn_count + 1 > max_turns or msg_count + b_len > max_messages):
+            break
+        start_block = idx
+        turn_count += 1
+        msg_count += b_len
+
+    start_idx = blocks[start_block][0]
+    selected = messages[start_idx:end]
+    has_more_before = start_idx > 0
+    before_cursor = _make_before_cursor(messages, start_idx, anchor_hash=anchor_hash) if has_more_before else None
+    kept_turns = frozenset().union(*(tids for _, _, tids in blocks[start_block:]))
+    return MessageWindow(selected, start_idx, end, has_more_before, before_cursor, kept_turns)
+
+
+def window_snapshot(
+    snapshot: Snapshot,
+    *,
+    before_cursor: str | None = None,
+    max_turns: int = DEFAULT_WINDOW_TURNS,
+    max_messages: int = DEFAULT_WINDOW_MESSAGES,
+) -> tuple[Snapshot, bool, str | None] | None:
+    """Apply transport windowing to a folded Snapshot, or return None if before_cursor is invalid."""
+    if before_cursor is not None:
+        end_index = resolve_before_cursor(snapshot.messages, before_cursor)
+        if end_index < 0:
+            return None
+        win = window_messages(
+            snapshot.messages,
+            end_index=end_index,
+            max_turns=max_turns,
+            max_messages=max_messages,
+        )
+        running_keep = None
+    else:
+        running_keep = snapshot.runId if snapshot.running else None
+        win = window_messages(
+            snapshot.messages,
+            max_turns=max_turns,
+            max_messages=max_messages,
+            running_turn_id=running_keep,
+            include_last_turn_running=snapshot.running and running_keep is None,
+        )
+        if not win.has_more_before:
+            return snapshot, False, None
+
+    kept_turns = set(win.kept_turn_ids)
+    if running_keep:
+        kept_turns.add(running_keep)
+
+    if win.messages:
+        turns = [turn for turn in snapshot.turns if turn.get("turnId") in kept_turns]
+    elif before_cursor is not None:
+        turns = []
+    else:
+        turns = snapshot.turns[-max_turns:] if len(snapshot.turns) > max_turns else list(snapshot.turns)
+        if running_keep and not any(t.get("turnId") == running_keep for t in turns):
+            turns.extend(t for t in snapshot.turns if t.get("turnId") == running_keep)
+
+    turn_ids_in_view = {turn.get("turnId") for turn in turns} | kept_turns
+    notices = [
+        notice for notice in snapshot.notices
+        if (before_cursor is None and notice.get("turnId") is None)
+        or notice.get("turnId") in turn_ids_in_view
+    ]
+    approvals = [
+        approval for approval in snapshot.approvals
+        if approval.get("turnId") in turn_ids_in_view
+        or (before_cursor is None and "decision" not in approval)
+    ]
+
+    windowed = Snapshot(
+        messages=win.messages,
+        turns=turns,
+        notices=notices,
+        approvals=approvals,
+        usage=dict(snapshot.usage),
+        session=deepcopy(snapshot.session),
+        running=snapshot.running,
+        runId=snapshot.runId,
+        lastSeq=snapshot.lastSeq,
+        upToSeq=snapshot.upToSeq,
+    )
+    return windowed, win.has_more_before, win.before_cursor
 
 
 @dataclass

@@ -180,6 +180,15 @@ async def session_snapshot(
     return await _session_replay_rpc(node_id, "session.snapshot", payload, user, db, response)
 
 
+@router.post("/nodes/{node_id}/session/older", response_model=None)
+async def session_older(
+    node_id: str, payload: SessionSnapshotInput, response: Response,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """P10：按 beforeCursor 翻更早一页（窗口化后的向上分页）。"""
+    return await _session_replay_rpc(node_id, "session.older", payload, user, db, response)
+
+
 @router.post("/nodes/{node_id}/session/events/since", response_model=None)
 async def session_events_since(
     node_id: str, payload: SessionEventsSinceInput, response: Response,

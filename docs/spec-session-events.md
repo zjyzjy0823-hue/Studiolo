@@ -87,6 +87,14 @@ Hermes WS 的 `session.snapshot` 先按 gateway 的行顺序分页读取 `GET /a
 
 所有 provider 的快照响应都带 `incomplete`。Hermes 的 `/messages` 不可用时仍返回纯事件快照，并标注 `incomplete: true`。gateway 事件窗口有缺失、或 Hermes 没有 gateway replay epoch 而使用节点旁路事件日志时，也标注 `incomplete: true`。旧协议 `SessionStreamReplay` 沿用原有历史和重放路径。
 
+## P10 传输窗口与 Hermes resume 缓存
+
+- `session.snapshot` 与 `session.history` 默认只传输最近 **40 轮 / 最多 120 条消息**，严格按回合边界裁剪，不删除任何持久数据或 transcript；`session.events.since` 保持不变。
+- 运行中的回合始终完整包含在最新窗口内（即使该回合超过 120 条消息）。
+- `session.snapshot` 响应顶层新增 `hasMoreBefore: boolean` 与 `beforeCursor: string | null`（指向窗口首条消息的稳定游标，优先 `id:<id>`、其次 `turn:<turnId>`、否则 `idx:<index>`）。`session.history` 默认调用同步返回 `hasMoreBefore` 与 `beforeCursor`（旧客户端 `pagination: true` 模式保留 `beforeCursor` 回显与 `historyCursor` 下一页游标，同时新增 `hasMoreBefore`）。
+- 新增 RPC `session.older`（接受 `{session_id, before_cursor, limit}` 或驼峰字段 `{sessionId, beforeCursor, limit}`），按游标向前翻更早一页，返回与 `session.snapshot` 相同结构；游标无效时返回 `code: "invalid_cursor"`。
+- Hermes WS 适配器的 `session.resume` 在进程内按连接与会话缓存 **5 分钟**（300s），同一会话并发请求共享同一个在飞 Future 去重；单次 `session.resume` 超时由 30s 降至 **5s**，超时抛出 `ResumeTimeoutError` 并返回明确错误码 `session_resume_timeout`（不静默返回空数据）。
+
 ### 信封字段
 
 | 契约字段 | 取值 |

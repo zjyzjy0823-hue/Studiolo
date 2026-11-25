@@ -26,7 +26,7 @@ import websockets
 from .adapters.base import AgentAdapter, ApprovalCallback, EventEmitter
 from .adapters.hermes import HermesAdapter
 from .adapters.hermes_replay import GatewayEventNormalizer
-from .adapters.hermes_ws import HermesWsAdapter, ProviderError
+from .adapters.hermes_ws import HermesWsAdapter, ProviderError, ResumeTimeoutError
 from .adapters.jsonrpc import JsonRpcError
 from .adapters.registry import build_adapter_registry
 from .alist_publish import LinkPublisher, PublishResult
@@ -36,7 +36,20 @@ from .crypto_chunks import generate_file_key
 from .hermes_media import CAPABILITY as HERMES_MEDIA_CAPABILITY, MediaError, relay_hermes_attachment
 from .terminal_session import TerminalManager
 from .port_preview import PortPreviewManager
-from .session_events import MAX_SESSION_SEQ, EventStore, PromptEvents, SessionEventLog, SessionEventUpdate
+from .session_events import (
+    DEFAULT_WINDOW_MESSAGES,
+    DEFAULT_WINDOW_TURNS,
+    MAX_SESSION_SEQ,
+    MAX_WINDOW_LIMIT,
+    EventStore,
+    PromptEvents,
+    SessionEventLog,
+    SessionEventUpdate,
+    history_cursor,
+    resolve_before_cursor,
+    window_messages,
+    window_snapshot,
+)
 from .transfer import (
     DirectArtifactStore,
     create_direct_transfer_app,
@@ -159,10 +172,7 @@ class SessionStream:
         return frame
 
 
-def _history_cursor(message: dict[str, Any], previous: dict[str, Any]) -> str:
-    anchor = [(row.get("role"), row.get("id") if row.get("systemEvents") else row.get("text"))
-              for row in (previous, message)]
-    return sha256(json.dumps(anchor, ensure_ascii=False).encode("utf-8")).hexdigest()
+_history_cursor = history_cursor
 
 
 def _coerce_external_id(value: Any) -> str | None:
@@ -872,15 +882,29 @@ class AgentNodeDaemon:
         if log is None:
             return {"code": "unsupported", "source": "node"}
 
-        is_snapshot = frame["type"] == "session.snapshot"
-        session_id = frame.get("sessionId")
-        provider = frame.get("provider") if is_snapshot else None
+        cmd = frame["type"]
+        is_snapshot = cmd == "session.snapshot"
+        is_older = cmd == "session.older"
+        session_id = frame.get("sessionId") if "sessionId" in frame else frame.get("session_id")
+        provider = frame.get("provider") if (is_snapshot or is_older) else None
         if not isinstance(session_id, str) or not session_id.strip():
             return {"code": "invalid_params", "source": "node"}
         if provider is not None and (not isinstance(provider, str) or not provider.strip()):
             return {"code": "invalid_params", "source": "node"}
         epoch, last_seq, limit = None, 0, 500
-        if not is_snapshot:
+        before_cursor: str | None = None
+        older_limit: int | None = None
+        if is_older:
+            raw_cursor = frame.get("beforeCursor") if "beforeCursor" in frame else frame.get("before_cursor")
+            if not isinstance(raw_cursor, str) or not raw_cursor.strip():
+                return {"code": "invalid_params", "source": "node"}
+            before_cursor = raw_cursor
+            raw_limit = frame.get("limit")
+            if raw_limit is not None:
+                if type(raw_limit) is not int or not 0 < raw_limit <= MAX_SESSION_SEQ:
+                    return {"code": "invalid_params", "source": "node"}
+                older_limit = min(raw_limit, MAX_WINDOW_LIMIT)
+        elif not is_snapshot:
             epoch, last_seq, limit = frame.get("epoch"), frame.get("lastSeq"), frame.get("limit", 500)
             if (not isinstance(epoch, str) or not epoch.strip()
                     or type(last_seq) is not int or not 0 <= last_seq <= MAX_SESSION_SEQ
@@ -903,7 +927,16 @@ class AgentNodeDaemon:
         if provider == "hermes" and isinstance(hermes, HermesWsAdapter):
             try:
                 async with asyncio.timeout(40):
-                    replay = await hermes.read_session_replay(session_id, epoch=epoch, last_seq=last_seq, limit=limit)
+                    replay = await hermes.read_session_replay(
+                        session_id,
+                        epoch=epoch,
+                        last_seq=last_seq,
+                        limit=limit,
+                        before_cursor=before_cursor,
+                        page_limit=older_limit,
+                    )
+            except ResumeTimeoutError as exc:
+                return {**result, "source": "gateway", "code": exc.code, "error": str(exc)}
             except PathOutsideAllowedRootsError:
                 return {**result, "source": "gateway", "code": "path_not_allowed"}
             except (OSError, TimeoutError, websockets.WebSocketException, JsonRpcError):
@@ -916,8 +949,26 @@ class AgentNodeDaemon:
 
         if epoch is None:
             snapshot = await asyncio.to_thread(log.store.snapshot, session_id, log.epoch)
-            return {**result, "epoch": log.epoch, "lastSeq": snapshot.lastSeq,
-                    "snapshot": asdict(snapshot), "incomplete": provider == "hermes"}
+            max_messages = DEFAULT_WINDOW_MESSAGES if older_limit is None else older_limit
+            max_turns = DEFAULT_WINDOW_TURNS if max_messages <= DEFAULT_WINDOW_MESSAGES else max_messages
+            sliced = window_snapshot(
+                snapshot,
+                before_cursor=before_cursor,
+                max_turns=max_turns,
+                max_messages=max_messages,
+            )
+            if sliced is None:
+                return {**result, "code": "invalid_cursor", "error": "Cursor not found"}
+            windowed, has_more_before, next_cursor = sliced
+            return {
+                **result,
+                "epoch": log.epoch,
+                "lastSeq": windowed.lastSeq,
+                "snapshot": asdict(windowed),
+                "incomplete": provider == "hermes",
+                "hasMoreBefore": has_more_before,
+                "beforeCursor": next_cursor,
+            }
         if epoch not in (log.epoch, recorded_epoch):
             # Neither an unknown epoch nor a gateway cursor belongs to this node log.
             return {**result, "epoch": log.epoch, "events": [], "hasMore": False, "snapshotRequired": True}
@@ -940,7 +991,7 @@ class AgentNodeDaemon:
         try:
             result = await read(session_id)
         except ProviderError as exc:
-            return {"ok": False, "code": "provider_error", "error": str(exc)}
+            return {"ok": False, "code": exc.code, "error": str(exc)}
         return {**result, "provider": "hermes"}
 
     async def handle_command(self, ws: Any, frame: dict[str, Any], *, node_id: str | None = None) -> None:
@@ -960,7 +1011,7 @@ class AgentNodeDaemon:
                 payload["requestId"] = req_id
             await self._send_ws(ws, payload)
 
-        if cmd in ("session.snapshot", "session.events.since"):
+        if cmd in ("session.snapshot", "session.events.since", "session.older"):
             rpc_id = frame.get("_rpcId")
             if not isinstance(rpc_id, str) or not rpc_id:
                 return
@@ -1411,31 +1462,87 @@ class AgentNodeDaemon:
                 await send_back({"type": "SessionOpened", **meta})
             elif cmd == "session.history":
                 sid = str(frame.get("sessionId") or "")
-                limit = min(500, max(1, int(frame.get("limit") or 50)))
+                raw_limit = frame.get("limit")
+                limit = (
+                    min(MAX_WINDOW_LIMIT, max(1, int(raw_limit)))
+                    if raw_limit is not None
+                    else DEFAULT_WINDOW_MESSAGES
+                )
                 before = frame.get("beforeCursor")
-                if not frame.get("pagination"):
-                    msgs = await adapter.get_history(session_id=sid, limit=limit)
+                paginated = bool(frame.get("pagination"))
+                is_running = (provider, sid) in self._active_runs
+                stream = self._session_streams.get((provider, sid))
+                running_run_id = stream.run_id if is_running and stream else None
+                if not is_running and isinstance(adapter, HermesWsAdapter):
+                    if sid in adapter._active:
+                        is_running = True
+                        running_run_id = adapter._active[sid].request_id
+                    elif sid in adapter.cached_running_sessions():
+                        is_running = True
+                        running_run_id = self._external_run_ids.get(sid)
+
+                effective_limit = limit if before else min(limit, DEFAULT_WINDOW_MESSAGES)
+                fetch_limit = (
+                    MAX_WINDOW_LIMIT
+                    if (before or is_running)
+                    else min(MAX_WINDOW_LIMIT, max(effective_limit + 1, DEFAULT_WINDOW_MESSAGES + 1))
+                )
+                source = await adapter.get_history(session_id=sid, limit=fetch_limit)
+                model_fields = adapter.session_model_fields(sid) if isinstance(adapter, HermesAdapter) else {}
+                effort = adapter.session_effort_fields(sid) if isinstance(adapter, HermesAdapter) else {}
+                if before:
+                    end = resolve_before_cursor(source, str(before))
+                    if end < 0:
+                        await send_back({
+                            "type": "SessionHistory", "provider": provider, "sessionId": sid,
+                            "messages": [], "hasMoreBefore": False, "cursorExpired": True,
+                            **({"beforeCursor": before} if paginated else {"beforeCursor": None}),
+                            **effort, **model_fields,
+                        })
+                        return
+                    page = window_messages(
+                        source,
+                        end_index=end,
+                        max_turns=DEFAULT_WINDOW_TURNS if effective_limit <= DEFAULT_WINDOW_MESSAGES else effective_limit,
+                        max_messages=effective_limit,
+                        anchor_hash=True,
+                    )
                 else:
-                    source = await adapter.get_history(session_id=sid, limit=500 if before else min(500, limit + 1))
-                    model_fields = adapter.session_model_fields(sid) if isinstance(adapter, HermesAdapter) else {}
-                    effort = adapter.session_effort_fields(sid) if isinstance(adapter, HermesAdapter) else {}
-                    end = len(source)
-                    if before:
-                        end = next((i for i in range(len(source) - 1, 0, -1)
-                                    if _history_cursor(source[i], source[i - 1]) == before), -1)
-                        if end < 0:
-                            await send_back({"type": "SessionHistory", "provider": provider, "sessionId": sid,
-                                             "messages": [], "cursorExpired": True, **model_fields})
-                            return
-                    start = max(0, end - limit)
-                    msgs = source[start:end]
-                    cursor = _history_cursor(source[start], source[start - 1]) if start > 0 and msgs else None
-                    await send_back({"type": "SessionHistory", "provider": provider, "sessionId": sid,
-                                     "messages": msgs, "historyCursor": cursor, "beforeCursor": before, **effort, **model_fields})
-                    return
-                await send_back({"type": "SessionHistory", "provider": provider, "sessionId": sid, "messages": msgs,
-                                 **(adapter.session_effort_fields(sid) if isinstance(adapter, HermesAdapter) else {}),
-                                 **(adapter.session_model_fields(sid) if isinstance(adapter, HermesAdapter) else {})})
+                    page = window_messages(
+                        source,
+                        max_turns=DEFAULT_WINDOW_TURNS,
+                        max_messages=effective_limit,
+                        running_turn_id=running_run_id,
+                        include_last_turn_running=is_running and running_run_id is None,
+                        anchor_hash=True,
+                    )
+                    if not is_running and len(source) == fetch_limit and fetch_limit < MAX_WINDOW_LIMIT and page.start_index == 0:
+                        source = await adapter.get_history(session_id=sid, limit=MAX_WINDOW_LIMIT)
+                        page = window_messages(
+                            source,
+                            max_turns=DEFAULT_WINDOW_TURNS,
+                            max_messages=effective_limit,
+                            running_turn_id=running_run_id,
+                            include_last_turn_running=False,
+                            anchor_hash=True,
+                        )
+                if paginated:
+                    await send_back({
+                        "type": "SessionHistory", "provider": provider, "sessionId": sid,
+                        "messages": page.messages,
+                        "historyCursor": page.before_cursor,
+                        "beforeCursor": before,
+                        "hasMoreBefore": page.has_more_before,
+                        **effort, **model_fields,
+                    })
+                else:
+                    await send_back({
+                        "type": "SessionHistory", "provider": provider, "sessionId": sid,
+                        "messages": page.messages,
+                        "hasMoreBefore": page.has_more_before,
+                        "beforeCursor": page.before_cursor,
+                        **effort, **model_fields,
+                    })
             elif cmd == "session.context.read":
                 sid = str(frame.get("sessionId") or "")
                 try:
@@ -1913,7 +2020,11 @@ class AgentNodeDaemon:
                     await wrapped_emit({
                         "type": "Failed", "sessionId": sid, "requestId": eff_req_id,
                         "runId": turn_state["runId"] or eff_req_id,
-                        "code": "path_forbidden" if isinstance(err, PathOutsideAllowedRootsError) else "node_execution_error",
+                        "code": (
+                            err.code if isinstance(err, ResumeTimeoutError)
+                            else "path_forbidden" if isinstance(err, PathOutsideAllowedRootsError)
+                            else "node_execution_error"
+                        ),
                         "message": str(err) or type(err).__name__,
                     })
                 finally:
@@ -1971,6 +2082,17 @@ class AgentNodeDaemon:
                         if pending and not pending.done():
                             pending.set_result("deny")
                 await send_back({**reply, "status": "accepted"})
+        except ResumeTimeoutError as err:
+            await send_back(
+                {
+                    "type": "Failed",
+                    "code": err.code,
+                    "provider": provider,
+                    **({"sessionId": frame.get("sessionId")} if frame.get("sessionId") else {}),
+                    **({"requestId": frame.get("requestId")} if frame.get("requestId") else {}),
+                    "message": str(err),
+                }
+            )
         except PathOutsideAllowedRootsError as err:
             await send_back(
                 {

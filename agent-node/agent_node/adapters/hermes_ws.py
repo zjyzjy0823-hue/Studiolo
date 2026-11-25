@@ -25,7 +25,9 @@ from websockets.asyncio.client import ClientConnection
 
 from ..config import HermesMediaConfig, PathOutsideAllowedRootsError, ensure_allowed_path
 from ..hermes_media import transcript_attachment_paths
-from ..session_events import MAX_SESSION_SEQ, fold
+from ..session_events import (
+    DEFAULT_WINDOW_MESSAGES, DEFAULT_WINDOW_TURNS, MAX_SESSION_SEQ, fold, window_snapshot,
+)
 from .base import (
     AdapterProbe, ApprovalCallback, EventEmitter, build_todo_updated_event,
     build_token_usage_event, build_tool_call_update, compaction_frame, compaction_record,
@@ -41,6 +43,8 @@ _TRANSPORT_ERRORS = (OSError, TimeoutError, websockets.WebSocketException)
 _TOKEN_SCRIPT = re.compile(r'window\.__HERMES_SESSION_TOKEN__\s*=\s*("(?:[^"\\]|\\.)*")')
 _SESSION_RUNNING_TTL = 2.0
 _SESSION_RUNNING_TIMEOUT = 3.0
+_SESSION_RESUME_TTL = 300.0
+_SESSION_RESUME_TIMEOUT = 5.0
 _STEER_REFUSALS = ("session_idle", "stale_generation", "steer_unavailable")
 
 
@@ -53,6 +57,16 @@ def _loopback(host: str) -> bool:
 
 class ProviderError(RuntimeError):
     """A Hermes provider request could not be completed."""
+
+    def __init__(self, message: str, *, code: str = "provider_error") -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class ResumeTimeoutError(TimeoutError):
+    """Raised when Hermes session.resume exceeds the configured timeout."""
+
+    code = "session_resume_timeout"
 
 
 class _GatewayConnection:
@@ -138,6 +152,13 @@ class _SessionRunningState:
     connection: _GatewayConnection | None = None
     execution_generation: int | None = None
     cwd: str | None = None
+
+
+@dataclass(frozen=True)
+class _ResumeCacheEntry:
+    result: dict[str, Any]
+    connection: _GatewayConnection
+    expires_at: float
 
 
 @dataclass
@@ -240,6 +261,8 @@ class HermesWsAdapter(HermesAdapter):
         self.on_session_event: Callable[[str, dict[str, Any]], None] | None = None
         self._session_running_cache: dict[str, _SessionRunningState] = {}
         self._session_running_probes: dict[str, asyncio.Task[_SessionRunningState]] = {}
+        self._resume_cache: dict[str, _ResumeCacheEntry] = {}
+        self._resume_inflight: dict[tuple[int, str], asyncio.Task[dict[str, Any]]] = {}
 
     async def _credentials(self) -> tuple[str, list[str] | None]:
         async with httpx.AsyncClient(timeout=4, trust_env=False, follow_redirects=False) as client:
@@ -357,6 +380,12 @@ class HermesWsAdapter(HermesAdapter):
         await asyncio.gather(*probes, return_exceptions=True)
         self._session_running_probes.clear()
         self._session_running_cache.clear()
+        resumes = list(self._resume_inflight.values())
+        for task in resumes:
+            task.cancel()
+        await asyncio.gather(*resumes, return_exceptions=True)
+        self._resume_inflight.clear()
+        self._resume_cache.clear()
         for turn in self._active.values():
             turn.events.put_nowait({"type": "_failed", "payload": {"error": "Hermes WebSocket adapter closed"}})
             for task in turn.approval_tasks.values():
@@ -537,11 +566,43 @@ class HermesWsAdapter(HermesAdapter):
         return ensure_allowed_path(cwd, self.allowed_roots)
 
     async def _resume(self, connection: _GatewayConnection, sid: str, session: _Session) -> dict[str, Any]:
+        now = monotonic()
+        cached = self._resume_cache.get(sid)
+        if cached is not None and cached.connection is connection and cached.expires_at > now:
+            self._remember_snapshot(connection, sid, session, cached.result)
+            return deepcopy(cached.result)
+
+        key = (id(connection), sid)
+        inflight = self._resume_inflight.get(key)
+        if inflight is None or inflight.done():
+            inflight = asyncio.create_task(self._do_resume(connection, sid, session, key))
+            inflight.add_done_callback(lambda t: None if t.cancelled() else t.exception())
+            self._resume_inflight[key] = inflight
+        result = await asyncio.shield(inflight)
+        return deepcopy(result)
+
+    async def _do_resume(
+        self, connection: _GatewayConnection, sid: str, session: _Session, key: tuple[int, str],
+    ) -> dict[str, Any]:
         params = {"session_id": session.stored_id, "omit_messages": True}
         if not self._canonical:
             params["lazy"] = True
-        result = await connection.call("session.resume", params, timeout=30)
+        try:
+            async with asyncio.timeout(_SESSION_RESUME_TIMEOUT):
+                result = await connection.call("session.resume", params, timeout=_SESSION_RESUME_TIMEOUT)
+        except TimeoutError as exc:
+            raise ResumeTimeoutError(
+                f"Hermes session.resume timed out after {_SESSION_RESUME_TIMEOUT:g}s"
+            ) from exc
+        finally:
+            if self._resume_inflight.get(key) is asyncio.current_task():
+                self._resume_inflight.pop(key, None)
         self._remember_snapshot(connection, sid, session, result)
+        now = monotonic()
+        for cached_sid, entry in list(self._resume_cache.items()):
+            if entry.expires_at <= now:
+                del self._resume_cache[cached_sid]
+        self._resume_cache[sid] = _ResumeCacheEntry(deepcopy(result), connection, now + _SESSION_RESUME_TTL)
         return result
 
     async def _session(self, connection: _GatewayConnection, sid: str) -> _Session:
@@ -561,6 +622,8 @@ class HermesWsAdapter(HermesAdapter):
                 async with self._history_lock:
                     session = await self._session(connection, session_id)
                 result = await connection.call(method, {"session_id": session.runtime_id})
+        except ResumeTimeoutError as exc:
+            raise ProviderError(str(exc), code=exc.code) from exc
         except JsonRpcError as exc:
             raise ProviderError(f"Hermes {method}: {exc.message}") from exc
         except PathOutsideAllowedRootsError as exc:
@@ -579,6 +642,7 @@ class HermesWsAdapter(HermesAdapter):
 
     async def read_session_replay(
         self, session_id: str, *, epoch: str | None, last_seq: int, limit: int,
+        before_cursor: str | None = None, page_limit: int | None = None,
     ) -> dict[str, Any] | None:
         """An absent ready epoch permits the daemon to read its local side log."""
         try:
@@ -603,8 +667,21 @@ class HermesWsAdapter(HermesAdapter):
         result = {"sessionId": session_id, "source": "gateway", "epoch": replay_epoch}
         if epoch is None:
             snapshot = fold(events) if rows is None else merge_transcript_snapshot(session_id, rows, events)
-            return {**result, "lastSeq": snapshot.lastSeq, "snapshot": asdict(snapshot),
-                    "incomplete": incomplete or rows is None}
+            max_messages = DEFAULT_WINDOW_MESSAGES if page_limit is None else page_limit
+            max_turns = DEFAULT_WINDOW_TURNS if max_messages <= DEFAULT_WINDOW_MESSAGES else max_messages
+            sliced = window_snapshot(
+                snapshot,
+                before_cursor=before_cursor,
+                max_turns=max_turns,
+                max_messages=max_messages,
+            )
+            if sliced is None:
+                return {"sessionId": session_id, "source": "gateway", "code": "invalid_cursor",
+                        "error": "Cursor not found"}
+            windowed, has_more_before, next_cursor = sliced
+            return {**result, "lastSeq": windowed.lastSeq, "snapshot": asdict(windowed),
+                    "incomplete": incomplete or rows is None,
+                    "hasMoreBefore": has_more_before, "beforeCursor": next_cursor}
 
         head = events[-1]["seq"] if events else 0
         if epoch != replay_epoch or last_seq > head:
@@ -980,7 +1057,16 @@ class HermesWsAdapter(HermesAdapter):
                       payload: dict[str, Any], *, timeout: float = 30) -> dict[str, Any]:
         # Fetch current revision/generation together. Mutations race other viewers
         # and must use the owner's fence instead of overwriting their changes.
-        snapshot = await connection.call("session.resume", {"session_id": session.stored_id, "omit_messages": True})
+        try:
+            async with asyncio.timeout(_SESSION_RESUME_TIMEOUT):
+                snapshot = await connection.call(
+                    "session.resume", {"session_id": session.stored_id, "omit_messages": True},
+                    timeout=_SESSION_RESUME_TIMEOUT,
+                )
+        except TimeoutError as exc:
+            raise ResumeTimeoutError(
+                f"Hermes session.resume timed out after {_SESSION_RESUME_TIMEOUT:g}s"
+            ) from exc
         return await connection.call("session.mutate", {
             "session_id": snapshot["session_id"], "request_id": uuid4().hex, "operation": operation,
             "payload": payload, "expected_revision": snapshot["revision"],
@@ -1109,7 +1195,7 @@ class HermesWsAdapter(HermesAdapter):
                 await connection.call("session.delete", {"session_id": session.stored_id})
             self._runtime_sessions.pop(session.runtime_id, None)
             for cache in (self._sessions, self._session_cwds, self._history, self._attachment_writes, self._context_usage,
-                          self._model_by_session, self._effort_current):
+                          self._model_by_session, self._effort_current, self._resume_cache):
                 cache.pop(session_id, None)
 
     async def compact_session(self, *, session_id: str) -> dict[str, Any]:

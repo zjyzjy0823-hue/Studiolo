@@ -78,7 +78,7 @@ def test_node_snapshot_and_event_pages(make_node, provider):
             snapshot = await rpc(node, "session.snapshot", sessionId=session)
             assert snapshot == {"sessionId": session, "epoch": log.epoch, "source": "node",
                                 "lastSeq": events[-1]["seq"], "snapshot": asdict(fold(events)),
-                                "incomplete": False}
+                                "incomplete": False, "hasMoreBefore": False, "beforeCursor": None}
             args = {"sessionId": session, "epoch": log.epoch}
             page = await rpc(node, "session.events.since", **args, lastSeq=0)
             assert page == {**args, "source": "node", "events": events, "hasMore": False}
@@ -125,7 +125,7 @@ def test_gateway_ready_epoch_and_versioned_fixture(make_node, tmp_path, wire_ada
                 snapshot = await rpc(node, "session.snapshot", sessionId=session, provider="hermes")
                 assert snapshot == {"sessionId": session, "epoch": "gateway-epoch", "source": "gateway",
                                     "lastSeq": events[-1]["seq"], "snapshot": asdict(fold(events)),
-                                "incomplete": False}
+                                    "incomplete": False, "hasMoreBefore": False, "beforeCursor": None}
                 args = {"sessionId": session, "epoch": snapshot["epoch"]}
                 page = await rpc(node, "session.events.since", **args, lastSeq=0)
                 assert page == {**args, "events": events, "hasMore": False, "source": "gateway"}
@@ -343,7 +343,8 @@ def test_gateway_native_epoch_pagination_and_projection(make_node, tmp_path, wir
             snapshot = await rpc(node, "session.snapshot", sessionId=session)
             epoch = snapshot["epoch"]
             assert epoch == f"hermes-v1:{gateway_epoch}"
-            assert snapshot.keys() == {"sessionId", "epoch", "source", "lastSeq", "snapshot", "incomplete"}
+            assert snapshot.keys() == {"sessionId", "epoch", "source", "lastSeq", "snapshot",
+                                       "incomplete", "hasMoreBefore", "beforeCursor"}
             assert snapshot["source"] == "gateway" and snapshot["sessionId"] == session
             assert snapshot["incomplete"] is False
             projected = snapshot["snapshot"]
@@ -543,7 +544,7 @@ def test_gateway_without_ready_epoch_uses_node_side_log(make_node, wire_adapter)
                 snapshot = await rpc(node, "session.snapshot", sessionId=session)
                 assert snapshot == {"sessionId": session, "source": "node", "epoch": log.epoch,
                                     "lastSeq": events[-1]["seq"], "snapshot": asdict(fold(events)),
-                                "incomplete": True}
+                                    "incomplete": True, "hasMoreBefore": False, "beforeCursor": None}
                 old = await rpc(node, "session.events.since", sessionId=session, epoch="old-gateway", lastSeq=100)
                 assert old == {"sessionId": session, "source": "node", "epoch": log.epoch,
                                "events": [], "hasMore": False, "snapshotRequired": True}
