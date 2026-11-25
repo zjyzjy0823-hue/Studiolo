@@ -32,6 +32,7 @@ import {
 import { estimateTextTokens, formatTokenCount } from '../../services/tokenUsage'
 import { findProjectPermission, supportsChatPermission } from '../../services/projectPermissions'
 import { saveBlobToDevice } from '../../services/saveDownload'
+import { summarizeSystemNotice, type SystemNoticeSummary } from '../../services/systemNotices'
 import type {
   ApprovalDecision,
   ArtifactRef,
@@ -1731,7 +1732,34 @@ function handleMobileBack() {
   closeSettings()
   return true
 }
-defineExpose({ insertFileReference, openThreadSearch, openPermissions, handleMobileBack })
+const expandedSystemNoticeIds = ref<Record<string, boolean>>({})
+
+const systemNoticeSummaries = computed(() => {
+  const map = new Map<string, SystemNoticeSummary>()
+  for (const msg of effectiveMessages.value) {
+    if (msg.role !== 'system' || msg.systemEvents?.length) continue
+    const summary = summarizeSystemNotice(msg.text)
+    if (summary) map.set(msg.id, summary)
+  }
+  return map
+})
+
+function isSystemNoticeExpanded(id: string): boolean {
+  return Boolean(expandedSystemNoticeIds.value[id])
+}
+
+function toggleSystemNotice(id: string) {
+  expandedSystemNoticeIds.value = {
+    ...expandedSystemNoticeIds.value,
+    [id]: !expandedSystemNoticeIds.value[id],
+  }
+}
+
+watch(effectiveKey, () => {
+  expandedSystemNoticeIds.value = {}
+})
+
+defineExpose({ insertFileReference, openThreadSearch, openPermissions, handleMobileBack, toggleSystemNotice })
 
 watch(
   () => effectiveMessages.value.length,
@@ -2514,18 +2542,70 @@ async function retryTurn(msg: ChatMessage) {
             </details>
           </div>
 
-          <div
-            v-if="msg.role === 'system' && !msg.systemEvents?.length"
-            :data-msg-id="msg.id"
-            class="sys-notice"
-            :class="{
-              'is-search-hit': highlightedMsgId === msg.id,
-              'is-deferred-msg': msgIdx < effectiveMessages.length - 8,
-            }"
-          >
-            <OpusIcon name="info" />
-            <span>{{ msg.text }}</span>
-          </div>
+          <template v-if="msg.role === 'system' && !msg.systemEvents?.length">
+            <div
+              v-if="systemNoticeSummaries.get(msg.id)"
+              :data-msg-id="msg.id"
+              class="sys-notice-collapsible"
+              :class="{
+                'is-failed': systemNoticeSummaries.get(msg.id)?.failed,
+                'is-expanded': isSystemNoticeExpanded(msg.id),
+                'is-search-hit': highlightedMsgId === msg.id,
+                'is-deferred-msg': msgIdx < effectiveMessages.length - 8,
+              }"
+            >
+              <button
+                type="button"
+                class="sys-notice-toggle"
+                :aria-expanded="isSystemNoticeExpanded(msg.id)"
+                @click="toggleSystemNotice(msg.id)"
+              >
+                <span class="sys-notice-icon" aria-hidden="true">{{
+                  systemNoticeSummaries.get(msg.id)?.kind === 'delegation' ? '🤖' : '🔧'
+                }}</span>
+                <span class="sys-notice-line">
+                  <span class="sys-notice-title">{{ systemNoticeSummaries.get(msg.id)?.title }}</span>
+                  <span v-if="systemNoticeSummaries.get(msg.id)?.failed" class="sys-notice-fail-badge">失败</span>
+                  <template v-if="systemNoticeSummaries.get(msg.id)?.detail">
+                    <span class="sys-notice-sep" aria-hidden="true">·</span>
+                    <span class="sys-notice-detail">{{ systemNoticeSummaries.get(msg.id)?.detail }}</span>
+                  </template>
+                  <template v-if="systemNoticeSummaries.get(msg.id)?.command">
+                    <span class="sys-notice-sep" aria-hidden="true">·</span>
+                    <code class="sys-notice-cmd">{{ systemNoticeSummaries.get(msg.id)?.command }}</code>
+                  </template>
+                </span>
+                <OpusIcon name="chevD" class="sys-notice-chev" />
+              </button>
+              <div v-if="isSystemNoticeExpanded(msg.id)" class="sys-notice-body">
+                <div class="sys-notice-body-bar">
+                  <button
+                    type="button"
+                    class="message-action sys-notice-copy"
+                    :aria-label="copiedMsgId === msg.id ? '已复制' : '复制原文'"
+                    :title="copiedMsgId === msg.id ? '已复制' : '复制原文'"
+                    @click="copyMessageText(msg)"
+                  >
+                    <OpusIcon :name="copiedMsgId === msg.id ? 'check' : 'copy'" />
+                  </button>
+                </div>
+                <pre class="sys-notice-raw">{{ msg.text }}</pre>
+              </div>
+            </div>
+
+            <div
+              v-else
+              :data-msg-id="msg.id"
+              class="sys-notice"
+              :class="{
+                'is-search-hit': highlightedMsgId === msg.id,
+                'is-deferred-msg': msgIdx < effectiveMessages.length - 8,
+              }"
+            >
+              <OpusIcon name="info" />
+              <span>{{ msg.text }}</span>
+            </div>
+          </template>
 
           <div
             v-else-if="msg.role !== 'system' && (msg.role === 'user' || msg.streaming || msg.text || msg.thought || msg.toolCalls?.length || msg.parts?.length || msg.error || msg.forms?.length || msg.approvals?.length || msg.artifacts?.length || msg.media?.length)"
@@ -5098,6 +5178,123 @@ dialog.img-lightbox::backdrop {
   font-size: 11.5px;
 }
 .sys-notice .i { width: 13px; height: 13px; color: var(--accent); flex: none; }
+.sys-notice-collapsible {
+  align-self: center;
+  width: min(100%, 720px);
+  max-width: 100%;
+  margin: 4px auto;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 11.5px;
+  overflow: hidden;
+}
+.sys-notice-collapsible.is-failed {
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--line));
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.sys-notice-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 5px 10px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.sys-notice-toggle:hover {
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+}
+.sys-notice-icon {
+  flex: none;
+  line-height: 1;
+}
+.sys-notice-line {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sys-notice-title {
+  flex: none;
+  font-weight: 500;
+}
+.sys-notice-fail-badge {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--danger) 15%, transparent);
+  color: var(--danger);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.sys-notice-sep {
+  flex: none;
+  opacity: 0.55;
+}
+.sys-notice-detail {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  opacity: 0.85;
+}
+.sys-notice-cmd {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  opacity: 0.75;
+}
+.sys-notice-chev {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  opacity: 0.7;
+  transition: transform 0.15s ease;
+}
+.sys-notice-collapsible.is-expanded .sys-notice-chev {
+  transform: rotate(180deg);
+}
+.sys-notice-body {
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  padding: 8px 10px;
+}
+.sys-notice-collapsible.is-failed .sys-notice-body {
+  border-top-color: color-mix(in srgb, var(--danger) 25%, var(--line));
+}
+.sys-notice-body-bar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 4px;
+}
+.sys-notice-raw {
+  margin: 0;
+  color: var(--text-2);
+  font-family: var(--mono, monospace);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
 .tool-list {
   display: grid;
   gap: 6px;
@@ -5398,7 +5595,8 @@ dialog.img-lightbox::backdrop {
 .bm-chip:hover { color: var(--accent); }
 .msg.is-search-hit .bubble,
 .mmsg.is-search-hit .bubble,
-.sys-notice.is-search-hit {
+.sys-notice.is-search-hit,
+.sys-notice-collapsible.is-search-hit {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
