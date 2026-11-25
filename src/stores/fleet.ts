@@ -301,7 +301,8 @@ export const useFleetStore = defineStore('fleet', () => {
 
   // ---------------- 实时连接状态 ----------------
   const wsState = ref<FleetConnectionState>('disconnected')
-  const nativeTransport = desktopPlatform() !== 'web'
+  // 实验（未提交）：桌面端暂时回退浏览器 WebSocket，仅 Android 走原生常驻传输
+  const nativeTransport = desktopPlatform() === 'android'
   const syncMode = readSyncMode()
   const epochCapabilities = syncMode === 'epoch' ? { capabilities: ['session.events.v1'] } : undefined
   const declareNativeSessionEvents = nativeTransport && epochCapabilities
