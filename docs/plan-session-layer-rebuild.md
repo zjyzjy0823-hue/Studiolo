@@ -141,12 +141,25 @@
 **验收**：后台任务发起的长回合中插话成功；空闲时插话降级为普通发送且不报错。
 **回滚**：保留旧分支，按 provider 开关。
 
+**实施状态（2026-11-25）**：
+- 已完成「运行态判定归一」：在 `agent-node/agent_node/daemon.py:342-367` 新增 `_session_busy` 与 `_session_running`，替换了全部分散的忙碌/运行态判定点（`_session_busy`：`daemon.py:1016,1308,1322,1426,1827,1879,2085`；`_session_running`：`daemon.py:1334,1997`），行为与改前完全一致；语义不同的纯本地检查（`daemon.py:422,1890,1987,2025`）与 `prompt.send` 压缩前置提示（`daemon.py:1874`）保留并加注说明。
+- 未做「删除 `_active_runs`」：`_active_runs` 同时承担 `prompt.send` 并发守卫与本地流/取消归属判定，且目前只有 `HermesWsAdapter`（`agent-node/agent_node/adapters/hermes_ws.py:399`）提供 `session_running()` 探针，Codex / OpenCode 均无该探针，尚无法只信 `session.running` 事件。
+
 ### P8 · 删补丁与回归
 
 - 删除：帧缓冲、快照抢占、`sameTurnContent` 指纹回退、`external-` 合成 runId、`_active_runs`
 - 回归：前端全量测试、后端测试、真机三件套
 
 **验收**：代码量净减少；测试全绿；真机验收表全过。
+
+**实施状态（2026-11-25）**：
+- 本轮已做安全子集清理：删除 `agent-node/agent_node/daemon.py` 中已证实零引用的未接线 WIP 残留与兼容别名（`EXTERNAL_STREAM_IDLE_SECONDS`、`ExternalTurn`、`SessionStream.external`、`GatewayEventNormalizer` 导入、`_send_ws(..., updates=...)` 死分支与 `SessionEventUpdate` 导入、`_history_cursor` / `history_cursor` 导入）；`src/stores/fleet.ts` 与 `src/services/chatHelpers.ts` 经审计无零引用 helper，未改动前端业务代码。
+- 本轮保留项及删除前置条件：
+  - `sameTurnContent`：当前消费者为 `src/stores/fleet.ts:2268`、`src/services/chatHelpers.ts:941`、`tests/fleet.test.mjs:70,1703`（`syncMode` 默认仍为 `legacy`，见 `src/stores/fleet.ts:306`）。删除前置条件：`syncMode=epoch` 成为默认且下线 legacy 历史合并/发件箱指纹回退。
+  - 帧缓冲（`streamStateBySession` 缓冲队列）：当前消费者为 `src/stores/fleet.ts:444,1158-1294,1893-1992,2834-2835,5465`、`tests/fleet.test.mjs:403,779,849`。删除前置条件：`syncMode=epoch` 成为默认且 legacy 重连流恢复路径下线。
+  - 快照抢占（`streamStateBySession` 的 `snapshotRequired` / `snapshot` 恢复状态机）：当前消费者为 `src/stores/fleet.ts:1243,1777,2218-2222`、`agent-node/agent_node/daemon.py:1367`（`SessionStreamReplay.snapshotRequired`）、`tests/fleet.test.mjs:266-767`。删除前置条件：`syncMode=epoch` 成为默认且客户端全面切至 `(epoch, seq)` 快照+增量续传。
+  - `external-` 合成 runId：当前消费者为 `agent-node/agent_node/daemon.py:374-445,1343-1346,1435`（外部 Hermes 回合对账与帧转发）及 `agent-node/tests/test_external_relay.py`、`agent-node/tests/test_hermes_ws.py`。删除前置条件：`syncMode=epoch` 成为默认且外部回合事件统一携带契约 `turnId` 直达客户端，不再依赖 legacy `runId` 拼装。
+  - `_active_runs`：当前消费者为 `agent-node/agent_node/daemon.py:318,343,347,355,422,1016,1336,1881,1890,1987,1999,2025`（并发守卫、空闲轮询跳过、本地取消与流淘汰保护）。删除前置条件：Codex / OpenCode 补齐 `session_running()` 探针与上游并发守卫，且 `session.running` 事件成为全 provider 唯一运行态来源。
 
 ---
 

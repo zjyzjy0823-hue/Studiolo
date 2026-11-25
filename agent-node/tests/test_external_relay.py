@@ -325,3 +325,61 @@ def test_end_to_end_gateway_wire_relays_external_turn_to_core_ws(tmp_path, monke
 
     asyncio.run(run())
 
+
+def test_session_busy_and_running_helpers(tmp_path):
+    async def run():
+        adapter = AsyncMock(spec=HermesWsAdapter)
+        daemon = _make_daemon(tmp_path, adapter)
+        key = ("hermes", "sess-1")
+
+        # 1. _session_busy 覆盖 _active_runs 与 _compacting_sessions
+        assert daemon._session_busy(key) is False
+        daemon._compacting_sessions.add(key)
+        assert daemon._session_busy(key) is True
+        daemon._compacting_sessions.clear()
+        daemon._active_runs.add(key)
+        assert daemon._session_busy(key) is True
+
+        # 2. _session_running 本地优先，不触发远端探针
+        assert await daemon._session_running(adapter, key) == (True, None)
+        adapter.session_running.assert_not_awaited()
+        daemon._active_runs.clear()
+
+        # 3. HermesWsAdapter 探针返回 True 时携带 turn_started_at
+        adapter.session_running.return_value = True
+        adapter.cached_turn_started_at.return_value = 1700000123.9
+        assert await daemon._session_running(adapter, key) == (True, 1700000123)
+
+        # 4. 探针返回 None 或抛异常时不清理 _external_run_ids
+        daemon._external_run_ids["sess-1"] = "external-1700000123"
+        adapter.session_running.return_value = None
+        assert await daemon._session_running(adapter, key) == (False, None)
+        assert daemon._external_run_ids["sess-1"] == "external-1700000123"
+
+        adapter.session_running.side_effect = ConnectionError("down")
+        assert await daemon._session_running(adapter, key) == (False, None)
+        assert daemon._external_run_ids["sess-1"] == "external-1700000123"
+
+        # 5. 探针明确返回 False 时清理陈旧的 _external_run_ids
+        adapter.session_running.side_effect = None
+        adapter.session_running.return_value = False
+        assert await daemon._session_running(adapter, key) == (False, None)
+        assert "sess-1" not in daemon._external_run_ids
+
+        # 6. 探针在途期间启动本地回合时优先返回本地运行态
+        async def start_local(*, session_id):
+            daemon._active_runs.add(("hermes", session_id))
+            return False
+
+        daemon._external_run_ids["sess-1"] = "external-keep"
+        adapter.session_running.side_effect = start_local
+        assert await daemon._session_running(adapter, key) == (True, None)
+        assert daemon._external_run_ids["sess-1"] == "external-keep"
+
+        # 7. 非 HermesWsAdapter 且未本地登记直接返回 (False, None)
+        daemon._active_runs.clear()
+        assert await daemon._session_running(object(), ("codex", "sess-2")) == (False, None)
+
+    asyncio.run(run())
+
+

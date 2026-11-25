@@ -25,7 +25,6 @@ import websockets
 
 from .adapters.base import AgentAdapter, ApprovalCallback, EventEmitter
 from .adapters.hermes import HermesAdapter
-from .adapters.hermes_replay import GatewayEventNormalizer
 from .adapters.hermes_ws import HermesWsAdapter, ProviderError, ResumeTimeoutError
 from .adapters.jsonrpc import JsonRpcError
 from .adapters.registry import build_adapter_registry
@@ -44,8 +43,6 @@ from .session_events import (
     EventStore,
     PromptEvents,
     SessionEventLog,
-    SessionEventUpdate,
-    history_cursor,
     resolve_before_cursor,
     window_messages,
     window_snapshot,
@@ -79,7 +76,6 @@ from .worktree import current_session_ref, project_identity, recover_session_wor
 _LOG = logging.getLogger(__name__)
 _PROJECT_PERMISSION_MODES = ("default", "read", "deny")
 IDLE_TRANSCRIPT_INTERVAL_SECONDS = 2.0
-EXTERNAL_STREAM_IDLE_SECONDS = 15 * 60
 
 
 @dataclass
@@ -87,66 +83,6 @@ class IdleTranscript:
     opened_at: float = field(default_factory=lambda: time.time() * 1000)
     last_event_at: float = float("-inf")
     seen: deque[str] = field(default_factory=lambda: deque(maxlen=50))
-
-
-@dataclass
-class ExternalTurn:
-    session_id: str = ""
-    normalizer: GatewayEventNormalizer = field(default_factory=GatewayEventNormalizer)
-    epoch: str | None = None
-    events: list[SessionEventUpdate] = field(default_factory=list)
-    last_event_at: float = field(default_factory=time.monotonic)
-    reply: str = ""
-    reply_tail: str = ""
-    has_thought: bool = False
-
-    def live_frames(self, updates: list[SessionEventUpdate]) -> list[dict[str, Any]]:
-        # The Core websocket uses compatibility types. The event store receives
-        # the original contract updates, including those without a live frame.
-        if updates:
-            self.last_event_at = time.monotonic()
-        frames = []
-        for update in updates:
-            kind, payload = update.type, update.payload
-            frame = None
-            if kind == "turn.started":
-                self.reply = self.reply_tail = ""
-                self.has_thought = False
-                frame = {"type": "Accepted", **payload}
-            elif kind == "message.assistant.delta":
-                self.reply += payload["text"]
-                self.reply_tail += payload["text"]
-                frame = {"type": "TextDelta", **payload}
-            elif kind == "message.assistant.completed":
-                final = payload["text"]
-                if final and not self.reply.endswith(final):
-                    prefix = self.reply if final.startswith(self.reply) else self.reply_tail
-                    if final.startswith(prefix):
-                        frame = {"type": "TextDelta", "text": final[len(prefix):]}
-            elif kind in ("thought.delta", "thought.completed"):
-                if kind == "thought.delta" or not self.has_thought:
-                    self.has_thought = True
-                    frame = {"type": "ThoughtDelta", **payload}
-            elif kind == "tool.call.started":
-                self.reply_tail = ""
-                frame = {"type": "ToolCall", **payload}
-            elif kind == "tool.call.updated":
-                frame = {"type": "ToolCallUpdate", **payload}
-            elif kind == "tool.call.completed":
-                frame = {"type": "ToolCallUpdate", **payload, "status": "completed" if payload["ok"] else "error"}
-            elif kind == "turn.ended":
-                if payload["status"] == "completed":
-                    frame = {"type": "Completed", "endedAt": payload["endedAt"]}
-                else:
-                    cancelled = payload["status"] == "cancelled"
-                    frame = {"type": "Failed", "endedAt": payload["endedAt"],
-                             "code": "cancelled" if cancelled else "node_execution_error",
-                             "message": "已中断当前 Hermes 任务" if cancelled else "Hermes 回合失败"}
-                self.reply = self.reply_tail = ""
-                self.has_thought = False
-            if frame is not None:
-                frames.append({**frame, "runId": update.turn_id})
-        return frames
 
 
 @dataclass
@@ -158,7 +94,6 @@ class SessionStream:
     byte_count: int = 0
     events: deque[tuple[int, dict[str, Any]]] = field(default_factory=deque)
     last_event_at: float = field(default_factory=time.monotonic)
-    external: ExternalTurn | None = None
 
     def append(self, event: dict[str, Any]) -> dict[str, Any]:
         self.last_event_at = time.monotonic()
@@ -170,9 +105,6 @@ class SessionStream:
         while len(self.events) > 500 or self.byte_count > 4 * 1024 * 1024:
             self.byte_count -= self.events.popleft()[0]
         return frame
-
-
-_history_cursor = history_cursor
 
 
 def _coerce_external_id(value: Any) -> str | None:
@@ -407,6 +339,33 @@ class AgentNodeDaemon:
         )
         self._register_external_event_handlers()
 
+    def _session_busy(self, key: tuple[str, str]) -> bool:
+        return key in self._active_runs or key in self._compacting_sessions
+
+    async def _session_running(self, adapter: Any, key: tuple[str, str]) -> tuple[bool, int | None]:
+        # 本地登记优先；未登记且 adapter 是 HermesWsAdapter 时用 session_running() 兜底。
+        if key in self._active_runs:
+            return True, None
+        _, sid = key
+        probed_state: bool | None = None
+        if sid and isinstance(adapter, HermesWsAdapter):
+            with suppress(Exception):
+                probed_state = await adapter.session_running(session_id=sid)
+        # A local run can start while the probe is in flight.
+        if key in self._active_runs:
+            return True, None
+        if probed_state is True:
+            raw_started = adapter.cached_turn_started_at(sid)
+            turn_started_at = (
+                int(raw_started)
+                if type(raw_started) in (int, float) and math.isfinite(raw_started)
+                else None
+            )
+            return True, turn_started_at
+        if probed_state is False and isinstance(adapter, HermesWsAdapter):
+            self._external_run_ids.pop(sid, None)
+        return False, None
+
     def _register_external_event_handlers(self) -> None:
         for adapter in self.adapters.values():
             if isinstance(adapter, HermesWsAdapter):
@@ -459,6 +418,7 @@ class AgentNodeDaemon:
         try:
             if not isinstance(session_id, str) or not session_id.strip() or not isinstance(params, dict):
                 return
+            # 仅过滤本节点正在执行的本地回合，避免与本地转发重复（不含压缩态）。
             if ("hermes", session_id) in self._active_runs:
                 return
             event_type = params.get("type")
@@ -699,15 +659,11 @@ class AgentNodeDaemon:
     async def _send_ws(
         self, ws: Any, frame: dict[str, Any], *, prompt: PromptEvents | None = None, forward: bool = True,
         stream: SessionStream | None = None, provider: str | None = None,
-        updates: list[SessionEventUpdate] | None = None,
     ) -> None:
         async with self._send_lock:
             if self._session_event_log is not None:
                 event_frame = {"provider": provider, **frame} if provider is not None else frame
-                if updates is None:
-                    await asyncio.to_thread(self._session_event_log.record, event_frame, prompt)
-                else:
-                    await asyncio.to_thread(self._session_event_log.record, event_frame, updates=updates)
+                await asyncio.to_thread(self._session_event_log.record, event_frame, prompt)
             if not forward:
                 return
             if stream is not None:
@@ -1056,8 +1012,10 @@ class AgentNodeDaemon:
             probed_runs = set()
             if isinstance(hermes, HermesWsAdapter):
                 probed_runs = {("hermes", sid) for sid in hermes.cached_running_sessions()}
+            # 保留本地与外部缓存集合的并集，本地集合读取经 _session_busy 统一入口。
+            local_runs = {key for key in self._active_runs if self._session_busy(key)}
             runs = []
-            for key in self._active_runs | probed_runs:
+            for key in local_runs | probed_runs:
                 run_provider, sid = key
                 stream = self._session_streams.get(key)
                 if key in probed_runs or (stream and stream.run_id):
@@ -1347,7 +1305,7 @@ class AgentNodeDaemon:
                 if not isinstance(sid, str) or not sid.strip() or not isinstance(model_id, str) or not model_id.strip():
                     raise ValueError("缺少会话 ID 或模型 ID")
                 key = (provider, sid)
-                if key in self._active_runs or key in self._compacting_sessions:
+                if self._session_busy(key):
                     raise ValueError("当前会话忙碌，请稍后切换模型")
                 fields = await adapter.set_session_model(session_id=sid, model_id=model_id)
                 if fields is None:
@@ -1361,7 +1319,7 @@ class AgentNodeDaemon:
                 if not isinstance(sid, str) or not sid.strip() or not isinstance(effort, str) or not effort.strip():
                     raise ValueError("缺少会话 ID 或思考强度")
                 key = (provider, sid)
-                if key in self._active_runs or key in self._compacting_sessions:
+                if self._session_busy(key):
                     raise ValueError("当前会话忙碌，请稍后切换思考强度")
                 if not isinstance(adapter, HermesAdapter):
                     raise ValueError("当前适配器不支持直接切换思考强度")
@@ -1373,26 +1331,19 @@ class AgentNodeDaemon:
                 if watch_idle and sid:
                     self._idle_transcripts.setdefault(sid, IdleTranscript())
                 key = (provider, sid)
-                probed_state: bool | None = None
-                if key not in self._active_runs and sid and isinstance(adapter, HermesWsAdapter):
-                    with suppress(Exception):
-                        probed_state = await adapter.session_running(session_id=sid)
-                probed_running = probed_state is True
+                is_active, turn_started_at = await self._session_running(adapter, key)
                 # A local run can start while the probe is in flight.
                 local_active = key in self._active_runs
-                is_active = local_active or probed_running
+                probed_running = is_active and not local_active
                 raw_last_seq = frame.get("afterSequence", frame.get("lastSeq"))
                 last_seq = raw_last_seq if type(raw_last_seq) is int and raw_last_seq > 0 else 0
                 stream = self._session_streams.get(key)
                 run_id = stream.run_id if stream and is_active else None
                 if stream is None and probed_running and isinstance(adapter, HermesWsAdapter):
-                    turn_started_at = adapter.cached_turn_started_at(sid)
                     run_id = self._external_run_ids.get(sid) or f"external-{int(turn_started_at or 0)}"
                 if probed_running and not local_active and run_id and isinstance(adapter, HermesWsAdapter):
                     self._external_run_ids.setdefault(sid, run_id)
                     self._last_external_run_ids.setdefault(sid, run_id)
-                elif probed_state is False and not local_active and isinstance(adapter, HermesWsAdapter):
-                    self._external_run_ids.pop(sid, None)
                 latest = stream.sequence if stream else 0
                 stream_id = frame.get("streamId")
                 generation_matches = stream_id in (None, stream.stream_id if stream else None)
@@ -1470,8 +1421,10 @@ class AgentNodeDaemon:
                 )
                 before = frame.get("beforeCursor")
                 paginated = bool(frame.get("pagination"))
-                is_running = (provider, sid) in self._active_runs
-                stream = self._session_streams.get((provider, sid))
+                # 历史窗口查询保持纯本地+缓存语义，不发异步 session_running 探针以免引入额外 RPC 延迟。
+                key = (provider, sid)
+                is_running = self._session_busy(key)
+                stream = self._session_streams.get(key)
                 running_run_id = stream.run_id if is_running and stream else None
                 if not is_running and isinstance(adapter, HermesWsAdapter):
                     if sid in adapter._active:
@@ -1871,7 +1824,7 @@ class AgentNodeDaemon:
                 if not sid:
                     raise ValueError("缺少会话 ID")
                 key = (provider, sid)
-                if key in self._active_runs or key in self._compacting_sessions:
+                if self._session_busy(key):
                     raise ValueError("请等待当前会话任务结束后再压缩")
                 self._compacting_sessions.add(key)
                 try:
@@ -1917,12 +1870,13 @@ class AgentNodeDaemon:
                 base_emit, on_approval = self._build_run_callbacks(ws, provider=provider, options=options)
                 turn_state: dict[str, Any] = {"runId": None, "checkpointed": False}
                 run_key = (provider, sid)
+                # 仅在认领 commandId 前拦截压缩态以返回专属提示。
                 if run_key in self._compacting_sessions:
                     raise ValueError("请等待会话上下文压缩结束")
                 if command_id and not await asyncio.to_thread(self._claim_prompt_command, command_id):
                     await send_back({"type": "DuplicateIgnored", "commandId": command_id})
                     return
-                if run_key in self._active_runs or run_key in self._compacting_sessions:
+                if self._session_busy(run_key):
                     raise ValueError("当前会话已有任务运行中")
                 self._active_runs.add(run_key)
                 if provider == "hermes":
@@ -1932,6 +1886,7 @@ class AgentNodeDaemon:
                 stream.run_id = eff_req_id
                 self._session_streams.move_to_end(run_key)
                 while len(self._session_streams) > 16:
+                    # 仅保护本地运行中的 stream 不被淘汰，与压缩/外部运行态无关。
                     oldest = next((key for key in self._session_streams if key not in self._active_runs), None)
                     if oldest is None:
                         break
@@ -2028,6 +1983,7 @@ class AgentNodeDaemon:
                         "message": str(err) or type(err).__name__,
                     })
                 finally:
+                    # 释放本次本地回合的并发守卫（非运行态查询）。
                     self._active_runs.discard(run_key)
             elif cmd == "prompt.steer":
                 sid = str(frame.get("sessionId") or "")
@@ -2038,18 +1994,16 @@ class AgentNodeDaemon:
                                      "code": "unsupported", "message": "当前 Agent 不支持插话"})
                     return
                 key = (provider, sid)
-                external_steer = None
-                if key not in self._active_runs and sid and isinstance(adapter, HermesWsAdapter):
-                    with suppress(Exception):
-                        if await adapter.session_running(session_id=sid) is True:
-                            external_steer = adapter.steer_external
+                is_running, _ = await self._session_running(adapter, key)
+                # A local run can start while the probe is in flight.
                 local_active = key in self._active_runs
+                probed_running = is_running and not local_active
                 if not local_active:
-                    if external_steer is None:
+                    if not (probed_running and isinstance(adapter, HermesWsAdapter)):
                         await send_back({"type": "SteerRejected", "sessionId": sid,
                                          "code": "idle", "message": "当前没有运行中的回合"})
                         return
-                    steer_fn = external_steer
+                    steer_fn = adapter.steer_external
                 try:
                     ok = await steer_fn(session_id=sid, text=text)
                 except Exception as exc:  # noqa: BLE001
@@ -2067,6 +2021,7 @@ class AgentNodeDaemon:
                 sid = str(frame.get("sessionId") or "")
                 key = (provider, sid)
                 reply = {"type": "RunStopStatus", "provider": provider, "sessionId": sid, "runId": frame.get("runId")}
+                # 仅支持取消本节点持有的本地运行回合（不含压缩或外部回合）。
                 if key not in self._active_runs:
                     await send_back({**reply, "status": "error", "message": "当前会话已无运行中的任务"})
                     return
@@ -2127,8 +2082,7 @@ class AgentNodeDaemon:
 
         def busy(sid: str, state: IdleTranscript) -> bool:
             key = ("hermes", sid)
-            return (key in self._active_runs or key in self._compacting_sessions
-                    or time.monotonic() - state.last_event_at < 5)
+            return self._session_busy(key) or time.monotonic() - state.last_event_at < 5
 
         for sid, state in list(self._idle_transcripts.items()):
             if self._idle_transcripts.get(sid) is not state or busy(sid, state):
