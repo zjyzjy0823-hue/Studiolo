@@ -801,7 +801,7 @@ test('客户端续传状态机按 SPEC 恢复并释放请求', async t => {
         transformCallback() { return 1 },
         unregisterCallback() {},
         async invoke(command, args) {
-          if (command === 'desktop_platform') return 'macos'
+          if (command === 'desktop_platform') return 'android'
           if (command === 'fleet_connect') channel = args.events
           if (command === 'fleet_send') sent.push(args.frame)
         },
@@ -851,6 +851,54 @@ test('客户端续传状态机按 SPEC 恢复并释放请求', async t => {
     assert.equal(fleet.currentIsStreaming, false)
     assert.equal(fleet.pendingStreamResync.size, 0)
     assert.deepEqual(fleet.pendingHistoryPages, {})
+  })
+
+  await t.test('macOS Tauri 桌面端走浏览器 WebSocket，不调用 fleet_connect，且可正常收发帧', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const previousWindow = globalThis.window
+    const previousIsTauri = globalThis.isTauri
+    const invokeCalls = []
+    const socketsBefore = sockets.length
+    globalThis.isTauri = true
+    globalThis.window = {
+      addEventListener() {},
+      removeEventListener() {},
+      localStorage: globalThis.localStorage,
+      sessionStorage: { removeItem() {} },
+      __TAURI_INTERNALS__: {
+        transformCallback() { return 1 },
+        unregisterCallback() {},
+        async invoke(command, args) {
+          invokeCalls.push({ command, args })
+          if (command === 'desktop_platform') return 'macos'
+        },
+      },
+    }
+    const { initializeDesktopPlatform } = await server.ssrLoadModule('/src/desktop/platform.ts')
+    await initializeDesktopPlatform()
+    const pinia = createPinia()
+    let fleet
+    t.after(async () => {
+      fleet?.disconnectSocket()
+      disposePinia(pinia)
+      if (previousWindow === undefined) delete globalThis.window
+      else globalThis.window = previousWindow
+      if (previousIsTauri === undefined) delete globalThis.isTauri
+      else globalThis.isTauri = previousIsTauri
+      await initializeDesktopPlatform()
+    })
+    fleet = useFleetStore(pinia)
+    fleet.nodes = [{ id: 'mac-node', status: 'offline', adapters: [] }]
+    fleet.connectSocket()
+    assert.equal(invokeCalls.some(call => call.command === 'fleet_connect'), false)
+    assert.equal(sockets.length, socketsBefore + 1)
+    const ws = sockets.at(-1)
+    ws.onopen()
+    assert.equal(ws.sent.some(frame => frame.type === 'auth' && frame.token === 'test-token'), true)
+    ws.onmessage({ data: JSON.stringify({ type: 'FleetSnapshot', nodes: [{ id: 'mac-node', status: 'online', adapters: [] }] }) })
+    assert.equal(fleet.wsState, 'online')
+    assert.equal(fleet.nodes[0].status, 'online')
+    assert.equal(invokeCalls.some(call => call.command === 'fleet_send'), false)
   })
 
 })

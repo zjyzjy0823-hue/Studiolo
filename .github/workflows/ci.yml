@@ -245,7 +245,7 @@ jobs:
         run: |
           set -euo pipefail
           npm run desktop:prepare
-          node node_modules/@tauri-apps/cli/tauri.js build --target "$(rustc --print host-tuple)" --bundles app
+          node node_modules/@tauri-apps/cli/tauri.js build --target "$(rustc --print host-tuple)" --bundles app --config '{"bundle":{"macOS":{"signingIdentity":"-"}}}'
       - run: python scripts/smoke-backend-sidecar.py
       - name: Ad-hoc sign and package DMG
         run: |

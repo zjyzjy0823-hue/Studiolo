@@ -225,7 +225,7 @@ class CodexAdapter(AgentAdapter):
                 await self._proc.call(
                     "initialize",
                     {
-                        "clientInfo": {"name": "studiolo-agent-node", "version": "0.8.6"},
+                        "clientInfo": {"name": "studiolo-agent-node", "version": "0.9.9"},
                         "capabilities": {"experimentalApi": True},
                     },
                 )
