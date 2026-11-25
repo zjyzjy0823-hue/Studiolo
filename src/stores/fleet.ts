@@ -16,6 +16,7 @@ import { applySystemNotices } from '../services/systemNotices'
 import { isSessionArchived } from '../composables/useSessionOrganization'
 import { hasEpochMessageContent, mapEpochSnapshotMessage, normalizeEpochMessageContent, type EpochSnapshotMessage } from '../services/epochSnapshot'
 import { createSessionSync, fetchOlder, readSyncMode } from '../services/sessionSync'
+import { createConnectionHealthMonitor } from '../services/connectionHealth'
 import { retainSessionProcesses } from '../services/sessionActivity'
 import {
   buildFleetWsUrl,
@@ -280,6 +281,44 @@ export const useFleetStore = defineStore('fleet', () => {
   let reconnectAttempt = 0
   let intentionalClose = false
   let activeConnectRoute: FleetRoute | null = null
+  const connectionHealth = createConnectionHealthMonitor({
+    createPingId: () => `ping-${createRequestId()}`,
+    isOnline: () => wsState.value === 'online',
+    isReconnecting: () => wsState.value === 'reconnecting' && !intentionalClose && Boolean(fleetRoute.value),
+    sendPing: requestId => {
+      const route = fleetRoute.value
+      if (!route || activeConnectRoute !== route) return false
+      const frame = { type: 'node.ping', requestId }
+      if (nativeTransport) {
+        if (!nativeConnectionId || wsState.value !== 'online') return false
+        const id = nativeConnectionId
+        void invoke('fleet_send', { id, frame }).catch(() => {
+          if (nativeConnectionId === id && fleetRoute.value === route) {
+            connectionHealth.notePingSendFailed(requestId)
+          }
+        })
+        return true
+      }
+      if (!socket || socket.readyState !== WebSocket.OPEN) return false
+      try {
+        socket.send(JSON.stringify(frame))
+        return true
+      } catch {
+        return false
+      }
+    },
+    onStale: () => {
+      reconnectStaleSocket()
+    },
+    onReconnectNow: () => {
+      if (intentionalClose || !fleetRoute.value) return
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer)
+        reconnectTimer = null
+      }
+      connectSocket()
+    },
+  })
 
   // ---------------- 纯内存会话/消息/审批/产物状态 ----------------
   const selectedNodeId = ref<string>('')
@@ -736,6 +775,8 @@ export const useFleetStore = defineStore('fleet', () => {
     for (const { finish } of pendingSteers.values()) finish(false)
     intentionalClose = true
     activeConnectRoute = null
+    reconnectAttempt = 0
+    connectionHealth.markDisconnected()
     if (nativeConnectionId) {
       const id = nativeConnectionId
       nativeConnectionId = null
@@ -760,6 +801,7 @@ export const useFleetStore = defineStore('fleet', () => {
   }
 
   onScopeDispose(() => {
+    connectionHealth.dispose()
     disconnectSocket()
     for (const sKey of activityRequests.keys()) clearSessionActivity(sKey)
     messageCacheReads.clear()
@@ -1236,6 +1278,7 @@ export const useFleetStore = defineStore('fleet', () => {
   }
 
   function connectionLost(code?: number) {
+    connectionHealth.markDisconnected()
     if (wsState.value !== 'reconnecting') {
       snapshotFollowIntent.clear()
       captureSnapshotFollow()
@@ -1262,11 +1305,46 @@ export const useFleetStore = defineStore('fleet', () => {
     }
   }
 
+  function reconnectStaleSocket() {
+    const route = fleetRoute.value
+    if (intentionalClose || !route) return
+    connectionHealth.markDisconnected()
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+    if (nativeTransport) {
+      if (nativeConnectionId) {
+        const id = nativeConnectionId
+        nativeConnectionId = null
+        void invoke('fleet_disconnect', { id }).catch(() => {})
+      }
+      connectionLost()
+      reconnectAttempt = Math.max(reconnectAttempt, 1)
+      connectNative(route)
+      return
+    }
+    const staleSocket = socket
+    socket = null
+    if (staleSocket) {
+      try {
+        staleSocket.close(4000, 'stale_connection')
+      } catch {
+        // 忽略已关闭连接错误
+      }
+    }
+    connectionLost()
+    reconnectAttempt = Math.max(reconnectAttempt, 1)
+    connectSocket()
+  }
+
   function connectNative(route: FleetRoute) {
+    connectionHealth.attach()
     if (nativeConnectionId && activeConnectRoute === route) return
     if (nativeConnectionId) disconnectSocket()
+    intentionalClose = false
     activeConnectRoute = route
-    wsState.value = 'connecting'
+    wsState.value = reconnectAttempt > 0 ? 'reconnecting' : 'connecting'
     const id = createRequestId()
     nativeConnectionId = id
     const events = new Channel<NativeFleetEvent>(message => {
@@ -1297,6 +1375,7 @@ export const useFleetStore = defineStore('fleet', () => {
     localCacheRequested.value = true
     const route = fleetRoute.value
     if (!route) return
+    connectionHealth.attach()
     if (nativeTransport) {
       connectNative(route)
       return
@@ -1358,6 +1437,7 @@ export const useFleetStore = defineStore('fleet', () => {
     }
 
     ws.onerror = () => {
+      if (socket !== ws || fleetRoute.value !== route) return
       if (wsState.value === 'connecting') {
         wsState.value = 'reconnecting'
       }
@@ -1683,6 +1763,10 @@ export const useFleetStore = defineStore('fleet', () => {
   }
 
   function handleWsEvent(frame: FleetWsEvent) {
+    connectionHealth.noteFrame(frame)
+    if (frame.type === 'Pong') return
+    if (frame.requestId && connectionHealth.consumeHeartbeatRequest(frame.requestId)
+      && ['Failed', 'NodeUnavailable', 'Error'].includes(frame.type)) return
     const sKey = frameSessionKey(frame)
     try {
       if (frame.requestId && retiredStreamRequests.has(frame.requestId) && ['Failed', 'NodeUnavailable', 'Error'].includes(frame.type)) return
@@ -1728,8 +1812,13 @@ export const useFleetStore = defineStore('fleet', () => {
     }
 
     if (etype === 'FleetSnapshot' && Array.isArray(frame.nodes)) {
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer)
+        reconnectTimer = null
+      }
       reconnectAttempt = 0
       wsState.value = 'online'
+      connectionHealth.markConnected()
       declareNativeSessionEvents?.()
       lastError.value = null
       const onlineMap = new Map(frame.nodes.map(item => [((item as unknown as { nodeId?: string }).nodeId ?? item.id), item]))
@@ -5234,6 +5323,7 @@ export const useFleetStore = defineStore('fleet', () => {
     removeNode,
     connectSocket,
     disconnectSocket,
+    probeConnection: () => connectionHealth.probe('manual'),
     handleWsEvent,
     dumpAuditLog,
     selectNode,

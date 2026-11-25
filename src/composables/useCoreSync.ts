@@ -59,6 +59,10 @@ export function useCoreSync(notify: (message: string) => void) {
     }
   }
 
+  function isPageHidden() {
+    return typeof document !== 'undefined' && Boolean(document.hidden)
+  }
+
   function stopPolling() {
     if (pollTimer !== null) clearTimeout(pollTimer)
     pollTimer = null
@@ -68,13 +72,13 @@ export function useCoreSync(notify: (message: string) => void) {
   }
 
   function schedulePoll() {
-    if (!alive || !mounted || !session() || pollTimer !== null) return
+    if (!alive || !mounted || !session() || pollTimer !== null || isPageHidden()) return
     pollTimer = setTimeout(() => { pollTimer = null; void pollStatus() }, CORE_SYNC_STATUS_POLL_INTERVAL_MS)
   }
 
   async function pollStatus() {
     const requestSession = session()
-    if (!requestSession || !alive || !mounted) return
+    if (!requestSession || !alive || !mounted || isPageHidden()) return
     if (connectionLoading.value || syncLoading.value) { schedulePoll(); return }
     const generation = ++pollGeneration
     const controller = new AbortController()
@@ -252,6 +256,17 @@ export function useCoreSync(notify: (message: string) => void) {
     })
   }
 
+  function handleVisibilityChange() {
+    if (!alive || !mounted) return
+    if (isPageHidden()) {
+      stopPolling()
+      return
+    }
+    if (!session()) return
+    if (connectionLoading.value || syncLoading.value) schedulePoll()
+    else void pollStatus()
+  }
+
   watch([() => auth.token, () => auth.mode], () => {
     sessionGeneration += 1
     stopPolling()
@@ -264,8 +279,21 @@ export function useCoreSync(notify: (message: string) => void) {
     connectionError.value = syncError.value = ''
     if (mounted && alive && session()) void refresh()
   }, { flush: 'sync' })
-  onMounted(() => { mounted = true; void refresh() })
-  onUnmounted(() => { alive = mounted = false; sessionGeneration += 1; stopPolling() })
+  onMounted(() => {
+    mounted = true
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      document.addEventListener('visibilitychange', handleVisibilityChange)
+    }
+    void refresh()
+  })
+  onUnmounted(() => {
+    alive = mounted = false
+    sessionGeneration += 1
+    if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+    stopPolling()
+  })
   return { connection, connectionTest, syncStatus, syncResult, connectionLoading, syncLoading, action, busy, connectionError, syncError,
     nativeBinding, needsReplica, refresh, connect, test, disconnect, sync, newReplica }
 }

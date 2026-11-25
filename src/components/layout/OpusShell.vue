@@ -6,6 +6,7 @@ import type { WorkbenchTheme } from '../../composables/useWorkbenchTheme'
 import DesktopTitleBar from '../desktop/DesktopTitleBar.vue'
 import { useCoreSync } from '../../composables/useCoreSync'
 import { runAndroidSync } from '../../api/sync'
+import { createSyncLoopController, DEFAULT_SYNC_FALLBACK_INTERVAL_MS } from '../../services/connectionHealth'
 import { useWebsitesStore } from '../../stores/websites'
 import { useSpaceStore } from '../../stores/space'
 import {
@@ -318,8 +319,6 @@ function handleMobileBack() {
 }
 defineExpose({ openDock: () => { dockOpen.value = true }, handleMobileBack })
 let resizeObserver: ResizeObserver | null = null
-let androidSyncTimer: ReturnType<typeof setInterval> | undefined
-let spaceSyncTimer: ReturnType<typeof setInterval> | undefined
 let androidSyncActive = false
 async function syncAndroidForeground() {
   const state = syncStatus.value
@@ -336,13 +335,24 @@ async function syncAndroidForeground() {
     androidSyncActive = false
   }
 }
-function syncSpaceForeground() {
+async function syncSpaceForeground() {
   if (document.hidden || !navigator.onLine) return
-  void space.syncPending().then(() => {
-    if (props.page === 'Space' && space.selectedSpace?.tier === 'standard') void space.refreshCurrentSpace()
-  })
+  await space.syncPending()
+  if (props.page === 'Space' && space.selectedSpace?.tier === 'standard') {
+    await space.refreshCurrentSpace()
+  }
 }
-watch(() => space.route, route => { if (route) syncSpaceForeground() })
+const spaceSyncLoop = createSyncLoopController({
+  runSync: syncSpaceForeground,
+  fallbackIntervalMs: DEFAULT_SYNC_FALLBACK_INTERVAL_MS,
+})
+const androidSyncLoop = android
+  ? createSyncLoopController({
+      runSync: syncAndroidForeground,
+      fallbackIntervalMs: DEFAULT_SYNC_FALLBACK_INTERVAL_MS,
+    })
+  : null
+watch(() => space.route, route => { if (route) spaceSyncLoop.trigger() })
 onMounted(() => {
   if (platform !== 'web') {
     void fleet.loadNodes()
@@ -350,12 +360,8 @@ onMounted(() => {
   }
   document.addEventListener('keydown', keydown)
   document.addEventListener('pointerdown', dismissSync)
-  spaceSyncTimer = setInterval(syncSpaceForeground, 30_000)
-  window.addEventListener('online', syncSpaceForeground)
-  if (android) {
-    androidSyncTimer = setInterval(syncAndroidForeground, 30_000)
-    window.addEventListener('online', syncAndroidForeground)
-  }
+  spaceSyncLoop.start()
+  androidSyncLoop?.start()
   if (typeof ResizeObserver !== 'undefined' && windowEl.value) {
     resizeObserver = new ResizeObserver(entries => {
       const width = entries[0]?.contentRect.width
@@ -367,10 +373,8 @@ onMounted(() => {
 onUnmounted(() => {
   document.removeEventListener('keydown', keydown)
   document.removeEventListener('pointerdown', dismissSync)
-  if (androidSyncTimer !== undefined) clearInterval(androidSyncTimer)
-  if (spaceSyncTimer !== undefined) clearInterval(spaceSyncTimer)
-  window.removeEventListener('online', syncSpaceForeground)
-  window.removeEventListener('online', syncAndroidForeground)
+  spaceSyncLoop.stop()
+  androidSyncLoop?.stop()
   resizeObserver?.disconnect()
   resizeObserver = null
 })
