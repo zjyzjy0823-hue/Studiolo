@@ -436,7 +436,7 @@ onUnmounted(() => {
 .fv-hdr-ic { width: 14px; height: 14px; color: var(--accent); flex: none; }
 .fv-path {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   font-weight: 600;
   color: var(--text);
   overflow: hidden;
@@ -444,7 +444,7 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 .fv-meta {
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--text-3);
   white-space: nowrap;
 }
@@ -464,7 +464,7 @@ onUnmounted(() => {
 .fv-empty {
   padding: 28px 18px;
   text-align: center;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -475,12 +475,12 @@ onUnmounted(() => {
   padding: 6px 12px;
   background: color-mix(in srgb, var(--warn) 12%, transparent);
   color: var(--warn);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   border-bottom: 1px solid var(--line);
 }
 .fv-code {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   line-height: 1.55;
   padding: 8px 0;
 }
@@ -495,7 +495,7 @@ onUnmounted(() => {
   background: var(--solid);
   color: var(--text);
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   line-height: 1.55;
   tab-size: 2;
 }
@@ -503,7 +503,7 @@ onUnmounted(() => {
   flex: none;
   width: 112px;
   padding: 0 8px;
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   color: var(--text-3);
   border-right: 1px solid var(--line);
   overflow: hidden;
@@ -531,7 +531,7 @@ onUnmounted(() => {
   background: transparent;
   color: var(--text-3);
   font-family: inherit;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   text-align: right;
   cursor: pointer;
   user-select: none;
@@ -578,6 +578,6 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 12px;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
 }
 </style>

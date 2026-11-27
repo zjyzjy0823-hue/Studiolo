@@ -33,9 +33,9 @@ const emit = defineEmits<{ action: [message: string] }>()
 
 <style scoped>
 .about-hero { display: flex; align-items: center; gap: 14px; }
-.about-hero strong { color: var(--text); font-size: 18px; font-weight: 700; }
-.about-hero p { margin: 2px 0 0; color: var(--text-3); font-size: 12.5px; }
-.about-value { color: var(--text); font-size: 13px; font-weight: 600; }
-.about-row { padding: 13px 16px; border-radius: 0; font-size: 13.5px; }
+.about-hero strong { color: var(--text); font-size: calc(18px * var(--fs)); font-weight: 700; }
+.about-hero p { margin: 2px 0 0; color: var(--text-3); font-size: calc(12.5px * var(--fs)); }
+.about-value { color: var(--text); font-size: calc(13px * var(--fs)); font-weight: 600; }
+.about-row { padding: 13px 16px; border-radius: 0; font-size: calc(13.5px * var(--fs)); }
 .about-row + .about-row { border-top: 1px solid var(--line); }
 </style>

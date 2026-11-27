@@ -31,6 +31,7 @@ export type TurnRenderItem =
   | { type: 'tool'; id: string; callId: string; tool: ToolCallBadge }
   | { type: 'text'; id: string; text: string; isLast: boolean }
   | { type: 'media'; id: string; attachment: InlineMediaAttachment }
+  | { type: 'attachment-note'; id: string; name: string; mime: string; path: string }
 
 export type WorkLogStep = Extract<TurnRenderItem, { type: 'thought' | 'tool' }>
 export type WorkLogProgress = { type: 'thought' | 'text' } | { type: 'tool'; tool: ToolCallBadge }
@@ -43,7 +44,9 @@ export interface WorkLogRenderItem {
   progress?: WorkLogProgress
 }
 
-type ThreadRenderItem = WorkLogRenderItem | Extract<TurnRenderItem, { type: 'text' | 'media' }>
+export type ThreadRenderItem =
+  | WorkLogRenderItem
+  | Extract<TurnRenderItem, { type: 'text' | 'media' | 'attachment-note' }>
 
 export interface ExtractedHostMedia {
   match: string
@@ -102,6 +105,41 @@ export function cleanBaseFileName(rawPathOrName?: string): string {
   const s = (rawPathOrName || '').trim()
   if (!s) return 'attachment'
   return s.replace(/\\/g, '/').split('/').pop() || s
+}
+
+/**** 附件说明块：agent-node 把解密后的附件拼成 `[附带文件]` 纯文本塞进 prompt，回放时会污染气泡 ****/
+
+export interface AttachmentNote {
+  name: string
+  mime: string
+  path: string
+}
+
+const ATTACHMENT_BLOCK_RE = /\n*\[附带文件\]\n((?:- \[(?:已解密附件|加密附件票据)\][^\n]*\n?)+)\s*$/
+const ATTACHMENT_LINE_RE = /^- \[(?:已解密附件|加密附件票据)\]\s+(.+?)\s+\(([^)]*)\)(?::\s*(.+))?$/
+
+/** 去掉消息末尾的 `[附带文件]` 文本块，并解析出附件列表（供缩略图/芯片展示）。 */
+export function parseAttachmentNote(text: string): { cleaned: string; files: AttachmentNote[] } {
+  if (!text || !text.includes('[附带文件]')) return { cleaned: text, files: [] }
+  const blockMatch = text.match(ATTACHMENT_BLOCK_RE)
+  if (!blockMatch) return { cleaned: text, files: [] }
+  const files: AttachmentNote[] = []
+  for (const rawLine of blockMatch[1].split('\n')) {
+    const line = rawLine.trim()
+    if (!line) continue
+    const match = line.match(ATTACHMENT_LINE_RE)
+    if (!match) continue
+    const [, name, meta, path] = match
+    const trimmedName = name.trim()
+    const isMime = meta.includes('/')
+    files.push({
+      name: trimmedName,
+      mime: isMime ? meta.trim() : inferMimeFromPath(trimmedName),
+      path: (path || '').trim(),
+    })
+  }
+  const cleaned = text.slice(0, blockMatch.index).trimEnd()
+  return { cleaned, files }
 }
 
 /**
@@ -442,28 +480,40 @@ export function buildTurnRenderItems(
       out.push({ type: 'tool', id: `${msg.id}-p-${pIdx}`, callId: part.callId, tool: part.tool })
       return
     }
-    if (part.type === 'text' && part.text) {
+    if (part.type === 'text' && part.text?.trim()) {
       const isFinalTextPart = pIdx === lastTextPartIdx
-      const { segments, consumedIds } = splitTextByInlineMedia(part.text, allAttachments, {
-        allowTrailingUnmatched: isFinalTextPart,
-        alreadyConsumed: consumed,
-      })
-      for (const id of consumedIds) consumed.add(id)
-      segments.forEach((seg, sIdx) => {
-        if (seg.type === 'text') {
-          out.push({
-            type: 'text',
-            id: `${msg.id}-p-${pIdx}-s-${sIdx}`,
-            text: seg.text,
-            isLast: isLast && sIdx === segments.length - 1,
-          })
-        } else {
-          out.push({
-            type: 'media',
-            id: `${msg.id}-p-${pIdx}-m-${seg.attachment.id}`,
-            attachment: seg.attachment,
-          })
-        }
+      const note = parseAttachmentNote(part.text)
+      if (note.cleaned.trim()) {
+        const { segments, consumedIds } = splitTextByInlineMedia(note.cleaned, allAttachments, {
+          allowTrailingUnmatched: isFinalTextPart,
+          alreadyConsumed: consumed,
+        })
+        for (const id of consumedIds) consumed.add(id)
+        segments.forEach((seg, sIdx) => {
+          if (seg.type === 'text') {
+            out.push({
+              type: 'text',
+              id: `${msg.id}-p-${pIdx}-s-${sIdx}`,
+              text: seg.text,
+              isLast: isLast && sIdx === segments.length - 1,
+            })
+          } else {
+            out.push({
+              type: 'media',
+              id: `${msg.id}-p-${pIdx}-m-${seg.attachment.id}`,
+              attachment: seg.attachment,
+            })
+          }
+        })
+      }
+      note.files.forEach((file, fIdx) => {
+        out.push({
+          type: 'attachment-note',
+          id: `${msg.id}-att-${pIdx}-${fIdx}`,
+          name: file.name,
+          mime: file.mime,
+          path: file.path,
+        })
       })
     }
   })
@@ -491,7 +541,7 @@ export function buildThreadRenderItems(
   const out: ThreadRenderItem[] = []
   const items = buildTurnRenderItems(msg, imagePreviewByArtifactId)
   for (const [index, item] of items.entries()) {
-    if (item.type === 'text' || item.type === 'media') {
+    if (item.type === 'text' || item.type === 'media' || item.type === 'attachment-note') {
       out.push(item)
       continue
     }
@@ -530,4 +580,123 @@ export function buildThreadRenderItems(
     }
   }
   return out
+}
+
+export interface ThreadRow {
+  msg: ChatMessage        // 渲染用；合并组是"合成消息"，否则是原消息
+  sourceIndex: number     // 在 effectiveMessages 里的原始下标（fork/branch/regenerate 依赖它）
+  memberIds: string[]     // 合并组包含的消息 id（单条时为 [msg.id]）
+  stepCount: number       // 组内工具步骤数（单条时为其工具数）
+}
+
+export function countMessageTools(msg: ChatMessage): number {
+  const tcCount = Array.isArray(msg.toolCalls) ? msg.toolCalls.length : 0
+  const partsCount = Array.isArray(msg.parts) ? msg.parts.filter(p => p.type === 'tool').length : 0
+  return Math.max(tcCount, partsCount)
+}
+
+function hasTextOrMedia(msg: ChatMessage): boolean {
+  if (typeof msg.text === 'string' && msg.text.trim().length > 0) return true
+  if (Array.isArray(msg.parts) && msg.parts.some(p => p.type === 'text' && typeof p.text === 'string' && p.text.trim().length > 0)) return true
+  if (Array.isArray(msg.media) && msg.media.length > 0) return true
+  return false
+}
+
+function hasOperabilityBlocker(msg: ChatMessage): boolean {
+  if (msg.error) return true
+  if (msg.interrupted) return true
+  if (Array.isArray(msg.forms) && msg.forms.length > 0) return true
+  if (Array.isArray(msg.approvals) && msg.approvals.some(a => !a.decision || a.decision === 'pending')) return true
+  return false
+}
+
+function buildSyntheticTurn(currentGroup: Array<{ msg: ChatMessage; sourceIndex: number }>): ThreadRow {
+  const anchor = currentGroup[0].msg
+  const last = currentGroup[currentGroup.length - 1].msg
+  const members = currentGroup.map(g => g.msg)
+
+  const hasParts = members.some(m => Array.isArray(m.parts))
+  const hasToolCalls = members.some(m => Array.isArray(m.toolCalls))
+  const thoughts = members.map(m => m.thought).filter(Boolean)
+  const finiteDurations = members
+    .map(m => m.durationMs)
+    .filter((d): d is number => typeof d === 'number' && Number.isFinite(d))
+
+  const syntheticMsg: ChatMessage = {
+    ...anchor,
+    id: anchor.id,
+    createdAt: anchor.createdAt,
+    nodeId: anchor.nodeId,
+    provider: anchor.provider,
+    role: anchor.role,
+    text: '',
+    media: undefined,
+    ...(hasParts ? { parts: members.flatMap(m => m.parts ?? []) } : {}),
+    ...(hasToolCalls ? { toolCalls: members.flatMap(m => m.toolCalls ?? []) } : {}),
+    ...(thoughts.length > 0 ? { thought: thoughts.join('') } : {}),
+    durationMs: finiteDurations.length > 0
+      ? finiteDurations.reduce((sum, d) => sum + d, 0)
+      : undefined,
+    streaming: members.some(m => Boolean(m.streaming)) ? true : undefined,
+    epochSnapshot: members.some(m => Boolean(m.epochSnapshot)) ? true : undefined,
+    runId: last.runId,
+    requestId: last.requestId,
+    error: last.error,
+    interrupted: last.interrupted,
+    approvals: last.approvals,
+    forms: last.forms,
+    liveProgress: last.liveProgress,
+    checkpointId: last.checkpointId,
+    diffSummary: last.diffSummary,
+  }
+
+  return {
+    msg: syntheticMsg,
+    sourceIndex: currentGroup[0].sourceIndex,
+    memberIds: members.map(m => m.id),
+    stepCount: members.reduce((sum, m) => sum + countMessageTools(m), 0),
+  }
+}
+
+export function groupThreadTurns(messages: ChatMessage[]): ThreadRow[] {
+  const rows: ThreadRow[] = []
+  let currentGroup: Array<{ msg: ChatMessage; sourceIndex: number }> = []
+
+  function flushGroup() {
+    if (currentGroup.length === 0) return
+    if (currentGroup.length === 1) {
+      const item = currentGroup[0]
+      rows.push({
+        msg: item.msg,
+        sourceIndex: item.sourceIndex,
+        memberIds: [item.msg.id],
+        stepCount: countMessageTools(item.msg),
+      })
+    } else {
+      rows.push(buildSyntheticTurn(currentGroup))
+    }
+    currentGroup = []
+  }
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]
+    if (msg.role !== 'assistant' || hasTextOrMedia(msg) || hasOperabilityBlocker(msg)) {
+      flushGroup()
+      rows.push({
+        msg,
+        sourceIndex: i,
+        memberIds: [msg.id],
+        stepCount: countMessageTools(msg),
+      })
+      continue
+    }
+
+    // 相邻且都无可见内容（正文/媒体）的助手消息一律合并；
+    // 不再用 runId 分组——legacy 会话里 runId 按消息粒度给出，
+    // 会把同一轮的连续工具调用拆成一堆独立卡片（用户实测反馈）。
+    currentGroup.push({ msg, sourceIndex: i })
+  }
+
+  flushGroup()
+  return rows
 }

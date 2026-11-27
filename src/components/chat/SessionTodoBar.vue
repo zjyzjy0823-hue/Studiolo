@@ -78,7 +78,7 @@ function onToggle(ev: Event) {
   border: 1px solid var(--line);
   border-radius: var(--r-md);
   background: var(--surface-2);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   overflow: hidden;
 }
 .todo-head {
@@ -117,7 +117,7 @@ function onToggle(ev: Event) {
   border-radius: 999px;
   background: var(--solid);
   color: var(--text-2);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   font-weight: 600;
   flex: none;
 }
@@ -132,7 +132,7 @@ function onToggle(ev: Event) {
 .todo-exec-btn {
   min-block-size: 24px;
   padding: 2px 8px;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
 }
 .todo-list {
   margin: 0;
@@ -179,7 +179,7 @@ function onToggle(ev: Event) {
   background: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
-.todo-dash { color: var(--text-3); font-size: 11px; }
+.todo-dash { color: var(--text-3); font-size: calc(11px * var(--fs)); }
 
 .todo-bar::details-content {
   interpolate-size: allow-keywords;

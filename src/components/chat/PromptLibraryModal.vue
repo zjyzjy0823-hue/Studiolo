@@ -129,7 +129,7 @@ function onNativeClose() {
         </form>
 
         <div class="pl-list">
-          <p v-if="!prompts.length" class="faint" style="font-size:12px;margin:8px 0">
+          <p v-if="!prompts.length" class="faint" style="font-size:calc(12px * var(--fs));margin:8px 0">
             暂未创建自定义模板；添加后在输入框键入 <code>/</code> 或进入 <code>+</code> 菜单即可快速调用。
           </p>
           <div v-for="item in prompts" :key="item.id" class="pl-card">
@@ -177,12 +177,12 @@ dialog.pl-dialog::backdrop {
 }
 .pl-title-wrap { display: flex; align-items: center; gap: 7px; }
 .pl-ic { width: 16px; height: 16px; color: var(--accent); }
-.pl-hdr h2 { margin: 0; font-size: 14px; font-weight: 620; }
+.pl-hdr h2 { margin: 0; font-size: calc(14px * var(--fs)); font-weight: 620; }
 .pl-body { padding: 12px 14px; overflow: auto; display: grid; gap: 14px; }
-.pl-form { display: grid; gap: 6px; padding-bottom: 12px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.pl-form { display: grid; gap: 6px; padding-bottom: 12px; border-bottom: 1px solid var(--line); font-size: calc(12px * var(--fs)); }
 .pl-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .pl-col { display: grid; gap: 4px; }
-.pl-err { margin: 0; font-size: 11.5px; color: var(--warn); }
+.pl-err { margin: 0; font-size: calc(11.5px * var(--fs)); color: var(--warn); }
 .pl-form-foot { display: flex; justify-content: flex-end; gap: 6px; margin-top: 2px; }
 .pl-list { display: grid; gap: 8px; }
 .pl-card {
@@ -194,7 +194,7 @@ dialog.pl-dialog::backdrop {
   gap: 4px;
 }
 .pl-card-top { display: flex; align-items: center; gap: 6px; }
-.pl-trig-badge { padding: 1px 6px; border-radius: 5px; background: var(--accent-soft); color: var(--accent); font-size: 11.5px; }
-.pl-card-title { font-size: 12.5px; }
-.pl-card-desc { margin: 0; font-size: 11.5px; }
+.pl-trig-badge { padding: 1px 6px; border-radius: 5px; background: var(--accent-soft); color: var(--accent); font-size: calc(11.5px * var(--fs)); }
+.pl-card-title { font-size: calc(12.5px * var(--fs)); }
+.pl-card-desc { margin: 0; font-size: calc(11.5px * var(--fs)); }
 </style>

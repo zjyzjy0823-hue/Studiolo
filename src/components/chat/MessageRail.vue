@@ -135,7 +135,7 @@ const visible = computed(() => entries.value.length >= 3)
 
 .rail-hdr {
   padding: 4px 8px 6px;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   font-weight: 600;
   color: var(--text-3);
   border-bottom: 1px solid var(--line);
@@ -152,7 +152,7 @@ const visible = computed(() => entries.value.length >= 3)
   border-radius: var(--r-xs);
   background: transparent;
   color: var(--text-2);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   text-align: left;
   cursor: pointer;
   transition: background-color 0.12s ease, color 0.12s ease;
@@ -167,7 +167,7 @@ const visible = computed(() => entries.value.length >= 3)
 .rail-idx {
   flex: none;
   min-width: 18px;
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   color: var(--text-3);
 }
 

@@ -253,12 +253,12 @@ function restartTerminal() {
   background: var(--surface-2);
   flex: none;
 }
-.term-title { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; }
+.term-title { display: flex; align-items: center; gap: 6px; font-size: calc(12.5px * var(--fs)); font-weight: 600; }
 .term-ic { width: 14px; height: 14px; color: var(--accent); }
 .term-badge {
   padding: 1px 6px;
   border-radius: var(--r-full);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   font-weight: 500;
 }
 .term-badge.is-live { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
@@ -269,7 +269,7 @@ function restartTerminal() {
   padding: 4px 10px;
   border-bottom: 1px solid var(--line);
   background: var(--surface-2);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -282,7 +282,7 @@ function restartTerminal() {
   padding: 10px 12px;
   overflow: auto;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
@@ -308,6 +308,6 @@ function restartTerminal() {
   background: var(--solid);
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
 }
 </style>

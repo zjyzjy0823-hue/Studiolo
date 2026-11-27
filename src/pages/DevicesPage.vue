@@ -219,10 +219,10 @@ async function copyToken() {
     <div v-else class="dev-grid">
       <section v-for="device in filteredDevices" :key="device.id" class="dev-card mat">
         <div class="top"><span class="tile-icon" style="width:40px;height:40px"><component :is="deviceIcon(device.kind)" class="i" /></span>
-          <div class="grow" style="min-width:0"><div style="font-weight:650">{{ device.name }}</div><div class="faint" style="font-size:12px">{{ device.system }}</div></div>
+          <div class="grow" style="min-width:0"><div style="font-weight:650">{{ device.name }}</div><div class="faint" style="font-size:calc(12px * var(--fs))">{{ device.system }}</div></div>
           <span class="conn" :class="device.online ? 'online' : 'offline'">{{ device.online ? '在线' : '离线' }}</span>
         </div>
-        <div class="faint" style="font-size:12.5px">{{ [device.hostname, device.location, device.ip].filter(Boolean).join(' · ') || '等待上报信息' }}</div>
+        <div class="faint" style="font-size:calc(12.5px * var(--fs))">{{ [device.hostname, device.location, device.ip].filter(Boolean).join(' · ') || '等待上报信息' }}</div>
         <div class="btn-row"><button class="btn btn-sm btn-ghost" type="button" @click="showDevice(device.id)">详情</button><button class="btn btn-sm btn-subtle" type="button" @click="selectedId = device.id; openTokenDialog()">Token</button></div>
       </section>
       <div v-if="!filteredDevices.length && !store.loading" class="cleared" style="grid-column:1/-1"><OpusIcon name="device" />暂无设备</div>
@@ -262,9 +262,9 @@ async function copyToken() {
             </div>
           </div>
           <div class="dev-trend">
-            <span class="faint" style="font-size:12px">活动趋势</span>
+            <span class="faint" style="font-size:calc(12px * var(--fs))">活动趋势</span>
             <svg viewBox="0 0 390 43" preserveAspectRatio="none" aria-hidden="true"><polyline :points="sparkline(selectedDevice.activity, 390, 43)" /></svg>
-            <span class="faint" style="font-size:12px">最近 14 次心跳</span>
+            <span class="faint" style="font-size:calc(12px * var(--fs))">最近 14 次心跳</span>
           </div>
         </div>
       </div>
@@ -318,7 +318,7 @@ async function copyToken() {
 .dev-detail { display: grid; grid-template-columns: minmax(220px, .9fr) minmax(0, 1.1fr); gap: 20px; align-items: start; }
 .dev-detail__metrics { padding-left: 20px; border-left: 1px solid var(--line); display: grid; gap: 16px; }
 .dev-metrics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 18px; }
-.dev-metric__head { display: flex; justify-content: space-between; font-size: 12.5px; }
+.dev-metric__head { display: flex; justify-content: space-between; font-size: calc(12.5px * var(--fs)); }
 .dev-trend { display: flex; align-items: center; gap: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 .dev-trend svg { flex: 1; height: 36px; min-width: 0; }
 .dev-trend polyline { fill: none; stroke: var(--accent); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }

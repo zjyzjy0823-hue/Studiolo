@@ -102,7 +102,7 @@ async function handleDownload() {
 .artifact-ic .i { width: 15px; height: 15px; }
 .artifact-meta { flex: 1; min-width: 0; }
 .artifact-name {
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   font-weight: 600;
   color: var(--text);
   white-space: nowrap;
@@ -113,7 +113,7 @@ async function handleDownload() {
   display: flex;
   align-items: center;
   gap: 5px;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--text-3);
 }
 </style>

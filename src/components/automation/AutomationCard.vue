@@ -60,12 +60,12 @@ const icons: Record<AutomationIcon, Component> = {
 .automation-switch span { width: 15px; height: 15px; border-radius: 50%; background: var(--workbench-solid); box-shadow: 0 1px 4px rgba(31,42,89,.18); transition: transform .2s ease; }
 .automation-switch--on span { transform: translateX(15px); }
 .automation-card__heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-.automation-card__heading h3 { margin: 0; color: var(--workbench-text); font-size: 14px; font-weight: 720; letter-spacing: -.025em; }
-.automation-card__status { display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; border: 1px solid var(--workbench-line); border-radius: 999px; color: var(--workbench-muted); background: var(--workbench-solid); font-size: 9px; font-weight: 650; white-space: nowrap; }
+.automation-card__heading h3 { margin: 0; color: var(--workbench-text); font-size: calc(14px * var(--fs)); font-weight: 720; letter-spacing: -.025em; }
+.automation-card__status { display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; border: 1px solid var(--workbench-line); border-radius: 999px; color: var(--workbench-muted); background: var(--workbench-solid); font-size: calc(9px * var(--fs)); font-weight: 650; white-space: nowrap; }
 .automation-card__status i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .automation-card__status--on { color: var(--workbench-good); background: var(--workbench-solid); }
-.automation-card__description { margin: 5px 0 0; color: var(--workbench-muted); font-size: 11px; font-weight: 520; line-height: 1.45; }
-.automation-card__footer { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: auto; padding-top: 12px; color: var(--workbench-text); font-size: 10px; font-weight: 570; }
+.automation-card__description { margin: 5px 0 0; color: var(--workbench-muted); font-size: calc(11px * var(--fs)); font-weight: 520; line-height: 1.45; }
+.automation-card__footer { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: auto; padding-top: 12px; color: var(--workbench-text); font-size: calc(10px * var(--fs)); font-weight: 570; }
 .automation-card__footer span { display: inline-flex; align-items: center; gap: 4px; min-width: 0; white-space: nowrap; }
 .automation-card__footer span:last-child { overflow: hidden; text-overflow: ellipsis; }
 .automation-card__actions { display:flex; flex-wrap:wrap; gap:6px; padding-top:12px; }

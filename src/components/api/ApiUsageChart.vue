@@ -45,15 +45,15 @@ const latest = computed(() => props.points.at(-1))
 <style scoped>
 .api-usage-chart { min-height:261px; }
 .api-usage-chart :deep(.glass-card__body) { overflow:visible; }
-.api-usage-chart__range { padding:5px 8px; border:1px solid var(--workbench-line); border-radius:7px; color:var(--workbench-text); background:var(--workbench-solid); font-size:9px; font-weight:650; white-space:nowrap; }
+.api-usage-chart__range { padding:5px 8px; border:1px solid var(--workbench-line); border-radius:7px; color:var(--workbench-text); background:var(--workbench-solid); font-size:calc(9px * var(--fs)); font-weight:650; white-space:nowrap; }
 .api-usage-chart__summary { display:flex; gap:13px; margin:4px 0 8px; }
-.api-usage-chart__summary div { display:flex; align-items:center; gap:5px; min-width:0; color:var(--workbench-muted); font-size:9px; white-space:nowrap; }
-.api-usage-chart__summary strong { margin-left:2px; color:var(--workbench-text); font-size:12px; font-weight:740; }
+.api-usage-chart__summary div { display:flex; align-items:center; gap:5px; min-width:0; color:var(--workbench-muted); font-size:calc(9px * var(--fs)); white-space:nowrap; }
+.api-usage-chart__summary strong { margin-left:2px; color:var(--workbench-text); font-size:calc(12px * var(--fs)); font-weight:740; }
 .api-usage-chart__dot { width:6px; height:6px; flex:none; border-radius:50%; }
 .api-usage-chart__dot--requests { background:#9bb1fa; }.api-usage-chart__dot--errors { background:#f3a5b2; }
 .api-usage-chart__plot { display:block; width:100%; max-height:180px; overflow:visible; }
 .api-usage-chart__grid { stroke:rgba(255,255,255,.27); stroke-width:1; stroke-dasharray:3 5; }
-.api-usage-chart__axis,.api-usage-chart__day { fill:rgba(255,255,255,.69); font-family:inherit; font-size:9px; }
+.api-usage-chart__axis,.api-usage-chart__day { fill:rgba(255,255,255,.69); font-family:inherit; font-size:calc(9px * var(--fs)); }
 .api-usage-chart__line { fill:none; stroke-width:2.3; stroke-linecap:round; stroke-linejoin:round; vector-effect:non-scaling-stroke; filter:drop-shadow(0 2px 3px rgba(37,54,105,.15)); }
 .api-usage-chart__line--requests { stroke:#b1c2ff; }.api-usage-chart__line--errors { stroke:#ffafbc; }
 </style>

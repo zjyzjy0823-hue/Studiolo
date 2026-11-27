@@ -117,22 +117,22 @@ function handleClose() {
 }
 .space-gate-titles h3 {
   margin: 0;
-  font-size: 16px;
+  font-size: calc(16px * var(--fs));
 }
 .space-gate-titles p {
   margin: 4px 0 0;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   line-height: 1.5;
 }
 .space-gate-field {
   display: grid;
   gap: 6px;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   color: var(--text-2, var(--muted));
 }
 .space-gate-error {
   margin: 0;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   color: var(--danger);
 }
 .space-gate-actions {

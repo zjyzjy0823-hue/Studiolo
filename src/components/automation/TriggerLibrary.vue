@@ -27,9 +27,9 @@ const icons: Partial<Record<AutomationIcon, Component>> = {
 <style scoped>
 .trigger-library { min-height: 280px; }
 .trigger-library :deep(.glass-card__body) { overflow: visible; }
-.trigger-library__eyebrow { color: var(--workbench-muted); font-size: 9px; font-weight: 760; letter-spacing: .14em; }
-.trigger-library__heading h2 { margin: 5px 0 0; color: var(--workbench-text); font-size: 16px; letter-spacing: -.03em; text-shadow: none; }
-.trigger-library__heading p { margin: 4px 0 0; color: var(--workbench-muted); font-size: 10px; }
+.trigger-library__eyebrow { color: var(--workbench-muted); font-size: calc(9px * var(--fs)); font-weight: 760; letter-spacing: .14em; }
+.trigger-library__heading h2 { margin: 5px 0 0; color: var(--workbench-text); font-size: calc(16px * var(--fs)); letter-spacing: -.03em; text-shadow: none; }
+.trigger-library__heading p { margin: 4px 0 0; color: var(--workbench-muted); font-size: calc(10px * var(--fs)); }
 .trigger-library__grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; margin-top: 16px; }
 .trigger-tile { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 55px; padding: 7px 8px; border: var(--glass-tile-border); border-radius: 12px; color: var(--workbench-text); background: var(--glass-tile-background); box-shadow: var(--glass-tile-shadow); backdrop-filter: var(--workbench-material); -webkit-backdrop-filter: var(--workbench-material); text-align: left; transition: transform .2s, box-shadow .2s, background .2s; }
 .trigger-tile:hover { transform: scale(1.02); background: var(--glass-tile-hover-background); box-shadow: var(--glass-tile-hover-shadow); }
@@ -37,7 +37,7 @@ const icons: Partial<Record<AutomationIcon, Component>> = {
 .trigger-tile__icon { display: grid; width: 31px; height: 31px; flex: none; place-items: center; border-radius: 9px; color: var(--workbench-accent); background: var(--workbench-muted-surface); }
 .trigger-tile--selected .trigger-tile__icon { color: var(--workbench-text); background: var(--workbench-soft); }
 .trigger-tile__copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.trigger-tile__copy strong { overflow: hidden; color: var(--workbench-text); font-size: 10px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
-.trigger-tile__copy small { overflow: hidden; color: var(--workbench-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.trigger-tile__copy strong { overflow: hidden; color: var(--workbench-text); font-size: calc(10px * var(--fs)); font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.trigger-tile__copy small { overflow: hidden; color: var(--workbench-muted); font-size: calc(9px * var(--fs)); text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 430px) { .trigger-library__grid { grid-template-columns: 1fr; } }
 </style>

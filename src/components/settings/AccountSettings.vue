@@ -49,9 +49,9 @@ function onAvatar(event: Event) { emit('avatar', (event.target as HTMLInputEleme
 .profile-avatar { display: grid; width: 52px; height: 52px; flex: none; overflow: hidden; place-items: center; border-radius: 50%; color: var(--accent); background: var(--accent-soft); }
 .profile-avatar img { width: 100%; height: 100%; object-fit: cover; }
 .profile-card__identity { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
-.profile-card__identity strong { color: var(--text); font-size: 16px; font-weight: 650; }
-.profile-card__identity span { font-size: 12px; }
+.profile-card__identity strong { color: var(--text); font-size: calc(16px * var(--fs)); font-weight: 650; }
+.profile-card__identity span { font-size: calc(12px * var(--fs)); }
 .profile-avatar-picker { margin-left: auto; position: relative; cursor: pointer; }
-.profile-avatar-picker input { width: 110px; min-width: 0; border: 0; background: transparent; font-size: 11px; outline: none; }
+.profile-avatar-picker input { width: 110px; min-width: 0; border: 0; background: transparent; font-size: calc(11px * var(--fs)); outline: none; }
 .profile-fields { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
 </style>

@@ -70,18 +70,18 @@ const trend = computed(() => {
 <style scoped>
 .ledger-card{padding:17px 15px 10px}
 .ledger-card :deep(.glass-card__header){margin-bottom:10px}
-.ledger-card :deep(.glass-card__title){color:var(--workbench-text);font-size:20px;font-weight:500}
+.ledger-card :deep(.glass-card__title){color:var(--workbench-text);font-size:calc(20px * var(--fs));font-weight:500}
 .ledger-card :deep(.glass-card__title)::before{content:'';display:inline-block;width:28px;height:28px;margin-right:9px;background:url('/ledger-icon.png') center / contain no-repeat;vertical-align:-7px;filter:drop-shadow(0 1px 3px rgba(41,69,134,.34))}
-.ledger-card :deep(.glass-card__title)::after{content:'›';display:inline-block;margin-left:12px;font-size:26px;font-weight:300;line-height:.5;vertical-align:-1px}
-.period{display:inline-flex;align-items:center;gap:7px;padding:6px 10px;border:1px solid var(--workbench-line);border-radius:10px;background:var(--workbench-solid);box-shadow:inset 0 1px rgba(255,255,255,.22);color:var(--workbench-text);font:inherit;font-size:13px;white-space:nowrap;cursor:pointer}
-.ledger-state{margin:55px 0;text-align:center;color:var(--workbench-text);font-size:12px}.ledger-state button{border:0;background:none;color:var(--workbench-text);text-decoration:underline;cursor:pointer}.chart-empty{color:var(--workbench-muted);font-size:11px}.recent-transaction{display:block;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--workbench-text);font-size:10px}
+.ledger-card :deep(.glass-card__title)::after{content:'›';display:inline-block;margin-left:12px;font-size:calc(26px * var(--fs));font-weight:300;line-height:.5;vertical-align:-1px}
+.period{display:inline-flex;align-items:center;gap:7px;padding:6px 10px;border:1px solid var(--workbench-line);border-radius:10px;background:var(--workbench-solid);box-shadow:inset 0 1px rgba(255,255,255,.22);color:var(--workbench-text);font:inherit;font-size:calc(13px * var(--fs));white-space:nowrap;cursor:pointer}
+.ledger-state{margin:55px 0;text-align:center;color:var(--workbench-text);font-size:calc(12px * var(--fs))}.ledger-state button{border:0;background:none;color:var(--workbench-text);text-decoration:underline;cursor:pointer}.chart-empty{color:var(--workbench-muted);font-size:calc(11px * var(--fs))}.recent-transaction{display:block;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--workbench-text);font-size:calc(10px * var(--fs))}
 .period:hover{background:var(--workbench-soft)}
 .period:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .balance-panel{display:flex;align-items:end;justify-content:space-between;gap:10px;min-height:107px;padding:10px 12px 11px;border:1px solid var(--workbench-line);border-radius:14px;background:var(--workbench-solid);box-shadow:inset 0 1px rgba(255,255,255,.44)}
 .balance-copy{min-width:0;display:flex;flex-direction:column;align-items:flex-start}
-.balance-label{color:var(--workbench-muted);font-size:14px;white-space:nowrap}
-.balance{margin-top:2px;color:var(--workbench-text);font-size:clamp(27px,2.22vw,35px);font-weight:730;letter-spacing:-.045em;line-height:1.15;white-space:nowrap;font-variant-numeric:tabular-nums}
-.balance-change{display:inline-flex;align-items:center;gap:5px;margin-top:6px;color:var(--workbench-good);font-size:14px;white-space:nowrap}
+.balance-label{color:var(--workbench-muted);font-size:calc(14px * var(--fs));white-space:nowrap}
+.balance{margin-top:2px;color:var(--workbench-text);font-size:calc(clamp(27px,2.22vw,35px) * var(--fs));font-weight:730;letter-spacing:-.045em;line-height:1.15;white-space:nowrap;font-variant-numeric:tabular-nums}
+.balance-change{display:inline-flex;align-items:center;gap:5px;margin-top:6px;color:var(--workbench-good);font-size:calc(14px * var(--fs));white-space:nowrap}
 .balance-change b{font-weight:720}
 .balance-change span{margin-left:5px;color:var(--workbench-text);font-weight:450}
 .bars{display:flex;align-items:end;justify-content:space-between;gap:9px;width:38%;min-width:105px;height:76px;padding:0 2px 1px}
@@ -89,24 +89,24 @@ const trend = computed(() => {
 .bars span:nth-child(even){background:var(--workbench-solid)}
 .summary-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:5px}
 .summary{min-width:0;min-height:63px;padding:9px 17px;border:1px solid var(--workbench-line);border-radius:13px;background:var(--workbench-solid)}
-.summary-label{display:block;color:var(--workbench-muted);font-size:14px}
-.summary strong{display:flex;align-items:center;gap:7px;margin-top:5px;color:var(--workbench-text);font-size:16px;font-weight:670;white-space:nowrap;font-variant-numeric:tabular-nums}
+.summary-label{display:block;color:var(--workbench-muted);font-size:calc(14px * var(--fs))}
+.summary strong{display:flex;align-items:center;gap:7px;margin-top:5px;color:var(--workbench-text);font-size:calc(16px * var(--fs));font-weight:670;white-space:nowrap;font-variant-numeric:tabular-nums}
 .income-arrow{color:var(--workbench-good);flex:none}.expense-arrow{color:var(--workbench-danger);flex:none}
 @container (max-height: 230px) {
   .ledger-card { padding: 12px 13px 8px; }
   .ledger-card :deep(.glass-card__header) { margin-bottom: 6px; }
   .balance-panel { min-height: 84px; padding: 7px 9px; }
-  .balance-label, .balance-change, .summary-label { font-size: 11px; }
-  .balance { font-size: 24px; }
+  .balance-label, .balance-change, .summary-label { font-size: calc(11px * var(--fs)); }
+  .balance { font-size: calc(24px * var(--fs)); }
   .balance-change { margin-top: 2px; }
   .balance-change span { margin-left: 1px; }
   .bars { height: 51px; min-width: 75px; gap: 5px; }
   .summary { min-height: 48px; padding: 5px 8px; }
-  .summary strong { margin-top: 3px; font-size: 13px; gap: 3px; }
+  .summary strong { margin-top: 3px; font-size: calc(13px * var(--fs)); gap: 3px; }
 }
 @container (max-width: 280px) {
   .bars { display: none; }
   .balance-change span { display: none; }
 }
-@media(max-width:450px){.balance{font-size:27px}.bars{gap:5px;min-width:68px}.summary{padding-inline:8px}.summary strong{font-size:13px}}
+@media(max-width:450px){.balance{font-size:calc(27px * var(--fs))}.bars{gap:5px;min-width:68px}.summary{padding-inline:8px}.summary strong{font-size:calc(13px * var(--fs))}}
 </style>

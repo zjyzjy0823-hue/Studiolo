@@ -232,7 +232,7 @@ async function createCategory() {
               </select>
             </div>
           </div>
-          <input v-model="recordName" class="input" style="height:48px;font-size:15px;margin-bottom:10px" placeholder="名称" aria-label="记录名称">
+          <input v-model="recordName" class="input" style="height:48px;font-size:calc(15px * var(--fs));margin-bottom:10px" placeholder="名称" aria-label="记录名称">
           <button class="btn btn-primary btn-lg" style="width:100%" :disabled="saving || !recordName.trim()">保存</button>
         </template>
         <template v-else>
@@ -240,7 +240,7 @@ async function createCategory() {
           <button type="button" class="btn btn-primary btn-lg" style="width:100%" @click="emit('create', 'collection')">新建集合</button>
         </template>
       </form>
-      <p v-if="error" role="alert" style="color:var(--danger);font-size:12.5px;margin:8px 0 0">{{ error }}</p>
+      <p v-if="error" role="alert" style="color:var(--danger);font-size:calc(12.5px * var(--fs));margin:8px 0 0">{{ error }}</p>
       <div v-if="offline && kind && kind !== 'share'" class="offline-note"><OpusIcon name="wifiOff" />未连接同步 · 保存在本机</div>
     </div>
   </section>
@@ -269,7 +269,7 @@ async function createCategory() {
   gap: 8px;
   min-height: 40px;
   margin: 4px 0 10px;
-  font-size: 13px;
+  font-size: calc(13px * var(--fs));
 }
 .quick-ledger-category > .input { flex: 1; min-width: 0; height: 38px; }
 .quick-ledger-category > button { flex: none; min-height: 38px; }
@@ -285,7 +285,7 @@ async function createCategory() {
   gap: 12px;
 }
 .quick-add-heading { margin-bottom: 14px; }
-.quick-add-heading h2 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
+.quick-add-heading h2 { margin: 0; font-size: calc(20px * var(--fs)); letter-spacing: -.02em; }
 .quick-close {
   display: grid;
   place-items: center;
@@ -314,7 +314,7 @@ async function createCategory() {
   padding: 4px;
   border-radius: 11px;
   color: var(--text-2);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   white-space: nowrap;
 }
 .quick-add-tabs button[aria-pressed="true"] {

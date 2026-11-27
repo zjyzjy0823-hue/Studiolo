@@ -19,6 +19,14 @@ import { createSessionSync, fetchOlder, readSyncMode } from '../services/session
 import { createConnectionHealthMonitor } from '../services/connectionHealth'
 import { retainSessionProcesses } from '../services/sessionActivity'
 import {
+  type BusySendMode,
+  type OutboxWaitReason,
+  decideOutboxAction,
+  planSteerOutcome,
+  SEND_ACK_TIMEOUT_MS,
+  STEER_ACK_TIMEOUT_MS,
+} from '../services/outboxPolicy'
+import {
   type CoreSessionRecord,
   loadCoreSession,
   saveCoreSession,
@@ -30,6 +38,7 @@ import {
   createFleetNode,
   deleteFleetNode,
   fetchHermesMedia,
+  type MediaProgress,
   fetchSessionProcesses,
   fetchSessionSubagents,
   getApiBaseUrl,
@@ -258,6 +267,27 @@ export const useFleetStore = defineStore('fleet', () => {
     return route
   }
 
+  async function postClientDebugLog(payload: unknown): Promise<void> {
+    const route = requireFleetRoute()
+    const response = await fetch(`${route.origin}/api/v1/fleet/_debug/client-log`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${route.token}` },
+      body: JSON.stringify(payload),
+    })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  }
+
+  /** 拉取 agent-node 解密后落在 .studiolo-inbox 的附件预览（返回 objectURL）。 */
+  async function fetchInboxPreview(nodeId: string, filePath: string): Promise<string> {
+    const route = requireFleetRoute()
+    const query = `node_id=${encodeURIComponent(nodeId)}&path=${encodeURIComponent(filePath)}`
+    const response = await fetch(`${route.origin}/api/v1/fleet/inbox/preview?${query}`, {
+      headers: { Authorization: `Bearer ${route.token}` },
+    })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    return URL.createObjectURL(await response.blob())
+  }
+
   function checkFleetRoute(route: FleetRoute) {
     if (fleetRoute.value !== route) throw new Error('对话连接已变更，请重试')
   }
@@ -369,11 +399,24 @@ export const useFleetStore = defineStore('fleet', () => {
   const activityRequests = new Map<string, ActivityRequest>()
   const composerDrafts = ref<Record<string, { text: string; files: File[] }>>({})
   const outbox = ref<FleetOutboxItem[]>([])
+  const outboxWaitReason = ref<Record<string, OutboxWaitReason | undefined>>({})
+  const BUSY_SEND_MODE_KEY = 'studiolo:busy-send-mode'
+  const busySendMode = ref<BusySendMode>(
+    typeof window !== 'undefined' && (window.localStorage?.getItem(BUSY_SEND_MODE_KEY) === 'queue' || window.localStorage?.getItem(BUSY_SEND_MODE_KEY) === 'interrupt')
+      ? (window.localStorage.getItem(BUSY_SEND_MODE_KEY) as BusySendMode)
+      : 'auto',
+  )
   const pendingOutboxWrites = new Set<string>()
-  const transmittingOutbox = shallowReactive(new Map<string, object>())
+  const transmittingOutbox = shallowReactive(new Map<string, { startedAt: number; timer?: ReturnType<typeof setTimeout> }>())
   const uploadingPromptIds = shallowReactive(new Set<string>())
-  const attemptedOutboxSteers = new WeakMap<FleetOutboxItem, object>()
   const deliveredOutbox = new Map<string, FleetOutboxItem>()
+
+  function setBusySendMode(mode: BusySendMode) {
+    busySendMode.value = mode
+    if (typeof window !== 'undefined') {
+      try { window.localStorage?.setItem(BUSY_SEND_MODE_KEY, mode) } catch { /* Storage may be unavailable. */ }
+    }
+  }
   const cachedHistoryKeys = new Set<string>()
   const messageCachePreviews = new Map<string, Set<ChatMessage>>()
   const messageCacheReads = shallowReactive(new Map<string, Promise<boolean>>())
@@ -485,8 +528,8 @@ export const useFleetStore = defineStore('fleet', () => {
   const queuedPromptsBySession = ref<Record<string, QueuedPromptItem[]>>({})
   const pendingSteers = new Map<string, {
     sessionKey: string
-    result: Promise<boolean>
-    finish: (accepted: boolean) => void
+    result: Promise<{ accepted: boolean; code?: string }>
+    finish: (accepted: boolean, code?: string) => void
   }>()
   const imagePreviewByArtifactId = ref<Record<string, string>>({})
   const pendingRunPrompts = new Map<string, { text: string; model?: string; startedAt?: number }>()
@@ -806,7 +849,10 @@ export const useFleetStore = defineStore('fleet', () => {
   }
 
   function disconnectSocket() {
-    for (const { finish } of pendingSteers.values()) finish(false)
+    for (const attempt of transmittingOutbox.values()) {
+      if (attempt.timer) clearTimeout(attempt.timer)
+    }
+    for (const { finish } of pendingSteers.values()) finish(false, 'disconnected')
     intentionalClose = true
     activeConnectRoute = null
     reconnectAttempt = 0
@@ -1324,7 +1370,10 @@ export const useFleetStore = defineStore('fleet', () => {
       snapshotFollowIntent.clear()
       captureSnapshotFollow()
     }
-    for (const { finish } of pendingSteers.values()) finish(false)
+    for (const attempt of transmittingOutbox.values()) {
+      if (attempt.timer) clearTimeout(attempt.timer)
+    }
+    for (const { finish } of pendingSteers.values()) finish(false, 'disconnected')
     autoPulledProviders.clear()
     clearTransportRequests()
     forcedHistoryRequests.clear()
@@ -1505,7 +1554,7 @@ export const useFleetStore = defineStore('fleet', () => {
       void invoke('fleet_send', { id, frame }).catch(() => {
         if (nativeConnectionId !== id || fleetRoute.value !== route || wsState.value !== 'online') return
         if (typeof frame.requestId === 'string') {
-          pendingSteers.get(frame.requestId)?.finish(false)
+          pendingSteers.get(frame.requestId)?.finish(false, 'send_failed')
           pendingSessionWrites.get(frame.requestId)?.finish(new Error('Fleet 暂时无法发送请求'))
           projectPermissionWrites.get(frame.requestId)?.(new Error('Fleet 暂时无法发送请求'))
           transmittingOutbox.delete(frame.requestId)
@@ -1537,12 +1586,39 @@ export const useFleetStore = defineStore('fleet', () => {
     messagesBySession.value = { ...messagesBySession.value, [sKey]: next }
   }
 
-  function updatePromptDelivery(sKey: string, requestId: string, delivery: 'sent' | 'failed') {
+  function updatePromptDelivery(
+    sKey: string,
+    requestId: string,
+    delivery: 'sent' | 'failed' | 'unknown' | 'sending',
+    options?: { commandId?: string; text?: string; at?: number },
+  ) {
     const rows = messagesBySession.value[sKey] ?? []
-    const index = rows.findIndex(row => row.role === 'user' && row.requestId === requestId && row.delivery === 'sending')
+    let index = rows.findIndex(row => row.role === 'user' && (row.requestId === requestId || row.id === `user-${requestId}`))
+    if (index === -1 && options?.commandId) {
+      index = rows.findIndex(row => row.role === 'user' && (row.requestId === options.commandId || row.id === `user-${options.commandId}`))
+    }
+    if (index === -1) {
+      const now = options?.at ?? Date.now()
+      const targetText = options?.text?.trim()
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const row = rows[i]
+        if (row.role !== 'user') continue
+        if (row.delivery !== 'sending' && row.delivery !== 'unknown') continue
+        const withinWindow = Math.abs(now - (row.createdAt ?? now)) <= 60_000
+        if (!withinWindow) continue
+        if (targetText && row.text?.trim() === targetText) {
+          index = i
+          break
+        }
+        if (!targetText) {
+          index = i
+          break
+        }
+      }
+    }
     if (index !== -1) {
       const next = [...rows]
-      next[index] = { ...next[index], delivery }
+      next[index] = { ...next[index], delivery, ...(delivery === 'sent' && !next[index].requestId ? { requestId } : {}) }
       messagesBySession.value = { ...messagesBySession.value, [sKey]: next }
     }
   }
@@ -1827,6 +1903,9 @@ export const useFleetStore = defineStore('fleet', () => {
         applyStreamReplay(sKey, frame)
         return
       }
+      if (frame.type === 'Accepted' || frame.type === 'SteerAccepted' || frame.type === 'SteerRejected') {
+        applyWsEvent(frame)
+      }
       if (sKey && typeof frame.sequence === 'number' && frame.streamId) {
         const state = streamState(sKey)
         const prior = streamIdBySession.get(sKey)
@@ -1838,7 +1917,12 @@ export const useFleetStore = defineStore('fleet', () => {
           return
         }
       }
-      applyStreamFrame(sKey, frame)
+      if (frame.type !== 'Accepted' && frame.type !== 'SteerAccepted' && frame.type !== 'SteerRejected') {
+        applyStreamFrame(sKey, frame)
+      } else {
+        const sequence = frame.sequence ?? frame.seq
+        if (typeof sequence === 'number' && sKey) commitCursor(sKey, frame.streamId, sequence)
+      }
     } catch (error) {
       reportFrameFailure(frame, error)
     }
@@ -1860,7 +1944,7 @@ export const useFleetStore = defineStore('fleet', () => {
     const steer = frame.requestId ? pendingSteers.get(frame.requestId) : undefined
     if (steer && (etype === 'SteerAccepted' || etype === 'SteerRejected' || etype === 'Error'
       || etype === 'NodeUnavailable' || etype === 'Failed')) {
-      steer.finish(etype === 'SteerAccepted')
+      steer.finish(etype === 'SteerAccepted', typeof frame.code === 'string' ? frame.code : undefined)
       return
     }
 
@@ -1871,6 +1955,9 @@ export const useFleetStore = defineStore('fleet', () => {
       }
       reconnectAttempt = 0
       wsState.value = 'online'
+      for (const item of outbox.value) {
+        item.steerAttemptedRunId = undefined
+      }
       connectionHealth.markConnected()
       declareNativeSessionEvents?.()
       lastError.value = null
@@ -2283,6 +2370,7 @@ export const useFleetStore = defineStore('fleet', () => {
               output: tc.output,
               error: tc.error,
               durationMs: tc.durationMs,
+              startedAt: tc.startedAt,
               subagentSessionId: tc.subagentSessionId,
               ...(tc.media?.length ? { media: tc.media } : {}),
             }))
@@ -2339,7 +2427,25 @@ export const useFleetStore = defineStore('fleet', () => {
         }
       }
       const merged = preservePendingMessages(existing, applySystemNotices(mergeHistoryBoundaries(existing, hydrated))).slice(-MAX_MESSAGES_PER_SESSION)
-      messagesBySession.value = { ...messagesBySession.value, [k]: merged }
+      const historyUserTexts = new Set(
+        frame.messages
+          .filter(m => m.role === 'user' && m.text?.trim())
+          .map(m => m.text.trim())
+      )
+      const reconciled = historyUserTexts.size
+        ? merged.map(row => {
+            if (row.role === 'user' && (row.delivery === 'sending' || row.delivery === 'unknown') && historyUserTexts.has(row.text?.trim() ?? '')) {
+              return { ...row, delivery: 'sent' as const }
+            }
+            return row
+          })
+        : merged
+      messagesBySession.value = { ...messagesBySession.value, [k]: reconciled }
+      if (historyUserTexts.size) {
+        for (const item of outbox.value.filter(item => (item.sessionKey === k || item.session?.sessionId === frame.sessionId) && historyUserTexts.has(item.text.trim()))) {
+          void removeOutboxPrompt(item)
+        }
+      }
       const curSess = sessionsByKey.value[k]
       if (curSess && isGenericSessionTitle(curSess.title)) {
         const firstUser = hydrated.find(x => x.role === 'user' && x.text.trim())
@@ -2480,6 +2586,7 @@ export const useFleetStore = defineStore('fleet', () => {
     if (etype === 'Accepted') {
       const rid = frame.runId || frame.requestId || createRequestId()
       const requestId = frame.requestId || rid
+      const commandId = frame.commandId
       const contextWait = contextWaitingForModel.value[sKey]
       const submittedPrompt = pendingRunPrompts.get(`${sKey}::${requestId}`)
       if (contextWait && !contextWait.runId
@@ -2488,8 +2595,31 @@ export const useFleetStore = defineStore('fleet', () => {
       }
       if (submittedPrompt && typeof frame.currentModel === 'string') submittedPrompt.model = frame.currentModel
       delete contextReads.value[sKey]
-      updatePromptDelivery(sKey, requestId, 'sent')
-      const delivered = outbox.value.find(item => item.id === requestId && item.sessionKey === sKey)
+
+      // 多重键核销：requestId -> commandId -> (sessionKey + 文本 + 60s 时间窗)
+      const now = Date.now()
+      let delivered = outbox.value.find(item => item.id === requestId && (item.sessionKey === sKey || item.session?.sessionId === frame.sessionId))
+      if (!delivered && commandId) {
+        delivered = outbox.value.find(item => item.id === commandId && (item.sessionKey === sKey || item.session?.sessionId === frame.sessionId))
+      }
+      if (!delivered) {
+        const frameText = typeof frame.text === 'string' ? frame.text.trim() : undefined
+        delivered = outbox.value.find(item => {
+          const matchSession = item.sessionKey === sKey || item.session?.sessionId === frame.sessionId
+          if (!matchSession) return false
+          const matchTime = Math.abs(now - item.createdAt) <= 60_000
+          if (!matchTime) return false
+          if (frameText) return item.text.trim() === frameText || item.wireText.trim() === frameText
+          return true
+        })
+      }
+
+      updatePromptDelivery(sKey, requestId, 'sent', {
+        commandId,
+        text: delivered?.text ?? (typeof frame.text === 'string' ? frame.text : undefined),
+        at: now,
+      })
+
       if (delivered) {
         deliveredOutbox.set(rid, delivered)
         void removeOutboxPrompt(delivered)
@@ -2539,6 +2669,9 @@ export const useFleetStore = defineStore('fleet', () => {
         thought: (msg.thought ?? '') + deltaText,
         parts: appendMessagePart(msg.parts, { type: 'thought', text: deltaText }),
         liveProgress: { type: 'thought' },
+        // 快照可能在回合开始前生成（streaming=false），后续增量必须把它重新标成活回合，
+        // 否则 messageSegments 不会回填 progress → 工作步骤头部退化成「工作步骤」且没有流光。
+        streaming: true,
       }))
       return
     }
@@ -2560,6 +2693,7 @@ export const useFleetStore = defineStore('fleet', () => {
         text: msg.text + deltaText,
         parts: appendMessagePart(msg.parts, { type: 'text', text: deltaText }),
         liveProgress: { type: 'text' },
+        streaming: true,
       }))
       return
     }
@@ -2585,6 +2719,7 @@ export const useFleetStore = defineStore('fleet', () => {
           toolCalls,
           parts: appendMessagePart(msg.parts, { type: 'tool', callId: callKey }),
           liveProgress: { type: 'tool', callId: callKey },
+          streaming: true,
           ...(nextMedia ? { media: nextMedia } : {}),
         }
       })
@@ -3025,6 +3160,9 @@ export const useFleetStore = defineStore('fleet', () => {
       const copy = { ...runningBySession.value }
       delete copy[sKey]
       runningBySession.value = copy
+      for (const item of outbox.value) {
+        if (item.sessionKey === sKey) item.steerAttemptedRunId = undefined
+      }
       const contextWait = contextWaitingForModel.value[sKey]
       if (contextWait?.runId && contextWait.runId === (frame.runId || frame.requestId)) {
         delete contextWaitingForModel.value[sKey]
@@ -3056,7 +3194,7 @@ export const useFleetStore = defineStore('fleet', () => {
       if (pendingSteer) {
         // 先让队列按钮处理插话结果，再唤醒下一条消息，避免自动重发同一条。
         const route = fleetRoute.value
-        void pendingSteer.result.then(accepted => {
+        void pendingSteer.result.then(({ accepted }) => {
           if (accepted) {
             setTimeout(() => {
               if (fleetRoute.value === route && wsState.value === 'online') void drainNextQueuedPrompt(sKey)
@@ -3134,6 +3272,9 @@ export const useFleetStore = defineStore('fleet', () => {
       const copy = { ...runningBySession.value }
       delete copy[sKey]
       runningBySession.value = copy
+      for (const item of outbox.value) {
+        if (item.sessionKey === sKey) item.steerAttemptedRunId = undefined
+      }
       dismissSessionApprovals(sKey)
       if (frame.code === 'cancelled' || frame.code === 'stream_closed') {
         interruptedBySession.value = { ...interruptedBySession.value, [sKey]: true }
@@ -3889,8 +4030,34 @@ export const useFleetStore = defineStore('fleet', () => {
     composerDrafts.value[item.sessionKey] = draft
   }
 
+  /** 删除一条未送达的消息（本地 outbox + 气泡），不还原到输入框。 */
+  function discardFailedPrompt(id: string, sessionKey?: string) {
+    const item = outbox.value.find(row => row.id === id)
+    const sKey = item?.sessionKey ?? sessionKey
+    if (!sKey || !id) return false
+    removeOptimisticUserMessage(sKey, id)
+    if (item) void removeOutboxPrompt(item)
+    return true
+  }
+
+  /** 清理超过 7 天仍未送达的消息，避免它们在会话底部长期堆积。 */
+  function purgeStaleFailedPrompts(maxAgeMs = 7 * 24 * 60 * 60 * 1000) {
+    const now = Date.now()
+    let removed = 0
+    for (const item of [...outbox.value]) {
+      if (now - (item.createdAt || 0) <= maxAgeMs) continue
+      const msgs = messagesBySession.value[item.sessionKey] ?? []
+      const msg = msgs.find(row => row.requestId === item.id)
+      if (msg?.delivery !== 'failed') continue
+      if (discardFailedPrompt(item.id, item.sessionKey)) removed += 1
+    }
+    return removed
+  }
+
   async function removeOutboxPrompt(item: FleetOutboxItem) {
     const local = storage
+    const transmission = transmittingOutbox.get(item.id)
+    if (transmission?.timer) clearTimeout(transmission.timer)
     transmittingOutbox.delete(item.id)
     outbox.value = outbox.value.filter(row => row.id !== item.id)
     try { await local?.remove('outbox', item.id) }
@@ -3907,11 +4074,23 @@ export const useFleetStore = defineStore('fleet', () => {
 
   function cancelDeferredPrompt(id: string) {
     const item = outbox.value.find(row => row.id === id)
-    if (!item || transmittingOutbox.has(id)) return false
+    if (!item || (transmittingOutbox.has(id) && !item.unconfirmed)) return false
+    const transmission = transmittingOutbox.get(id)
+    if (transmission?.timer) clearTimeout(transmission.timer)
+    transmittingOutbox.delete(id)
     restoreOutboxDraft(item)
     removeOptimisticUserMessage(item.sessionKey, item.id)
     void removeOutboxPrompt(item).then(flushOutbox)
     return true
+  }
+
+  function retryOutboxPrompt(id: string) {
+    const item = outbox.value.find(row => row.id === id)
+    if (!item) return
+    item.unconfirmed = undefined
+    item.steerAttemptedRunId = undefined
+    updatePromptDelivery(item.sessionKey, item.id, 'sending')
+    void flushOutbox()
   }
 
   function appendSteerUserMessage(item: FleetOutboxItem) {
@@ -3934,66 +4113,174 @@ export const useFleetStore = defineStore('fleet', () => {
 
   async function flushOutbox() {
     const route = fleetRoute.value
-    if (!route || wsState.value !== 'online') return
+    const isOnline = wsState.value === 'online'
     const busySessions = new Set<string>()
+
     for (const item of outbox.value) {
-      const session = sessionsByKey.value[item.sessionKey]
+      if (item.unconfirmed) {
+        continue
+      }
       if (busySessions.has(item.sessionKey)) continue
+
+      const session = sessionsByKey.value[item.sessionKey]
       const running = runningBySession.value[item.sessionKey]
       const transmission = transmittingOutbox.get(item.id)
-      const steerAttempt = attemptedOutboxSteers.get(item)
-      // 插话回执未到时，让下一条消息进入现有的 pendingSteers 检查。
-      if (running && transmission && transmission === steerAttempt) continue
-      busySessions.add(item.sessionKey)
-      if (!session || nodes.value.find(node => node.id === session.nodeId)?.status !== 'online'
-        || transmission) continue
+      const nodeOnline = Boolean(session && nodes.value.find(node => node.id === session.nodeId)?.status === 'online')
+      const steerPending = [...pendingSteers.values()].some(steer => steer.sessionKey === item.sessionKey)
+      const steerBlocked = Boolean(running && item.steerAttemptedRunId === running)
+      const interruptPending = Boolean(stopStatusBySession.value[item.sessionKey]?.state === 'requested')
 
-      if (running) {
-        if (session.provider === 'hermes' && item.files.length === 0 && !steerAttempt) {
-          const attempt = {}
-          attemptedOutboxSteers.set(item, attempt)
-          transmittingOutbox.set(item.id, attempt)
-          void (async () => {
-            let accepted = false
-            try {
-              accepted = await steerPromptToSession(item.sessionKey, item.text)
-            } catch { accepted = false }
-            if (fleetRoute.value !== route || transmittingOutbox.get(item.id) !== attempt) return
-            if (accepted) {
-              await removeOutboxPrompt(item)
-              if (fleetRoute.value !== route) return
-              appendSteerUserMessage(item)
-            } else {
-              transmittingOutbox.delete(item.id)
-            }
-            // 回合可能已在插话回执前结束，本次处理完后补一次常规发送。
-            if (!runningBySession.value[item.sessionKey]) void flushOutbox()
-          })()
-        }
+      const decision = decideOutboxAction({
+        online: isOnline,
+        routeReady: Boolean(route),
+        nodeOnline,
+        sessionRunning: Boolean(running),
+        provider: session?.provider ?? '',
+        hasAttachments: item.files.length > 0,
+        steerPending,
+        steerBlocked,
+        busySendMode: busySendMode.value,
+        interruptPending,
+      })
+
+      if (decision.kind === 'wait') {
+        outboxWaitReason.value = { ...outboxWaitReason.value, [item.sessionKey]: decision.reason }
+        busySessions.add(item.sessionKey)
         continue
       }
 
-      const attempt = {}
-      transmittingOutbox.set(item.id, attempt)
-      if (item.files.length) uploadingPromptIds.add(item.id)
-      void (async () => {
-        try {
-          const attachments = item.files.length ? await uploadFilesWithPreview(item.files) : []
-          uploadingPromptIds.delete(item.id)
-          if (fleetRoute.value !== route || transmittingOutbox.get(item.id) !== attempt) return
-          attachPromptArtifacts(item.sessionKey, item.id, attachments)
-          await sendPromptToSession(item.sessionKey, item.text, attachments, item.options, true, item)
-        } catch (cause) {
-          uploadingPromptIds.delete(item.id)
+      if (outboxWaitReason.value[item.sessionKey]) {
+        const nextReasons = { ...outboxWaitReason.value }
+        delete nextReasons[item.sessionKey]
+        outboxWaitReason.value = nextReasons
+      }
+
+      busySessions.add(item.sessionKey)
+      if (transmission) continue
+
+      if (decision.kind === 'queue') {
+        enqueuePrompt(item.sessionKey, item.text, item.files, item.options)
+        void removeOutboxPrompt(item)
+        continue
+      }
+
+      if (decision.kind === 'interrupt') {
+        cancelSessionRun(item.sessionKey)
+        outboxWaitReason.value = { ...outboxWaitReason.value, [item.sessionKey]: 'interrupting' }
+        continue
+      }
+
+      if (decision.kind === 'steer') {
+        item.steerAttemptedRunId = running
+        const attempt: { startedAt: number; timer?: ReturnType<typeof setTimeout> } = {
+          startedAt: Date.now(),
+        }
+        transmittingOutbox.set(item.id, attempt)
+        void (async () => {
+          let outcome: { accepted: boolean; code?: string }
+          try {
+            outcome = await steerPromptToSession(item.sessionKey, item.text)
+          } catch {
+            outcome = { accepted: false, code: 'failed' }
+          }
           if (fleetRoute.value !== route || transmittingOutbox.get(item.id) !== attempt) return
           transmittingOutbox.delete(item.id)
-          if (wsState.value !== 'online' || nodes.value.find(node => node.id === session.nodeId)?.status !== 'online') return
-          updatePromptDelivery(item.sessionKey, item.id, 'failed')
-          restoreOutboxDraft(item)
-          await removeOutboxPrompt(item)
-          lastError.value = cause instanceof Error ? cause.message : '发送失败，消息已还原到输入框'
+
+          const plan = planSteerOutcome(outcome.accepted, outcome.code)
+          if (plan.kind === 'accepted') {
+            await removeOutboxPrompt(item)
+            if (fleetRoute.value !== route) return
+            updatePromptDelivery(item.sessionKey, item.id, 'sent', { text: item.text })
+            if (!runningBySession.value[item.sessionKey]) void flushOutbox()
+          } else if (plan.kind === 'resend') {
+            const sendAttempt: { startedAt: number; timer?: ReturnType<typeof setTimeout> } = {
+              startedAt: Date.now(),
+            }
+            sendAttempt.timer = setTimeout(() => {
+              if (transmittingOutbox.get(item.id) !== sendAttempt) return
+              transmittingOutbox.delete(item.id)
+              item.unconfirmed = { code: 'timeout', at: Date.now() }
+              updatePromptDelivery(item.sessionKey, item.id, 'unknown', { text: item.text })
+              lastError.value = '发送未确认：连接可能已断开，请重试或还原到输入框。'
+            }, SEND_ACK_TIMEOUT_MS)
+            transmittingOutbox.set(item.id, sendAttempt)
+            try {
+              await sendPromptToSession(item.sessionKey, item.text, [], item.options, true, item)
+            } catch (cause) {
+              if (transmittingOutbox.get(item.id) === sendAttempt) {
+                clearTimeout(sendAttempt.timer)
+                transmittingOutbox.delete(item.id)
+              }
+              item.unconfirmed = { code: 'send_failed', at: Date.now() }
+              updatePromptDelivery(item.sessionKey, item.id, 'unknown', { text: item.text })
+              lastError.value = cause instanceof Error ? cause.message : '发送未确认：连接可能已断开，请重试或还原到输入框。'
+            }
+          } else if (plan.kind === 'queue') {
+            enqueuePrompt(item.sessionKey, item.text, item.files, item.options)
+            await removeOutboxPrompt(item)
+          } else if (plan.kind === 'retry-later') {
+            // 插话请求根本没发出去（socket 不可用/同会话已有插话在途）：不算未确认，清标记等下次 flush
+            item.steerAttemptedRunId = undefined
+            if (!isOnline) {
+              outboxWaitReason.value = { ...outboxWaitReason.value, [item.sessionKey]: 'offline' }
+            }
+          } else {
+            // not_redirected / 超时 / failed
+            // SPEC 3.2: not_redirected/超时 → 静默重试（最多 2 次，指数退避），仍失败才在气泡上显示"发送失败·重试"
+            item.unconfirmed = { code: outcome.code ?? 'unconfirmed', at: Date.now() }
+            const retries = item.steerRetries ?? 0
+            if (retries < 2) {
+              item.steerRetries = retries + 1
+              const backoffMs = Math.min(500 * Math.pow(2, retries), 2000)
+              setTimeout(() => {
+                if (outbox.value.some(r => r.id === item.id)) {
+                  item.unconfirmed = undefined
+                  item.steerAttemptedRunId = undefined
+                  void flushOutbox()
+                }
+              }, backoffMs)
+            } else {
+              updatePromptDelivery(item.sessionKey, item.id, 'failed', { text: item.text })
+              lastError.value = plan.message
+            }
+          }
+        })()
+        continue
+      }
+
+      if (decision.kind === 'send') {
+        const sendAttempt: { startedAt: number; timer?: ReturnType<typeof setTimeout> } = {
+          startedAt: Date.now(),
         }
-      })()
+        sendAttempt.timer = setTimeout(() => {
+          if (transmittingOutbox.get(item.id) !== sendAttempt) return
+          transmittingOutbox.delete(item.id)
+          item.unconfirmed = { code: 'timeout', at: Date.now() }
+          updatePromptDelivery(item.sessionKey, item.id, 'unknown')
+          lastError.value = '发送未确认：连接可能已断开，请重试或还原到输入框。'
+        }, SEND_ACK_TIMEOUT_MS)
+
+        transmittingOutbox.set(item.id, sendAttempt)
+        if (item.files.length) uploadingPromptIds.add(item.id)
+
+        void (async () => {
+          try {
+            const attachments = item.files.length ? await uploadFilesWithPreview(item.files) : []
+            uploadingPromptIds.delete(item.id)
+            if (fleetRoute.value !== route || transmittingOutbox.get(item.id) !== sendAttempt) return
+            attachPromptArtifacts(item.sessionKey, item.id, attachments)
+            await sendPromptToSession(item.sessionKey, item.text, attachments, item.options, true, item)
+          } catch (cause) {
+            uploadingPromptIds.delete(item.id)
+            if (fleetRoute.value !== route || transmittingOutbox.get(item.id) !== sendAttempt) return
+            clearTimeout(sendAttempt.timer)
+            transmittingOutbox.delete(item.id)
+            item.unconfirmed = { code: 'send_failed', at: Date.now() }
+            updatePromptDelivery(item.sessionKey, item.id, 'unknown')
+            lastError.value = cause instanceof Error ? cause.message : '发送未确认：连接可能已断开，请重试或还原到输入框。'
+          }
+        })()
+      }
     }
   }
 
@@ -4034,17 +4321,25 @@ export const useFleetStore = defineStore('fleet', () => {
     }
   }
 
-  function steerPromptToSession(sKey: string, text: string): Promise<boolean> {
+  function steerPromptToSession(sKey: string, text: string): Promise<{ accepted: boolean; code?: string }> {
     const sess = sessionsByKey.value[sKey]
     const clean = text.trim()
     if (!sess || !clean || [...pendingSteers.values()].some(steer => steer.sessionKey === sKey)) {
-      return Promise.resolve(false)
+      return Promise.resolve({ accepted: false, code: 'pending' })
     }
     const requestId = createRequestId()
-    let finish!: (accepted: boolean) => void
-    const result = new Promise<boolean>(resolve => { finish = resolve })
+    let finish!: (accepted: boolean, code?: string) => void
+    const result = new Promise<{ accepted: boolean; code?: string }>(resolve => {
+      finish = (accepted, code) => resolve({ accepted, code })
+    })
+    const steerTimer = setTimeout(() => {
+      finish(false, 'timeout')
+    }, STEER_ACK_TIMEOUT_MS)
     pendingSteers.set(requestId, { sessionKey: sKey, result, finish })
-    void result.then(() => pendingSteers.delete(requestId))
+    void result.finally(() => {
+      clearTimeout(steerTimer)
+      pendingSteers.delete(requestId)
+    })
     try {
       if (!sendWsCommand({
         type: 'prompt.steer',
@@ -4053,9 +4348,9 @@ export const useFleetStore = defineStore('fleet', () => {
         sessionId: sess.sessionId,
         text: clean,
         requestId,
-      }, false)) finish(false)
+      }, false)) finish(false, 'not_sent')
     } catch {
-      finish(false)
+      finish(false, 'not_sent')
     }
     return result
   }
@@ -4120,16 +4415,10 @@ export const useFleetStore = defineStore('fleet', () => {
     const session = sessionsByKey.value[sKey]
     if (!session) throw new Error('目标会话不存在')
     const fileList = [...files]
-    const expectLocal = Boolean(storage || (localCacheScope.value && FleetLocalStore.available()))
-    if (!expectLocal) {
-      if (runningBySession.value[sKey]) { enqueuePrompt(sKey, body, fileList, options); return }
-      if (wsState.value !== 'online') throw new Error('当前环境无法加密保存待发送消息')
-    } else {
-      if (outbox.value.length + pendingOutboxWrites.size >= 32) throw new Error('待发送队列已满')
-      if (fileList.reduce((total, file) => total + file.size, 0) > 20 * 1024 * 1024) throw new Error('待发送附件合计不能超过 20 MB')
-    }
     const id = createRequestId()
     const createdAt = Date.now()
+
+    // 1. 先上屏（立刻插入乐观用户消息），任何情况下不撤回气泡
     appendMessage(sKey, {
       id: `user-${id}`,
       requestId: id,
@@ -4140,52 +4429,7 @@ export const useFleetStore = defineStore('fleet', () => {
       delivery: 'sending',
       createdAt,
     })
-    if (fileList.length && !expectLocal) uploadingPromptIds.add(id)
-    if (!localCacheRequested.value) {
-      localCacheRequested.value = true
-      await nextTick()
-    }
-    const local = storage
-    if (!local) {
-      if (runningBySession.value[sKey]) {
-        uploadingPromptIds.delete(id)
-        removeOptimisticUserMessage(sKey, id)
-        enqueuePrompt(sKey, body, fileList, options)
-        return
-      }
-      if (wsState.value !== 'online') {
-        uploadingPromptIds.delete(id)
-        removeOptimisticUserMessage(sKey, id)
-        throw new Error('当前环境无法加密保存待发送消息')
-      }
-      const route = fleetRoute.value
-      if (fileList.length) uploadingPromptIds.add(id)
-      void (async () => {
-        try {
-          const uploadedRefs = fileList.length ? await uploadFilesWithPreview(fileList) : []
-          uploadingPromptIds.delete(id)
-          if (fleetRoute.value !== route) return
-          attachPromptArtifacts(sKey, id, uploadedRefs)
-          await sendPromptToSession(sKey, body, uploadedRefs, options, true, undefined, id)
-        } catch (cause) {
-          uploadingPromptIds.delete(id)
-          if (fleetRoute.value !== route) return
-          updatePromptDelivery(sKey, id, 'failed')
-          lastError.value = cause instanceof Error ? cause.message : '消息发送失败'
-        }
-      })()
-      return
-    }
-    if (outbox.value.length + pendingOutboxWrites.size >= 32) {
-      uploadingPromptIds.delete(id)
-      removeOptimisticUserMessage(sKey, id)
-      throw new Error('待发送队列已满')
-    }
-    if (fileList.reduce((total, file) => total + file.size, 0) > 20 * 1024 * 1024) {
-      uploadingPromptIds.delete(id)
-      removeOptimisticUserMessage(sKey, id)
-      throw new Error('待发送附件合计不能超过 20 MB')
-    }
+
     const seed = forkSeedBySession.value[sKey]
     const item: FleetOutboxItem = {
       id,
@@ -4197,20 +4441,23 @@ export const useFleetStore = defineStore('fleet', () => {
       wireText: preparePromptText(body, seed),
       createdAt,
     }
-    pendingOutboxWrites.add(id)
-    try {
-      await local.savePrompt(item)
-    } catch (cause) {
-      removeOptimisticUserMessage(sKey, id)
-      throw cause
-    } finally {
-      pendingOutboxWrites.delete(id)
+
+    if (!localCacheRequested.value) {
+      localCacheRequested.value = true
+      await nextTick()
     }
-    if (storage !== local) {
-      removeOptimisticUserMessage(sKey, id)
-      throw new Error('对话账号已切换，消息已保存在原账号的待发队列')
+    const local = storage
+    if (local) {
+      pendingOutboxWrites.add(id)
+      void local.savePrompt(item).catch(() => {
+        // 本地存储失败降级为不持久化，绝不 throw 到 UI
+      }).finally(() => {
+        pendingOutboxWrites.delete(id)
+      })
     }
     if (seed && forkSeedBySession.value[sKey] === seed) delete forkSeedBySession.value[sKey]
+
+    // 进内存队列，重连后自动重投（同一 requestId，幂等）
     outbox.value = [...outbox.value, item].sort((left, right) => left.createdAt - right.createdAt)
     void flushOutbox()
   }
@@ -4445,6 +4692,7 @@ export const useFleetStore = defineStore('fleet', () => {
     reference: string,
     purpose: 'preview' | 'download',
     signal?: AbortSignal,
+    onProgress?: (progress: MediaProgress) => void,
   ) {
     const session = sessionsByKey.value[key]
     if (!session || session.provider !== 'hermes') throw new Error('找不到附件所属的 Hermes 会话')
@@ -4455,7 +4703,7 @@ export const useFleetStore = defineStore('fleet', () => {
     const route = requireFleetRoute()
     const media = await fetchHermesMedia(route.token, route.origin, {
       nodeId: session.nodeId, sessionId: session.sessionId, reference, purpose,
-    }, signal)
+    }, signal, onProgress)
     checkFleetRoute(route)
     return media
   }
@@ -5384,6 +5632,15 @@ export const useFleetStore = defineStore('fleet', () => {
     composerDrafts,
     chatNodes,
     outbox,
+    outboxWaitReason,
+    busySendMode,
+    setBusySendMode,
+    retryOutboxPrompt,
+    flushOutbox,
+    postClientDebugLog,
+    fetchInboxPreview,
+    discardFailedPrompt,
+    purgeStaleFailedPrompts,
     isOutboxTransmitting,
     isPromptUploading,
     cancelDeferredPrompt,

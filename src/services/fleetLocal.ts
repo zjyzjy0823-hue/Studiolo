@@ -12,6 +12,9 @@ export interface FleetOutboxItem {
   files: File[]
   options?: RunOptions
   createdAt: number
+  unconfirmed?: { code?: string; at: number }
+  steerAttemptedRunId?: string
+  steerRetries?: number
 }
 
 export interface FleetCachedSession {

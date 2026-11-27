@@ -897,7 +897,7 @@ function lineClass(line: string): string {
   align-items: center;
   gap: 6px;
   min-width: 0;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   font-weight: 600;
 }
 .diff-hdr-ic { width: 14px; height: 14px; color: var(--accent); flex: none; }
@@ -905,7 +905,7 @@ function lineClass(line: string): string {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   font-weight: 500;
   color: var(--text-3);
 }
@@ -931,7 +931,7 @@ function lineClass(line: string): string {
   border-radius: 5px;
   background: transparent;
   color: var(--text-3);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   cursor: pointer;
 }
 .diff-mode-btn.is-active {
@@ -946,7 +946,7 @@ function lineClass(line: string): string {
   border: 1px solid var(--line-strong);
   background: var(--surface-1);
   color: var(--text);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
 }
 .diff-commit-bar {
   display: flex;
@@ -966,7 +966,7 @@ function lineClass(line: string): string {
   border-radius: var(--r-sm);
   border: 1px solid var(--accent-line);
   background: var(--accent-soft);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
 }
 .diff-ann-info {
   display: flex;
@@ -1001,7 +1001,7 @@ function lineClass(line: string): string {
   border-bottom: 1px solid var(--line);
   background: color-mix(in srgb, var(--accent-soft) 55%, var(--surface-1));
   font-family: var(--font-sans, system-ui, sans-serif);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
 }
 .diff-pinned-ann.is-resolved {
   opacity: 0.56;
@@ -1011,7 +1011,7 @@ function lineClass(line: string): string {
   text-decoration: line-through;
 }
 .dpa-line {
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   font-weight: 600;
   color: var(--accent);
   flex: none;
@@ -1037,7 +1037,7 @@ function lineClass(line: string): string {
   border-radius: var(--r-xs);
   background: var(--solid);
   color: var(--text-2);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   cursor: pointer;
 }
 .dpa-btn:hover {
@@ -1056,7 +1056,7 @@ function lineClass(line: string): string {
   min-width: 0;
   height: 28px;
   padding: 0 8px;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
 }
 .diff-body {
   flex: 1;
@@ -1070,7 +1070,7 @@ function lineClass(line: string): string {
   gap: 10px;
   padding: 36px 18px;
   text-align: center;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
 }
 .diff-empty-ic { width: 24px; height: 24px; color: var(--text-3); }
 .diff-empty-ic.is-clean { color: var(--ok); }
@@ -1093,7 +1093,7 @@ function lineClass(line: string): string {
   padding: 6px 10px;
   cursor: pointer;
   user-select: none;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   background: var(--surface-2);
 }
 .diff-file-head::-webkit-details-marker { display: none; }
@@ -1107,7 +1107,7 @@ function lineClass(line: string): string {
   display: inline-grid;
   place-items: center;
   font-family: var(--mono);
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--fs));
   font-weight: 700;
   background: var(--surface-3);
   color: var(--text-3);
@@ -1129,13 +1129,13 @@ function lineClass(line: string): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   color: var(--text-3);
 }
 .diff-stats {
   display: inline-flex;
   gap: 5px;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   font-weight: 600;
   flex: none;
 }
@@ -1167,7 +1167,7 @@ function lineClass(line: string): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--text-3);
 }
 .diff-file-btns {
@@ -1191,7 +1191,7 @@ function lineClass(line: string): string {
 }
 .diff-hunk-hdr {
   font-family: var(--mono);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1205,7 +1205,7 @@ function lineClass(line: string): string {
   border-radius: 4px;
   background: var(--solid);
   color: var(--warn);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   cursor: pointer;
   flex: none;
 }
@@ -1216,7 +1216,7 @@ function lineClass(line: string): string {
 .diff-u-table {
   overflow-x: auto;
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   line-height: 1.55;
 }
 .diff-u-row {
@@ -1248,7 +1248,7 @@ function lineClass(line: string): string {
   border-radius: 50%;
   background: var(--accent);
   color: #fff;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   font-weight: 700;
   line-height: 1;
   display: grid;
@@ -1268,7 +1268,7 @@ function lineClass(line: string): string {
   flex: none;
   padding: 0 5px;
   text-align: right;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--text-3);
   user-select: none;
 }
@@ -1302,7 +1302,7 @@ function lineClass(line: string): string {
   border-radius: 4px;
   background: var(--accent);
   color: #fff;
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   font-weight: 600;
   flex: none;
 }
@@ -1312,7 +1312,7 @@ function lineClass(line: string): string {
   height: 26px;
   padding: 0 8px;
   font-family: var(--font-sans, inherit);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
 }
 
 /* Hunk 间隙展开分隔条 (+N more lines) */
@@ -1333,7 +1333,7 @@ function lineClass(line: string): string {
   border-radius: 6px;
   background: var(--solid);
   color: var(--text-2);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   font-weight: 500;
   cursor: pointer;
 }
@@ -1353,7 +1353,7 @@ function lineClass(line: string): string {
   width: 100%;
   border-collapse: collapse;
   font-family: var(--mono);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   line-height: 1.5;
   table-layout: fixed;
 }
@@ -1361,7 +1361,7 @@ function lineClass(line: string): string {
   width: 36px;
   padding: 0 6px;
   text-align: right;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--text-3);
   user-select: none;
   border-right: 1px solid var(--line);
@@ -1389,7 +1389,7 @@ function lineClass(line: string): string {
   margin: 0;
   padding: 6px 0;
   font-family: var(--mono);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   line-height: 1.45;
   overflow-x: auto;
 }
@@ -1402,7 +1402,7 @@ function lineClass(line: string): string {
 .diff-line.is-del { background: var(--diff-del-bg); color: var(--warn); }
 .diff-line.is-hunk { background: var(--accent-soft); color: var(--accent); }
 .diff-line.is-meta { color: var(--text-3); }
-.diff-binary { margin: 0; padding: 10px; font-size: 12px; }
+.diff-binary { margin: 0; padding: 10px; font-size: calc(12px * var(--fs)); }
 
 /* 复用全站双主题语义语法高亮变量 */
 .tok-keyword { color: var(--tok-keyword, #9333ea); font-weight: 500; }

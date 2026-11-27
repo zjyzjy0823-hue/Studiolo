@@ -150,7 +150,7 @@ function changeMonth() { if (auth.token) store.load(auth.token, true).catch(() =
           <h2 class="card-h"><OpusIcon name="layers" /> 分类</h2>
           <div class="cat-bar"><i v-for="item in spendingCategories" :key="item.id" :style="{ '--c': item.color, flex: item.amount }"></i></div>
           <div class="kv"><div v-for="item in spendingCategories" :key="item.id"><span :style="{ width:'8px', height:'8px', borderRadius:'2px', background:item.color }"></span>{{ item.name }}<span class="num muted">{{ money(item.amount) }} · {{ Math.round(item.amount / categoryTotal * 100) }}%</span></div></div>
-          <div v-if="!spendingCategories.length" class="faint" style="font-size:12.5px">暂无分类支出</div>
+          <div v-if="!spendingCategories.length" class="faint" style="font-size:calc(12.5px * var(--fs))">暂无分类支出</div>
         </section>
       </div>
     </template>
@@ -195,6 +195,6 @@ function changeMonth() { if (auth.token) store.load(auth.token, true).catch(() =
 <style scoped>
 .ledger-page { min-width: 0; }
 .ledger-options__bar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
-.ledger-options__month { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-2); }
+.ledger-options__month { display: inline-flex; align-items: center; gap: 8px; font-size: calc(13px * var(--fs)); color: var(--text-2); }
 .ledger-options__month .input { width: 165px; height: 32px; }
 </style>

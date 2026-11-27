@@ -71,10 +71,10 @@ onUnmounted(() => document.removeEventListener('keydown', shortcut))
 
 <style scoped>
 .workspace-topbar { position:relative; z-index:70; display:flex; align-items:center; justify-content:space-between; gap:18px; min-height:53px; padding:0 clamp(16px,3vw,38px); border-width:0 0 1px; box-shadow:none; color:var(--workbench-text); }
-.workspace-topbar__location { display:flex; align-items:center; gap:9px; color:var(--workbench-muted); font-size:13px; white-space:nowrap; }
+.workspace-topbar__location { display:flex; align-items:center; gap:9px; color:var(--workbench-muted); font-size:calc(13px * var(--fs)); white-space:nowrap; }
 .workspace-topbar__location strong { color:var(--workbench-text); font-weight:650; }
 .workspace-topbar__settings { display:none; }
-.command-trigger, .command-search { display:flex; align-items:center; gap:8px; min-height:35px; padding:0 11px; color:var(--workbench-muted); background:var(--workbench-solid); border:1px solid var(--workbench-line); border-radius:9px; font-size:12px; }
+.command-trigger, .command-search { display:flex; align-items:center; gap:8px; min-height:35px; padding:0 11px; color:var(--workbench-muted); background:var(--workbench-solid); border:1px solid var(--workbench-line); border-radius:9px; font-size:calc(12px * var(--fs)); }
 .command-trigger { width:min(100%,310px); text-align:left; }
 .command-trigger kbd { margin-left:auto; padding:2px 5px; border:1px solid var(--workbench-line); border-radius:5px; white-space:nowrap; }
 .command-search input { flex:1; min-width:0; padding:8px 0; border:0; outline:none; background:none; color:var(--workbench-text); }
@@ -94,5 +94,5 @@ onUnmounted(() => document.removeEventListener('keydown', shortcut))
   .workspace-topbar :deep(.top-action-controls) { display:none; }
   .command-trigger { width:35px; justify-content:center; padding:0; }
 }
-@media (max-width: 380px) { .workspace-topbar { gap: 10px; } .workspace-topbar__location { gap: 5px; font-size: 11px; } }
+@media (max-width: 380px) { .workspace-topbar { gap: 10px; } .workspace-topbar__location { gap: 5px; font-size: calc(11px * var(--fs)); } }
 </style>

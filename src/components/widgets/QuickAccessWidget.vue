@@ -48,8 +48,8 @@ function markIconFailed(id: string) { failedIcons.value.add(id) }
 .quick-access-card { min-width: 0; }
 .quick-access-card :deep(.glass-card__header) { margin-bottom: 10px; }
 .quick-access-card :deep(.glass-card__body) { display: flex; flex-direction: column; justify-content: safe center; }
-.quick-access-card :deep(.glass-card__title) { color: var(--workbench-text); font-size: 18px; font-weight: 580; text-shadow: none; }
-.quick-access-card :deep(.glass-card__title)::before { content: '✧'; display: inline-block; margin-right: 10px; color: var(--workbench-text); font-size: 25px; line-height: 0; vertical-align: -2px; }
+.quick-access-card :deep(.glass-card__title) { color: var(--workbench-text); font-size: calc(18px * var(--fs)); font-weight: 580; text-shadow: none; }
+.quick-access-card :deep(.glass-card__title)::before { content: '✧'; display: inline-block; margin-right: 10px; color: var(--workbench-text); font-size: calc(25px * var(--fs)); line-height: 0; vertical-align: -2px; }
 .card-chevron { display: grid; width: 24px; height: 24px; place-items: center; color: var(--workbench-text); border: 1px solid var(--workbench-line); border-radius: 50%; background: var(--workbench-solid); }
 .access-grid { display: flex; flex-wrap: wrap; align-content: center; justify-content: center; gap: 12px 16px; width: 100%; padding: 6px 2px; }
 .access-item { position: relative; display: flex; width: calc((100% - 64px) / 5); min-width: 0; min-height: 92px; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 10px 2px 7px; border: 1px solid var(--workbench-line); border-radius: 18px; color: var(--workbench-text); background: var(--workbench-solid); box-shadow: inset 0 1px 1px rgba(255,255,255,.7),0 5px 14px rgba(31,42,89,.08); font: inherit; text-decoration: none; cursor: pointer; transition: transform .22s ease, background .22s ease, box-shadow .22s ease; }
@@ -57,11 +57,11 @@ function markIconFailed(id: string) { failedIcons.value.add(id) }
 .access-item:focus-visible { outline: 2px solid white; outline-offset: 3px; }
 .access-brand { display: grid; height: 46px; place-items: center; color: var(--workbench-good); }
 .access-brand img { width: 38px; height: 38px; object-fit: contain; }
-.access-initial { display: grid; width: 38px; height: 38px; place-items: center; border-radius: 12px; background: var(--workbench-solid); font-size: 22px; font-weight: 760; }
+.access-initial { display: grid; width: 38px; height: 38px; place-items: center; border-radius: 12px; background: var(--workbench-solid); font-size: calc(22px * var(--fs)); font-weight: 760; }
 .access-item--add .access-brand { color: var(--workbench-text); }
-.access-label { max-width: 100%; overflow: hidden; color: var(--workbench-muted); font-size: 13px; font-weight: 540; line-height: 1.15; letter-spacing: -.025em; text-overflow: ellipsis; white-space: nowrap; }
-.access-hint { margin: 4px 0 0; color: var(--workbench-muted); font-size: 11px; text-align: center; }
-@container (max-width: 480px) { .quick-access-card { padding: 13px 14px; } .access-grid { gap: 7px; padding-inline: 4px; } .access-item { width: calc((100% - 28px) / 5); min-height: 70px; gap: 3px; padding: 5px 2px; border-radius: 14px; } .access-brand { height: 35px; } .access-brand img, .access-initial { width: 30px; height: 30px; font-size: 17px; } .access-label { font-size: 11px; } }
+.access-label { max-width: 100%; overflow: hidden; color: var(--workbench-muted); font-size: calc(13px * var(--fs)); font-weight: 540; line-height: 1.15; letter-spacing: -.025em; text-overflow: ellipsis; white-space: nowrap; }
+.access-hint { margin: 4px 0 0; color: var(--workbench-muted); font-size: calc(11px * var(--fs)); text-align: center; }
+@container (max-width: 480px) { .quick-access-card { padding: 13px 14px; } .access-grid { gap: 7px; padding-inline: 4px; } .access-item { width: calc((100% - 28px) / 5); min-height: 70px; gap: 3px; padding: 5px 2px; border-radius: 14px; } .access-brand { height: 35px; } .access-brand img, .access-initial { width: 30px; height: 30px; font-size: calc(17px * var(--fs)); } .access-label { font-size: calc(11px * var(--fs)); } }
 @container (max-width: 380px) { .access-item { width: calc((100% - 21px) / 4); } }
 @container (max-width: 280px) { .access-item { width: calc((100% - 14px) / 3); } }
 @media (max-width: 560px) { .access-grid { gap: 8px; } .access-item { min-height: 75px; } }

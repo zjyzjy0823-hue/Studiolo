@@ -4,12 +4,15 @@ import { isTauri } from '@tauri-apps/api/core'
 import { installDesktopInteractions } from './desktop/desktopInteractions'
 import { initializeDesktopPlatform } from './desktop/platform'
 import { installTouchPressFeedback } from './utils/touchPressFeedback'
+import { useFontScale } from './composables/useFontScale'
 import App from './App.vue'
 import './styles/main.css'
 import './desktop/desktop.css'
 import './styles/workbench.css'
 import './styles/opus-app.css'
 import './theme/tokens.css'
+
+useFontScale()
 
 async function mountApp() {
   const app = createApp(App).use(createPinia())

@@ -58,16 +58,16 @@ onUnmounted(() => {
 .webhook-card__top { display:flex; align-items:flex-start; gap:8px; }
 .webhook-card__icon { display:grid; width:29px; height:29px; flex:none; place-items:center; border-radius:9px; color:var(--accent-deep); background:var(--workbench-muted-surface); }
 .webhook-card__title { min-width:0; flex:1; }
-.webhook-card__title h3 { margin:1px 0 3px; overflow:hidden; color:var(--text-primary); font-size:11px; font-weight:710; text-overflow:ellipsis; white-space:nowrap; }
-.webhook-card__title span { color:var(--text-secondary); font-size:9px; }
+.webhook-card__title h3 { margin:1px 0 3px; overflow:hidden; color:var(--text-primary); font-size:calc(11px * var(--fs)); font-weight:710; text-overflow:ellipsis; white-space:nowrap; }
+.webhook-card__title span { color:var(--text-secondary); font-size:calc(9px * var(--fs)); }
 .webhook-card__more-wrap { position:relative; flex:none; }
 .webhook-card__more { width:24px; height:24px; border-radius:7px; }
 .webhook-card__menu { position:absolute; z-index:10; top:29px; right:0; min-width:142px; padding:5px; border:var(--glass-tile-border); border-radius:10px; background:var(--glass-popover-background); box-shadow:0 10px 22px rgba(31,46,88,.2);  backdrop-filter:var(--glass-overlay-filter); -webkit-backdrop-filter:var(--glass-overlay-filter); }
-.webhook-card__menu button { display:flex; align-items:center; gap:7px; width:100%; padding:7px; border:0; border-radius:7px; color:var(--text-primary); background:transparent; font-size:10px; text-align:left; white-space:nowrap; }
+.webhook-card__menu button { display:flex; align-items:center; gap:7px; width:100%; padding:7px; border:0; border-radius:7px; color:var(--text-primary); background:transparent; font-size:calc(10px * var(--fs)); text-align:left; white-space:nowrap; }
 .webhook-card__menu button:hover { background:var(--workbench-overlay); }
 .webhook-card__endpoint { display:flex; align-items:center; gap:6px; min-width:0; margin-top:11px; padding:7px 8px; border:1px solid var(--workbench-line); border-radius:8px; background:var(--workbench-solid); }
-.webhook-card__endpoint span { flex:none; color:var(--workbench-accent); font-size:9px; font-weight:780; }
-.webhook-card__endpoint code { min-width:0; flex:1; overflow:hidden; color:var(--workbench-muted); font-size:9px; text-overflow:ellipsis; white-space:nowrap; }
+.webhook-card__endpoint span { flex:none; color:var(--workbench-accent); font-size:calc(9px * var(--fs)); font-weight:780; }
+.webhook-card__endpoint code { min-width:0; flex:1; overflow:hidden; color:var(--workbench-muted); font-size:calc(9px * var(--fs)); text-overflow:ellipsis; white-space:nowrap; }
 .webhook-card__endpoint > svg { flex:none; color:var(--workbench-muted); }
-.webhook-card__footer { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:10px; padding:0 2px; color:var(--text-secondary); font-size:10px; }
+.webhook-card__footer { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:10px; padding:0 2px; color:var(--text-secondary); font-size:calc(10px * var(--fs)); }
 </style>

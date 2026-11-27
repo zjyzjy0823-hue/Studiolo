@@ -1,4 +1,4 @@
-import { androidInvoke, isAndroidLocal } from '../desktop/androidLocal'
+import { androidInvoke, isAndroidLocal, AndroidLocalError } from '../desktop/androidLocal'
 
 export async function saveBlobToDevice(blob: Blob, filename: string): Promise<string> {
   const name = filename.trim() || 'download'
@@ -30,3 +30,33 @@ export async function saveBlobToDevice(blob: Blob, filename: string): Promise<st
   }
   return name
 }
+
+export async function openSavedDownload(record: { name: string; displayPath?: string }): Promise<void> {
+  if (!isAndroidLocal()) {
+    throw new Error('仅 Android 支持打开已下载文件')
+  }
+  try {
+    await androidInvoke<boolean>('android_open_download', {
+      name: record.name,
+      displayPath: record.displayPath,
+    })
+  } catch (error) {
+    if (error instanceof AndroidLocalError) {
+      if (error.code === 'download_missing') {
+        throw new Error('文件已被移动或删除')
+      }
+      if (error.code === 'no_viewer') {
+        throw new Error('没有能打开这种文件的应用')
+      }
+    }
+    const message = error instanceof Error ? error.message : String(error || '')
+    if (message.includes('download_missing')) {
+      throw new Error('文件已被移动或删除')
+    }
+    if (message.includes('no_viewer')) {
+      throw new Error('没有能打开这种文件的应用')
+    }
+    throw error instanceof Error ? error : new Error(message || '打开失败')
+  }
+}
+

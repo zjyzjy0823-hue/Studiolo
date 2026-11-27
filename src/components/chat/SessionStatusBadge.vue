@@ -35,12 +35,12 @@ const icons = {
   border-radius: 999px;
   background: var(--surface-2);
   color: var(--text-2);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   font-weight: 560;
   line-height: 1.3;
   white-space: nowrap;
 }
-.session-state.is-compact { gap: 4px; min-height: 21px; padding: 2px 6px; font-size: 11px; }
+.session-state.is-compact { gap: 4px; min-height: 21px; padding: 2px 6px; font-size: calc(11px * var(--fs)); }
 .session-state.is-complete { color: var(--ok); background: var(--ok-soft); }
 .session-state.is-running, .session-state.is-input { color: var(--accent); background: var(--accent-soft); }
 .session-state.is-approval { color: var(--warn); background: var(--warn-soft); }

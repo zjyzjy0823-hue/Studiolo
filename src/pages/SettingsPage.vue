@@ -18,6 +18,7 @@ import SecuritySettings from '../components/settings/SecuritySettings.vue'
 import NotificationSettings from '../components/settings/NotificationSettings.vue'
 import AboutSettings from '../components/settings/AboutSettings.vue'
 import { isAndroidLocal } from '../desktop/androidLocal'
+import { FONT_SCALE_OPTIONS, useFontScale } from '../composables/useFontScale'
 import { useAuthStore } from '../stores/auth'
 import { useSettingsStore, defaultSettings } from '../stores/settings'
 import type { SyncStatus } from '../api/sync'
@@ -67,6 +68,7 @@ const showTools = ref(false)
 const auth = useAuthStore()
 const store = useSettingsStore()
 const androidLocal = isAndroidLocal()
+const { scale: fontScale, setScale: setFontScale } = useFontScale()
 const mobileSections = computed(() => sections.filter(section =>
   section.id !== 'appearance' && (store.loaded || section.id === 'sync')))
 const profile = computed<UserProfile>(() => ({ username: auth.user?.username ?? '', email: '', timezone: store.settings.deploymentTimezone ?? '未知', language: store.settings.language }))
@@ -241,8 +243,13 @@ const mobileDetailLabel = computed(() => sections.find(item => item.id === mobil
           <div><span>减少透明度（关闭模糊）</span><button class="switch" type="button" role="switch" aria-label="减少透明度" :aria-checked="appearance.blur === 0" @click="toggleBlur"></button></div>
           <div><span>减少动态效果</span><button class="switch" type="button" role="switch" aria-label="减少动态效果" :aria-checked="!!reducedMotion" @click="emit('update:reducedMotion', !reducedMotion)"></button></div>
         </div>
-        <p class="faint" style="font-size:12.5px;margin:0 4px 12px">低端设备可关闭模糊；玻璃材质只用于导航、卡片和弹层，列表与输入保持实体。</p>
+        <p class="faint" style="font-size:calc(12.5px * var(--fs));margin:0 4px 12px">低端设备可关闭模糊；玻璃材质只用于导航、卡片和弹层，列表与输入保持实体。</p>
         </template>
+        <div class="sec-t">字号</div>
+        <OpusSegment class="mseg" role="group" aria-label="字号">
+          <button v-for="item in FONT_SCALE_OPTIONS" :key="item.id" type="button" :aria-pressed="fontScale === item.id" @click="setFontScale(item.id)">{{ item.label }}</button>
+        </OpusSegment>
+        <p class="faint" style="font-size:calc(12.5px * var(--fs));margin:0 4px 12px">只影响文字大小；保存在本设备，不参与同步。</p>
         <div v-if="store.loaded" class="sec-t">同步</div>
         <div class="kvl mat-solid">
           <div><span>Core</span><button type="button" class="conn" :class="syncStatus?.connected ? 'online' : 'offline'" @click="openMobileSection('sync')">{{ syncLabel }}</button></div>
@@ -349,7 +356,7 @@ const mobileDetailLabel = computed(() => sections.find(item => item.id === mobil
   gap: 6px;
 }
 .bs-badge {
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   font-weight: 550;
   padding: 1px 6px;
   border-radius: 999px;
@@ -441,18 +448,18 @@ const mobileDetailLabel = computed(() => sections.find(item => item.id === mobil
   gap: 7px;
 }
 .m-bopt-title {
-  font-size: 14.5px;
+  font-size: calc(14.5px * var(--fs));
   font-weight: 600;
 }
 .m-bopt-badge {
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   padding: 1px 7px;
   border-radius: 999px;
   background: var(--surface-3);
   color: var(--text-3);
 }
 .m-bopt-desc {
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   color: var(--text-3);
   line-height: 1.4;
 }

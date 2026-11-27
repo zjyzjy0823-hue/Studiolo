@@ -12,6 +12,7 @@ export interface DownloadRecord {
   url?: string
   expiresAt?: number
   sessionKey?: string
+  displayPath?: string
 }
 
 const STORAGE_KEY = 'studiolo.downloads.v1'

@@ -119,7 +119,7 @@ async function pasteUrl() {
 .website-icon-preview {
   display: grid; place-items: center; flex: none; width: 40px; height: 36px;
   overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--r-sm);
-  background: var(--surface-2); color: var(--accent); font-size: 16px; font-weight: 700;
+  background: var(--surface-2); color: var(--accent); font-size: calc(16px * var(--fs)); font-weight: 700;
 }
 .website-icon-preview img { width: 22px; height: 22px; object-fit: contain; }
 .website-options { align-items: end; }

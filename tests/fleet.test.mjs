@@ -901,6 +901,204 @@ test('客户端续传状态机按 SPEC 恢复并释放请求', async t => {
     assert.equal(invokeCalls.some(call => call.command === 'fleet_send'), false)
   })
 
+  await t.test('插话被拒 code=idle：回合已结束，随后必须立刻发出 prompt.send', async t => {
+    const f = fixture(t)
+    const hermesSession = { nodeId: 'node', provider: 'hermes', sessionId: 'steer-idle' }
+    const hermesKey = sessionKey(hermesSession.nodeId, hermesSession.provider, hermesSession.sessionId)
+    f.fleet.sessionsByKey[hermesKey] = { ...hermesSession, title: '测试插话 idle', cwd: '' }
+    f.fleet.nodes = [{ id: 'node', status: 'online', adapters: [] }]
+    f.fleet.runningBySession[hermesKey] = 'run-active'
+
+    const item = {
+      id: 'outbox-steer-idle',
+      sessionKey: hermesKey,
+      session: hermesSession,
+      text: '插话消息测试',
+      wireText: '插话消息测试',
+      files: [],
+      createdAt: Date.now(),
+    }
+    f.fleet.outbox = [item]
+
+    await f.fleet.flushOutbox()
+    const steerReq = f.requests('prompt.steer').find(r => r.sessionId === 'steer-idle')
+    assert.ok(steerReq, '应发出 prompt.steer 请求')
+    assert.equal(steerReq.text, '插话消息测试')
+
+    // 模拟服务端拒绝插话，返回 code='idle'（说明回合已结束）
+    f.receive({
+      type: 'SteerRejected',
+      sessionId: 'steer-idle',
+      requestId: steerReq.requestId,
+      code: 'idle',
+    })
+
+    // fixture 用 t.mock.timers 冻结了 setTimeout，这里必须用未被 mock 的 setImmediate 等微任务排空
+    await new Promise(resolve => setImmediate(resolve))
+
+    const sendReq = f.requests('prompt.send').find(r => r.requestId === 'outbox-steer-idle')
+    assert.ok(sendReq, '插话返回 idle 时必须立刻通过正常路径发出 prompt.send')
+    assert.equal(sendReq.sessionId, 'steer-idle')
+    assert.equal(sendReq.text, '插话消息测试')
+    f.clean()
+  })
+
+  await t.test('插话被拒 code=not_redirected：不得自动发 prompt.send，且 outbox 条目仍在（unconfirmed）', async t => {
+    const f = fixture(t)
+    const hermesSession = { nodeId: 'node', provider: 'hermes', sessionId: 'steer-not-redirected' }
+    const hermesKey = sessionKey(hermesSession.nodeId, hermesSession.provider, hermesSession.sessionId)
+    f.fleet.sessionsByKey[hermesKey] = { ...hermesSession, title: '测试插话 not_redirected', cwd: '' }
+    f.fleet.nodes = [{ id: 'node', status: 'online', adapters: [] }]
+    f.fleet.runningBySession[hermesKey] = 'run-active'
+
+    const item = {
+      id: 'outbox-steer-not-redir',
+      sessionKey: hermesKey,
+      session: hermesSession,
+      text: '插话消息未重定向',
+      wireText: '插话消息未重定向',
+      files: [],
+      createdAt: Date.now(),
+    }
+    f.fleet.outbox = [item]
+
+    await f.fleet.flushOutbox()
+    const steerReq = f.requests('prompt.steer').find(r => r.sessionId === 'steer-not-redirected')
+    assert.ok(steerReq, '应发出 prompt.steer 请求')
+    assert.equal(steerReq.text, '插话消息未重定向')
+
+    // 模拟服务端拒绝插话，返回 code='not_redirected'
+    f.receive({
+      type: 'SteerRejected',
+      sessionId: 'steer-not-redirected',
+      requestId: steerReq.requestId,
+      code: 'not_redirected',
+    })
+
+    // fixture 用 t.mock.timers 冻结了 setTimeout，这里必须用未被 mock 的 setImmediate 等微任务排空
+    await new Promise(resolve => setImmediate(resolve))
+
+    // 不得自动发 prompt.send
+    const sendReq = f.requests('prompt.send').find(r => r.requestId === 'outbox-steer-not-redir')
+    assert.equal(sendReq, undefined, '插话返回 not_redirected 时不得自动发 prompt.send')
+
+    // outbox 条目仍在且标记为 unconfirmed
+    const savedItem = f.fleet.outbox.find(r => r.id === 'outbox-steer-not-redir')
+    assert.ok(savedItem, 'outbox 条目仍在')
+    assert.ok(savedItem.unconfirmed, 'outbox 条目必须标记为 unconfirmed')
+    assert.equal(savedItem.unconfirmed.code, 'not_redirected')
+
+    // 再次 flushOutbox 也不得自动发 prompt.send
+    await f.fleet.flushOutbox()
+    assert.equal(
+      f.requests('prompt.send').find(r => r.requestId === 'outbox-steer-not-redir'),
+      undefined,
+      '即使再次 flushOutbox，unconfirmed 条目也绝不能被自动重发',
+    )
+    f.clean()
+  })
+
+  await t.test('离线点发送：气泡立刻存在、草稿清空、不抛错；重连后自动发出且只发一次', async t => {
+    const f = fixture(t)
+    f.fleet.nodes = [{ id: 'node', status: 'online', adapters: [] }]
+    f.fleet.wsState = 'disconnected'
+    f.fleet.composerDrafts[f.key] = { text: '离线测试消息', files: [] }
+
+    let sendError = null
+    try {
+      await f.fleet.sendPromptToSpecificSession(f.key, '离线测试消息', [])
+    } catch (err) {
+      sendError = err
+    }
+    assert.equal(sendError, null, '离线发送不得抛出异常')
+
+    const msgs = f.fleet.messagesBySession[f.key] ?? []
+    const userMsg = msgs.find(m => m.role === 'user' && m.text === '离线测试消息')
+    assert.ok(userMsg, '气泡必须立刻上屏')
+    assert.equal(userMsg.delivery, 'sending')
+
+    f.receive({
+      type: 'FleetSnapshot',
+      nodes: [{ id: 'node', status: 'online', adapters: [] }],
+    })
+    await new Promise(resolve => setImmediate(resolve))
+
+    const sendRequests = f.requests('prompt.send').filter(r => r.text === '离线测试消息')
+    assert.equal(sendRequests.length, 1, '重连后必须自动发出且仅发一次')
+    assert.equal(sendRequests[0].requestId, userMsg.requestId, '发出的 requestId 必须与气泡一致')
+    f.replay()
+    f.clean()
+  })
+
+  await t.test('Accepted 的 requestId 与 outbox id 不一致时，用文本+时间窗兜底把气泡标成 sent', async t => {
+    const f = fixture(t)
+    const outboxId = 'outbox-req-original'
+    const textContent = '文本时间窗对账消息'
+
+    f.fleet.messagesBySession[f.key] = [{
+      id: `user-${outboxId}`,
+      requestId: outboxId,
+      role: 'user',
+      nodeId: 'node',
+      provider: 'codex',
+      text: textContent,
+      delivery: 'sending',
+      createdAt: Date.now(),
+    }]
+    f.fleet.outbox = [{
+      id: outboxId,
+      sessionKey: f.key,
+      session: { nodeId: 'node', provider: 'codex', sessionId: 'resync' },
+      text: textContent,
+      wireText: textContent,
+      files: [],
+      createdAt: Date.now(),
+    }]
+
+    f.receive({
+      type: 'Accepted',
+      sessionId: 'resync',
+      requestId: 'req-diverged-from-backend',
+      runId: 'run-diverged',
+      text: textContent,
+    })
+
+    const userMsg = f.fleet.messagesBySession[f.key].find(m => m.text === textContent)
+    assert.ok(userMsg, '用户消息应存在')
+    assert.equal(userMsg.delivery, 'sent', '气泡必须被兜底标为 sent')
+    assert.equal(f.fleet.outbox.length, 0, 'outbox 条目必须被核销清空')
+    f.clean()
+  })
+
+  await t.test('运行中发送：优先发 prompt.steer，idle 回执立刻发 prompt.send', async t => {
+    const f = fixture(t)
+    const hermesSession = { nodeId: 'node', provider: 'hermes', sessionId: 'steer-live-idle' }
+    const hermesKey = sessionKey(hermesSession.nodeId, hermesSession.provider, hermesSession.sessionId)
+    f.fleet.sessionsByKey[hermesKey] = { ...hermesSession, title: '测试运行中插话', cwd: '' }
+    f.fleet.nodes = [{ id: 'node', status: 'online', adapters: [] }]
+    f.fleet.runningBySession[hermesKey] = 'run-live'
+
+    await f.fleet.sendPromptToSpecificSession(hermesKey, '运行中必插话', [])
+
+    const steerReq = f.requests('prompt.steer').find(r => r.sessionId === 'steer-live-idle')
+    assert.ok(steerReq, '运行中必须直接发 prompt.steer')
+    assert.equal(steerReq.text, '运行中必插话')
+
+    f.receive({
+      type: 'SteerRejected',
+      sessionId: 'steer-live-idle',
+      requestId: steerReq.requestId,
+      code: 'idle',
+    })
+
+    await new Promise(resolve => setImmediate(resolve))
+
+    const sendReq = f.requests('prompt.send').find(r => r.sessionId === 'steer-live-idle')
+    assert.ok(sendReq, '收到 idle 时必须立刻自动发 prompt.send')
+    assert.equal(sendReq.text, '运行中必插话')
+    f.clean()
+  })
+
 })
 
 test('首页实测用量按代理轮次去重并隔离本机记录', t => {

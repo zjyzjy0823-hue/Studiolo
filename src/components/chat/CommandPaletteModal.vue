@@ -262,7 +262,7 @@ dialog.cmd-dialog::backdrop {
   outline: none;
   background: transparent;
   color: var(--text);
-  font-size: 13.5px;
+  font-size: calc(13.5px * var(--fs));
 }
 .cmd-list {
   flex: 1;
@@ -276,7 +276,7 @@ dialog.cmd-dialog::backdrop {
 .cmd-empty {
   padding: 24px;
   text-align: center;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
 }
 .cmd-row {
   display: flex;
@@ -306,14 +306,14 @@ dialog.cmd-dialog::backdrop {
   gap: 2px;
 }
 .cmd-row-title {
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .cmd-row-sub {
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -326,6 +326,6 @@ dialog.cmd-dialog::backdrop {
   background: var(--surface-2);
   border: 1px solid var(--line);
   color: var(--text-3);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
 }
 </style>

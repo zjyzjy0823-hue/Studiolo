@@ -174,11 +174,11 @@ function formatSize(bytes: number): string {
   background: var(--surface-2);
   flex: none;
 }
-.wt-hdr-title { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; }
+.wt-hdr-title { display: flex; align-items: center; gap: 6px; font-size: calc(12.5px * var(--fs)); font-weight: 600; }
 .wt-hdr-ic { width: 14px; height: 14px; color: var(--accent); }
 .wt-actions { display: flex; align-items: center; gap: 4px; }
 .wt-body { flex: 1; min-height: 0; overflow: auto; padding: 6px 4px; }
-.wt-empty { padding: 24px 12px; text-align: center; font-size: 12px; display: grid; gap: 8px; justify-items: center; }
+.wt-empty { padding: 24px 12px; text-align: center; font-size: calc(12px * var(--fs)); display: grid; gap: 8px; justify-items: center; }
 .wt-row {
   display: flex;
   align-items: center;
@@ -197,7 +197,7 @@ function formatSize(bytes: number): string {
   border: 0;
   background: transparent;
   color: var(--text);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   text-align: left;
   cursor: pointer;
 }
@@ -205,7 +205,7 @@ function formatSize(bytes: number): string {
 .wt-chev-spacer { width: 11px; flex: none; }
 .wt-ic { width: 13px; height: 13px; color: var(--text-3); flex: none; }
 .wt-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wt-size { font-size: 10.5px; color: var(--text-3); flex: none; }
+.wt-size { font-size: calc(10.5px * var(--fs)); color: var(--text-3); flex: none; }
 .wt-cite-btn {
   opacity: 0;
   padding: 1px 5px;
@@ -213,7 +213,7 @@ function formatSize(bytes: number): string {
   border-radius: 4px;
   background: var(--surface-1);
   color: var(--accent);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   cursor: pointer;
 }
 .wt-row:hover .wt-cite-btn, .wt-cite-btn:focus-visible { opacity: 1; }

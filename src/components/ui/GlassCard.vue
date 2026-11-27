@@ -29,7 +29,7 @@ defineProps<{
 .glass-card__header { justify-content: space-between; margin-bottom: 12px; }
 .glass-card__heading, .glass-card__body { min-width: 0; }
 .glass-card__kicker { display: none; }
-.glass-card__title { margin: 0; color: var(--text); font-size: 14px; font-weight: 650; line-height: 1.25; }
+.glass-card__title { margin: 0; color: var(--text); font-size: calc(14px * var(--fs)); font-weight: 650; line-height: 1.25; }
 .glass-card__action { flex: none; display: flex; align-items: center; }
 .glass-card__body { flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; }
 </style>

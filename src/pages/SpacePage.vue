@@ -1758,7 +1758,7 @@ defineExpose({
                 <div>
                   <strong>{{ tk.name }}</strong>
                   <span class="faint mono"> · ****{{ tk.tokenLast4 }} · {{ tk.scopes.join('/') }}</span>
-                  <div class="faint" style="font-size: 12px">
+                  <div class="faint" style="font-size: calc(12px * var(--fs))">
                     {{ tk.entryIds ? `${tk.entryIds.length} 条` : '全部' }}
                     <span v-if="tk.revokedAt"> · 已吊销</span>
                     <span v-else-if="tk.lastUsedAt"> · {{ tk.lastUsedAt.slice(0, 19).replace('T', ' ') }}</span>
@@ -1959,7 +1959,7 @@ defineExpose({
               <small>{{ tierMeta[tier].hint }}</small>
             </button>
           </div>
-          <p v-if="spaceStore.capabilities && !spaceStore.capabilities.protectedAvailable" class="faint" style="margin: 2px 0 0; font-size: 11.5px">
+          <p v-if="spaceStore.capabilities && !spaceStore.capabilities.protectedAvailable" class="faint" style="margin: 2px 0 0; font-size: calc(11.5px * var(--fs))">
             受控机密需配置 STUDIOLO_VAULT_MASTER_KEY
           </p>
         </div>
@@ -2046,7 +2046,7 @@ defineExpose({
 
 .nav-empty-hint {
   padding: 12px 6px;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   line-height: 1.55;
 }
 
@@ -2079,7 +2079,7 @@ defineExpose({
 
 .col-nav-title h2 {
   margin: 0;
-  font-size: 14.5px;
+  font-size: calc(14.5px * var(--fs));
   font-weight: 600;
   letter-spacing: -0.01em;
 }
@@ -2094,7 +2094,7 @@ defineExpose({
   border-radius: var(--r-pill, 999px);
   background: var(--surface-3);
   color: var(--text-2);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   font-weight: 600;
 }
 
@@ -2144,12 +2144,12 @@ defineExpose({
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13.5px;
+  font-size: calc(13.5px * var(--fs));
   font-weight: 600;
 }
 
 .space-nav-desc {
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2159,7 +2159,7 @@ defineExpose({
   display: flex;
   justify-content: space-between;
   gap: 8px;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
 }
 
 .quota-track {
@@ -2190,12 +2190,12 @@ defineExpose({
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
 }
 
 .space-nav-foot p {
   margin: 0;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   line-height: 1.45;
 }
 
@@ -2206,7 +2206,7 @@ defineExpose({
   gap: 5px;
   padding: 2px 8px;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   font-weight: 600;
   flex-shrink: 0;
 }
@@ -2261,7 +2261,7 @@ defineExpose({
 
 .catalog-title {
   margin: 0;
-  font-size: 15px;
+  font-size: calc(15px * var(--fs));
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2271,7 +2271,7 @@ defineExpose({
 }
 
 .epoch-tag {
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   padding: 1px 6px;
   border-radius: 6px;
   border: 1px solid var(--line);
@@ -2291,7 +2291,7 @@ defineExpose({
 .catalog-segment button {
   padding: 5px 6px;
   border-radius: 7px;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   color: var(--text-2);
   font-weight: 500;
   transition: background var(--dur-1, 120ms), color var(--dur-1, 120ms);
@@ -2320,7 +2320,7 @@ defineExpose({
 }
 
 .search-ic {
-  font-size: 14px;
+  font-size: calc(14px * var(--fs));
   flex-shrink: 0;
 }
 
@@ -2328,7 +2328,7 @@ defineExpose({
   width: 100%;
   border: 0;
   background: transparent;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   outline: none;
 }
 
@@ -2349,7 +2349,7 @@ defineExpose({
   border: 1px solid var(--line);
   background: transparent;
   color: var(--text-2);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   white-space: nowrap;
   flex-shrink: 0;
   transition: background var(--dur-1, 120ms), border-color var(--dur-1, 120ms), color var(--dur-1, 120ms);
@@ -2377,7 +2377,7 @@ defineExpose({
   border: 1px dashed var(--accent-line, var(--accent));
   background: var(--accent-soft);
   color: var(--accent);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   font-weight: 500;
 }
 
@@ -2423,7 +2423,7 @@ defineExpose({
   border-radius: 9px;
   display: grid;
   place-items: center;
-  font-size: 14px;
+  font-size: calc(14px * var(--fs));
   background: var(--surface-3);
   color: var(--text-2);
   flex-shrink: 0;
@@ -2433,7 +2433,7 @@ defineExpose({
   width: 24px;
   height: 24px;
   border-radius: 7px;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
 }
 
 .entry-ic.type-file {
@@ -2470,12 +2470,12 @@ defineExpose({
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13px;
+  font-size: calc(13px * var(--fs));
   font-weight: 600;
 }
 
 .entry-lock-ic {
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   flex-shrink: 0;
 }
 
@@ -2483,7 +2483,7 @@ defineExpose({
   display: flex;
   align-items: center;
   gap: 5px;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   overflow: hidden;
 }
 
@@ -2495,7 +2495,7 @@ defineExpose({
 }
 
 .conflict-tag {
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   padding: 1px 6px;
   border-radius: 6px;
   background: var(--danger-soft, rgba(220, 38, 38, 0.12));
@@ -2506,7 +2506,7 @@ defineExpose({
 .catalog-empty {
   padding: 36px 16px;
   text-align: center;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   display: grid;
   gap: 4px;
 }
@@ -2534,7 +2534,7 @@ defineExpose({
   border: 1px solid var(--line-strong);
   background: var(--surface-2);
   color: var(--text);
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   font-weight: 600;
   display: inline-flex;
   align-items: center;
@@ -2564,7 +2564,7 @@ defineExpose({
   border-radius: 999px;
   background: var(--accent-soft);
   color: var(--accent);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   font-weight: 700;
 }
 
@@ -2605,14 +2605,14 @@ defineExpose({
 
 .canvas-title {
   margin: 0;
-  font-size: 17px;
+  font-size: calc(17px * var(--fs));
   font-weight: 650;
   letter-spacing: -0.015em;
 }
 
 .canvas-subtitle {
   margin: 4px 0 0;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
 }
 
 .canvas-mode-switch {
@@ -2627,7 +2627,7 @@ defineExpose({
 .canvas-mode-switch button {
   padding: 6px 12px;
   border-radius: 8px;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   font-weight: 500;
   color: var(--text-2);
   display: inline-flex;
@@ -2669,7 +2669,7 @@ defineExpose({
   border: 1px solid var(--line);
   background: var(--surface-2);
   color: var(--text-2);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   font-weight: 500;
   display: inline-flex;
   align-items: center;
@@ -2704,7 +2704,7 @@ defineExpose({
   width: 100%;
   border: 0;
   background: transparent;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   outline: none;
 }
 
@@ -2713,7 +2713,7 @@ defineExpose({
   border: 0;
   border-bottom: 1px solid var(--line);
   padding: 8px 2px 10px;
-  font-size: 19px;
+  font-size: calc(19px * var(--fs));
   font-weight: 650;
   letter-spacing: -0.015em;
   background: transparent;
@@ -2732,7 +2732,7 @@ defineExpose({
   border-radius: 14px;
   border: 1px solid var(--line);
   background: var(--surface-2);
-  font-size: 13.5px;
+  font-size: calc(13.5px * var(--fs));
   line-height: 1.65;
   resize: vertical;
   outline: none;
@@ -2756,7 +2756,7 @@ defineExpose({
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
 }
 
 .compose-foot-actions {
@@ -2810,7 +2810,7 @@ defineExpose({
   border: 1px solid var(--line);
   display: grid;
   place-items: center;
-  font-size: 22px;
+  font-size: calc(22px * var(--fs));
   color: var(--accent);
   box-shadow: var(--shadow-1);
 }
@@ -2822,12 +2822,12 @@ defineExpose({
 }
 
 .dropzone-copy strong {
-  font-size: 15px;
+  font-size: calc(15px * var(--fs));
 }
 
 .dropzone-copy p {
   margin: 0;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
 }
 
 .e2ee-note {
@@ -2846,7 +2846,7 @@ defineExpose({
   border: 1px solid var(--line-strong);
   background: var(--solid);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
 }
 
 .upload-queue {
@@ -2864,7 +2864,7 @@ defineExpose({
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  font-size: 13px;
+  font-size: calc(13px * var(--fs));
 }
 
 .upload-queue-tools {
@@ -2909,7 +2909,7 @@ defineExpose({
   color: var(--accent);
   display: grid;
   place-items: center;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   font-weight: 700;
   flex-shrink: 0;
 }
@@ -2925,7 +2925,7 @@ defineExpose({
   width: 100%;
   border: 0;
   background: transparent;
-  font-size: 13px;
+  font-size: calc(13px * var(--fs));
   font-weight: 600;
   padding: 2px 4px;
   border-radius: 6px;
@@ -2940,7 +2940,7 @@ defineExpose({
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   padding-left: 4px;
 }
 
@@ -2951,7 +2951,7 @@ defineExpose({
   border-radius: 7px;
   border: 1px solid var(--line);
   background: var(--solid);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   outline: none;
 }
 
@@ -2969,7 +2969,7 @@ defineExpose({
   border-radius: 11px;
   border: 1px solid var(--line);
   background: var(--surface-2);
-  font-size: 13px;
+  font-size: calc(13px * var(--fs));
   line-height: 1.55;
   resize: vertical;
   min-height: 78px;
@@ -3003,7 +3003,7 @@ defineExpose({
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
 }
 
 .detail-type-label {
@@ -3013,7 +3013,7 @@ defineExpose({
 
 .detail-title {
   margin: 0;
-  font-size: 19px;
+  font-size: calc(19px * var(--fs));
   font-weight: 650;
   letter-spacing: -0.015em;
   word-break: break-word;
@@ -3030,7 +3030,7 @@ defineExpose({
   border-radius: 999px;
   background: var(--surface-3);
   color: var(--text-2);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
 }
 
 .detail-head-actions {
@@ -3065,7 +3065,7 @@ defineExpose({
 }
 
 .file-hero-meta strong {
-  font-size: 14.5px;
+  font-size: calc(14.5px * var(--fs));
   word-break: break-all;
 }
 
@@ -3114,7 +3114,7 @@ defineExpose({
   padding: 8px 12px;
   border-bottom: 1px solid var(--line);
   background: var(--surface-2);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
 }
 
 .prose-actions {
@@ -3127,7 +3127,7 @@ defineExpose({
   margin: 0;
   padding: 16px;
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: calc(13px * var(--fs));
   line-height: 1.65;
   white-space: pre-wrap;
   word-break: break-word;
@@ -3137,7 +3137,7 @@ defineExpose({
 
 .content-pre.is-plain {
   font-family: var(--font-sans);
-  font-size: 14px;
+  font-size: calc(14px * var(--fs));
 }
 
 .locked-vault-card {
@@ -3160,7 +3160,7 @@ defineExpose({
   border: 1px solid var(--line);
   display: grid;
   place-items: center;
-  font-size: 20px;
+  font-size: calc(20px * var(--fs));
   color: var(--accent);
   box-shadow: var(--shadow-1);
 }
@@ -3179,7 +3179,7 @@ defineExpose({
   border-radius: 11px;
   background: var(--ok-soft, rgba(23, 130, 79, 0.1));
   color: var(--ok, #17824f);
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   font-weight: 500;
 }
 
@@ -3195,7 +3195,7 @@ defineExpose({
 .api-disclosure summary {
   list-style: none;
   padding: 10px 14px;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   font-weight: 600;
   color: var(--text-2);
   display: flex;
@@ -3224,7 +3224,7 @@ defineExpose({
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
 }
 
 .api-code {
@@ -3234,7 +3234,7 @@ defineExpose({
   border: 1px solid var(--line);
   background: var(--solid);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-all;
@@ -3266,12 +3266,12 @@ defineExpose({
 
 .subpanel-card h4 {
   margin: 0;
-  font-size: 14px;
+  font-size: calc(14px * var(--fs));
 }
 
 .subpanel-card p {
   margin: 0;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   line-height: 1.55;
 }
 
@@ -3289,7 +3289,7 @@ defineExpose({
   gap: 16px;
   flex-wrap: wrap;
   align-items: center;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
 }
 
 .brand-check {
@@ -3356,7 +3356,7 @@ defineExpose({
     top: 50%;
     transform: translateY(-50%);
     color: var(--accent-ink, #fff);
-    font-size: 11px;
+    font-size: calc(11px * var(--fs));
     font-weight: 700;
   }
 
@@ -3414,7 +3414,7 @@ defineExpose({
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
 }
 
 .token-item,
@@ -3424,7 +3424,7 @@ defineExpose({
   gap: 10px;
   padding: 10px 0;
   border-top: 1px solid var(--line);
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
 }
 
 .audit-detail {
@@ -3437,13 +3437,13 @@ defineExpose({
 
 .audit-time {
   flex-shrink: 0;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
 }
 
 .audit-outcome {
   padding: 2px 7px;
   border-radius: 6px;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   font-weight: 600;
 }
 
@@ -3477,13 +3477,13 @@ defineExpose({
   color: var(--accent);
   display: grid;
   place-items: center;
-  font-size: 22px;
+  font-size: calc(22px * var(--fs));
   box-shadow: var(--shadow-1);
 }
 
 .canvas-welcome h3 {
   margin: 0;
-  font-size: 20px;
+  font-size: calc(20px * var(--fs));
   font-weight: 650;
   letter-spacing: -0.02em;
 }
@@ -3491,7 +3491,7 @@ defineExpose({
 .welcome-lead {
   margin: 0;
   max-width: 460px;
-  font-size: 13px;
+  font-size: calc(13px * var(--fs));
   line-height: 1.6;
 }
 
@@ -3535,12 +3535,12 @@ defineExpose({
 }
 
 .welcome-tier-card strong {
-  font-size: 14px;
+  font-size: calc(14px * var(--fs));
 }
 
 .welcome-tier-card p {
   margin: 0;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   line-height: 1.5;
 }
 
@@ -3575,7 +3575,7 @@ defineExpose({
   border-radius: 10px;
   background: var(--danger-soft);
   color: var(--danger);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
 }
 
 /* 全屏拖拽浮层 */
@@ -3612,7 +3612,7 @@ defineExpose({
   color: var(--accent);
   display: grid;
   place-items: center;
-  font-size: 20px;
+  font-size: calc(20px * var(--fs));
 }
 
 /* 原生 <dialog> 新建空间弹窗 */
@@ -3638,13 +3638,13 @@ dialog.space-dlg::backdrop {
 
 .space-dlg-form h3 {
   margin: 0;
-  font-size: 16px;
+  font-size: calc(16px * var(--fs));
 }
 
 .form-field {
   display: grid;
   gap: 6px;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
 }
 
 .tier-picker {
@@ -3684,7 +3684,7 @@ dialog.space-dlg::backdrop {
 
 .tier-option small {
   color: var(--text-2);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
 }
 
 .modal-actions {

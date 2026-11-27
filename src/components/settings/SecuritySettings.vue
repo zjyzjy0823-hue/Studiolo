@@ -38,10 +38,10 @@ function update<K extends keyof SecurityConfig>(key: K, value: SecurityConfig[K]
 
 <style scoped>
 .security-hero { display: flex; align-items: center; gap: 12px; }
-.security-hero strong { color: var(--text); font-size: 14px; font-weight: 600; }
-.security-hero p { margin: 2px 0 0; color: var(--text-3); font-size: 12.5px; }
+.security-hero strong { color: var(--text); font-size: calc(14px * var(--fs)); font-weight: 600; }
+.security-hero p { margin: 2px 0 0; color: var(--text-3); font-size: calc(12.5px * var(--fs)); }
 .security-remote__title { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
 .security-remote__title > div:last-child { display: flex; flex-direction: column; gap: 2px; }
-.security-remote__title strong { color: var(--text); font-size: 14px; font-weight: 600; }
-.security-remote__title span { color: var(--text-3); font-size: 12px; }
+.security-remote__title strong { color: var(--text); font-size: calc(14px * var(--fs)); font-weight: 600; }
+.security-remote__title span { color: var(--text-3); font-size: calc(12px * var(--fs)); }
 </style>

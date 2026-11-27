@@ -221,36 +221,36 @@ onUnmounted(() => { password.value = '' })
 
 <style scoped>
 .sync-error, .count-warning { color: var(--danger); }
-.connection-details { display: grid; grid-template-columns: minmax(90px, auto) minmax(0, 1fr); gap: 8px 16px; margin: 0; font-size: 13px; line-height: 1.5; }
+.connection-details { display: grid; grid-template-columns: minmax(90px, auto) minmax(0, 1fr); gap: 8px 16px; margin: 0; font-size: calc(13px * var(--fs)); line-height: 1.5; }
 .connection-details dt { color: var(--text-3); }
 .connection-details dd { margin: 0; overflow-wrap: anywhere; color: var(--text); }
-.technical-details { margin-top: 12px; font-size: 12px; color: var(--text-3); }
+.technical-details { margin-top: 12px; font-size: calc(12px * var(--fs)); color: var(--text-3); }
 .technical-details summary { cursor: pointer; }
-.technical-details .connection-details { margin-top: 10px; font-size: 12px; }
-.sync-note, .sync-error, .sync-result { margin: 10px 0; font-size: 12.5px; line-height: 1.55; overflow-wrap: anywhere; }
+.technical-details .connection-details { margin-top: 10px; font-size: calc(12px * var(--fs)); }
+.sync-note, .sync-error, .sync-result { margin: 10px 0; font-size: calc(12.5px * var(--fs)); line-height: 1.55; overflow-wrap: anywhere; }
 .sync-note { color: var(--text-2); }
 .auto-sync-status { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 14px; color: var(--text-2); }
 .auto-sync-status > i { width: 7px; height: 7px; flex: 0 0 7px; margin-top: 6px; border-radius: 50%; background: currentColor; }
 .auto-sync-status > svg { flex-shrink: 0; margin-top: 2px; }
-.auto-sync-status strong { font-size: 13.5px; }
-.auto-sync-status p { margin: 2px 0 0; color: var(--text-2); font-size: 12.5px; line-height: 1.5; }
+.auto-sync-status strong { font-size: calc(13.5px * var(--fs)); }
+.auto-sync-status p { margin: 2px 0 0; color: var(--text-2); font-size: calc(12.5px * var(--fs)); line-height: 1.5; }
 .auto-sync-status--success { color: var(--ok); }
 .auto-sync-status--active { color: var(--accent); }
 .auto-sync-status--warning { color: var(--danger); }
 .sync-conflict-status { display: block; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; }
-.sync-conflict-status span { display: block; margin-top: 2px; font-size: 12.5px; }
+.sync-conflict-status span { display: block; margin-top: 2px; font-size: calc(12.5px * var(--fs)); }
 .sync-conflict-status:hover span { text-decoration: underline; }
 .sync-conflict-count { padding: 0; border: 0; color: inherit; background: transparent; font: inherit; }
 .sync-counts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0 0 16px; }
 .sync-counts div { padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-3); }
-.sync-counts dt { color: var(--text-3); font-size: 12px; }
-.sync-counts dd { margin: 4px 0 0; font-size: 20px; font-weight: 700; }
+.sync-counts dt { color: var(--text-3); font-size: calc(12px * var(--fs)); }
+.sync-counts dd { margin: 4px 0 0; font-size: calc(20px * var(--fs)); font-weight: 700; }
 .count-pending { color: var(--accent); }
 .sync-actions { justify-content: flex-end; }
 .sync-spin { animation: spin 1s linear infinite; }
 .sync-rejected-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-.sync-rejected-list li { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-3); font-size: 12.5px; }
-.sync-rejected-list li strong { display: block; font-size: 13px; }
+.sync-rejected-list li { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-3); font-size: calc(12.5px * var(--fs)); }
+.sync-rejected-list li strong { display: block; font-size: calc(13px * var(--fs)); }
 .sync-rejected-list li span { color: var(--text-3); }
 @media (max-width: 560px) { .sync-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); } .connection-details { grid-template-columns: 80px minmax(0, 1fr); gap: 8px; } }
 [data-motion="reduced"] .sync-spin { animation: none; }

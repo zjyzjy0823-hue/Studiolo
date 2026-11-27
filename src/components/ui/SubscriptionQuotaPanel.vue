@@ -118,15 +118,15 @@ function windowLabel(window: SubscriptionQuotaWindow) {
 .quota-provider + .quota-provider { border-top: 1px solid var(--line); }
 .provider-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .provider-copy { display: grid; flex: 1; min-width: 0; gap: 3px; }
-.provider-copy strong { font-size: 13px; font-weight: 650; }
-.provider-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; }
-.quota-node { width: auto; max-width: 132px; min-height: 26px; padding: 2px 6px; font-size: 11.5px; }
+.provider-copy strong { font-size: calc(13px * var(--fs)); font-weight: 650; }
+.provider-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: calc(11.5px * var(--fs)); }
+.quota-node { width: auto; max-width: 132px; min-height: 26px; padding: 2px 6px; font-size: calc(11.5px * var(--fs)); }
 .quota-action { display: inline-flex; gap: 5px; align-items: center; white-space: nowrap; }
 .quota-windows { display: grid; gap: 12px; }
 .quota-window { display: grid; gap: 5px; }
-.quota-window-heading { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; }
+.quota-window-heading { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 10px; font-size: calc(12px * var(--fs)); }
 .quota-meter { overflow: hidden; height: 5px; border-radius: 9px; background: var(--surface-3); }
 .quota-meter span { display: block; height: 100%; border-radius: inherit; background: var(--text); }
-.quota-window small, .quota-status { font-size: 11px; }
+.quota-window small, .quota-status { font-size: calc(11px * var(--fs)); }
 .quota-status { margin: 0; }
 </style>

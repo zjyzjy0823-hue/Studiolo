@@ -271,7 +271,7 @@ function submitForm() {
   border-radius: var(--r-md);
   background: var(--surface-1);
   overflow: hidden;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
 }
 .form-card.is-submitted {
   border-color: var(--line);
@@ -297,7 +297,7 @@ function submitForm() {
   gap: 4px;
   padding: 2px 7px;
   border-radius: var(--r-full);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   font-weight: 500;
 }
 .form-badge.is-pending { background: var(--accent-soft); color: var(--accent); }
@@ -314,9 +314,9 @@ function submitForm() {
   flex-direction: column;
   gap: 5px;
 }
-.form-label { font-weight: 600; font-size: 12px; color: var(--text-2); }
+.form-label { font-weight: 600; font-size: calc(12px * var(--fs)); color: var(--text-2); }
 .form-req { color: var(--warn); margin-left: 3px; }
-.form-desc { margin: 0; font-size: 11.5px; color: var(--text-3); }
+.form-desc { margin: 0; font-size: calc(11.5px * var(--fs)); color: var(--text-3); }
 .form-options, .form-bool-row {
   display: flex;
   flex-wrap: wrap;
@@ -332,7 +332,7 @@ function submitForm() {
   border: 1px solid var(--line-strong);
   background: var(--surface-2);
   color: var(--text);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   cursor: pointer;
   transition: border-color 0.14s, background 0.14s;
 }
@@ -344,7 +344,7 @@ function submitForm() {
 }
 .form-opt-ck { width: 12px; height: 12px; margin-right: 4px; }
 .form-opt-lbl { font-weight: 500; }
-.form-opt-sub { font-size: 11px; color: var(--text-3); }
+.form-opt-sub { font-size: calc(11px * var(--fs)); color: var(--text-3); }
 .form-input {
   width: 100%;
   padding: 6px 9px;
@@ -352,10 +352,10 @@ function submitForm() {
   border: 1px solid var(--line-strong);
   background: var(--surface-2);
   color: var(--text);
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
 }
 .form-input:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
-.form-err { margin: 0; font-size: 11.5px; color: var(--warn); }
+.form-err { margin: 0; font-size: calc(11.5px * var(--fs)); color: var(--warn); }
 .form-actions {
   display: flex;
   justify-content: flex-end;
@@ -372,7 +372,7 @@ function submitForm() {
   padding: 2px 8px;
   border-radius: var(--r-full);
   background: var(--surface-3);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   color: var(--text-2);
 }
 .form-ext-link { align-self: flex-start; text-decoration: none; }

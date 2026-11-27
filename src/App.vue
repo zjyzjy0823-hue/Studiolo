@@ -384,7 +384,7 @@ onUnmounted(() => {
           <div class="msearch"><OpusIcon name="search" /><input v-model="libraryQuery" placeholder="搜索账本、网站、记录…" aria-label="搜索"></div>
           <button class="vault-entry mat" type="button" @click="navigate('Space')">
             <span class="lk"><OpusIcon name="lock" /></span>
-            <span style="flex:1;min-width:0"><div style="font-weight:650;font-size:15px">共享空间</div><div class="faint" style="font-size:12.5px">普通随时看 · 机密按次输密 · 极密 E2EE</div></span><OpusIcon name="chevR" />
+            <span style="flex:1;min-width:0"><div style="font-weight:650;font-size:calc(15px * var(--fs))">共享空间</div><div class="faint" style="font-size:calc(12.5px * var(--fs))">普通随时看 · 机密按次输密 · 极密 E2EE</div></span><OpusIcon name="chevR" />
           </button>
           <OpusSegment class="mseg" role="group" aria-label="资料类型"><button v-for="item in libraryItems" :key="item.page" type="button" :aria-pressed="currentPage === item.page" @click="navigate(item.page, undefined, 'replace')">{{ item.label }}</button></OpusSegment>
         </template>
@@ -403,10 +403,10 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.auth-loading { display:grid; min-height:100dvh; place-items:center; color:var(--text); background:var(--bg); font-size:14px; }
+.auth-loading { display:grid; min-height:100dvh; place-items:center; color:var(--text); background:var(--bg); font-size:calc(14px * var(--fs)); }
 .auth-loading--error { align-content:center; gap:14px; }
 .auth-loading--error p { margin:0; }
 .auth-error-panel { display:grid; justify-items:center; gap:18px; width:min(520px,calc(100vw - 40px)); padding:28px; border-radius:var(--r-xl); background:var(--solid); color:var(--text); box-shadow:var(--shadow-pop); line-height:1.7; text-align:center; }
 .auth-loading--error button { padding:9px 16px; border-radius:var(--r-sm); color:var(--text); background:var(--surface-3); cursor:pointer; }
-.auth-toast { position:fixed; right:24px; bottom:24px; color:var(--inv); background:var(--text); padding:9px 14px; border-radius:var(--r-md); box-shadow:var(--shadow-pop); font-size:13px; }
+.auth-toast { position:fixed; right:24px; bottom:24px; color:var(--inv); background:var(--text); padding:9px 14px; border-radius:var(--r-md); box-shadow:var(--shadow-pop); font-size:calc(13px * var(--fs)); }
 </style>

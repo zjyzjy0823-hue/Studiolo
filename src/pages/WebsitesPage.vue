@@ -204,7 +204,7 @@ onUnmounted(() => { document.removeEventListener('pointerdown', onDocumentPointe
               class="fav"
               :class="{ 'fav--img': hasValidIcon(item) }"
               :style="{ width: '36px', height: '36px', borderRadius: '10px', background: hasValidIcon(item) ? undefined : colors[i % colors.length] }"
-            ><img v-if="hasValidIcon(item)" class="opus-favicon" :src="item.icon ?? undefined" alt="" @error="markIconFailed(item.id)"><template v-else>{{ item.name[0] }}</template></span><div style="min-width:0"><div style="font-weight:600">{{ item.name }}</div><div class="faint" style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ item.url }}</div></div></div>
+            ><img v-if="hasValidIcon(item)" class="opus-favicon" :src="item.icon ?? undefined" alt="" @error="markIconFailed(item.id)"><template v-else>{{ item.name[0] }}</template></span><div style="min-width:0"><div style="font-weight:600">{{ item.name }}</div><div class="faint" style="font-size:calc(12px * var(--fs));overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ item.url }}</div></div></div>
             <div class="foot"><span class="chip">{{ store.categories.find(category => category.id === item.categoryId)?.name ?? '未分类' }}</span><span>{{ item.lastVisitedAt ? '最近访问 ' + new Date(item.lastVisitedAt).toLocaleDateString('zh-CN') : '尚未访问' }}</span><span v-if="item.favorite" class="faint" style="margin-left:auto">★ 已收藏</span></div>
           </template>
         </ExternalLinkButton>
@@ -243,7 +243,7 @@ onUnmounted(() => { document.removeEventListener('pointerdown', onDocumentPointe
       <p v-if="categoryError" class="dlg-error" role="alert">{{ categoryError }}</p>
       <div class="list" style="margin-top:8px">
         <div v-for="category in store.categories" :key="category.id" class="row"><span class="grow">{{ category.name }}</span><button class="btn btn-sm btn-subtle" type="button" @click="renameCategory(category.id, category.name)">重命名</button><button class="btn btn-sm btn-danger" type="button" @click="removeCategory(category.id, category.name)">删除</button></div>
-        <div v-if="!store.categories.length" class="faint" style="padding:12px 0;font-size:12.5px">暂无自定义分类</div>
+        <div v-if="!store.categories.length" class="faint" style="padding:12px 0;font-size:calc(12.5px * var(--fs))">暂无自定义分类</div>
       </div>
     </Modal>
   </div>

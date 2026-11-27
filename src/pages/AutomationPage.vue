@@ -334,14 +334,14 @@ onUnmounted(() => { clearInterval(poll) })
           <tr v-for="item in filtered" :key="item.id" :class="{ 'is-selected': selected?.id === item.id }" data-pressable @click="chooseTask(item)">
             <td><button class="task-name" type="button" style="text-align:left" @click.stop="chooseTask(item)"><b>{{ item.name }}</b><span>{{ actionLabel(item) }}</span></button></td>
             <td><span class="owner o-studiolo"><span class="mark"><OpusIcon name="studiolo" /></span>Studiolo</span></td>
-            <td><div class="task-name"><span style="color:var(--text);font-size:13px">{{ triggers[item.triggerType as keyof typeof triggers] ?? '旧版配置' }}</span><span v-if="item.triggerType === 'schedule'">{{ scheduleValue(item, 'timezone') }}</span></div></td>
+            <td><div class="task-name"><span style="color:var(--text);font-size:calc(13px * var(--fs))">{{ triggers[item.triggerType as keyof typeof triggers] ?? '旧版配置' }}</span><span v-if="item.triggerType === 'schedule'">{{ scheduleValue(item, 'timezone') }}</span></div></td>
             <td class="muted">{{ date(store.runtimes[item.id]?.nextRunAt) }}</td>
             <td><div class="task-name"><span class="run" :class="jobState(item)">{{ jobLabels[jobState(item)] }}</span><span>{{ date(store.runtimes[item.id]?.lastRunAt) }}</span></div></td>
           </tr>
           <tr v-for="rjob in filteredRemote" :key="jobRefKey(rjob.ref)" :class="{ 'is-selected': selectedRemoteKey === jobRefKey(rjob.ref) }" data-pressable @click="chooseRemoteTask(rjob)">
             <td><button class="task-name" type="button" style="text-align:left" @click.stop="chooseRemoteTask(rjob)"><b>{{ rjob.name }}</b><span>{{ rjob.description || `Profile: ${rjob.ref.ownerProfile}` }}</span></button></td>
             <td><span class="owner" :class="'o-' + rjob.ref.ownerType"><span class="mark"><OpusIcon :name="rjob.ref.ownerType === 'openclaw' ? 'claw' : 'hermes'" /></span>{{ rjob.ownerLabel }}</span></td>
-            <td><div class="task-name"><span class="mono" style="color:var(--text);font-size:12.5px">{{ rjob.scheduleExpression }}</span><span>{{ rjob.timezone }}</span></div></td>
+            <td><div class="task-name"><span class="mono" style="color:var(--text);font-size:calc(12.5px * var(--fs))">{{ rjob.scheduleExpression }}</span><span>{{ rjob.timezone }}</span></div></td>
             <td class="muted">{{ date(rjob.nextRunAt) }}</td>
             <td><div class="task-name"><span class="run" :class="remoteJobState(rjob)">{{ jobLabels[remoteJobState(rjob)] }}</span><span>{{ date(rjob.lastRunAt) }}</span></div></td>
           </tr>
@@ -353,8 +353,8 @@ onUnmounted(() => { clearInterval(poll) })
         <template v-if="selectedRemote">
           <div style="display:flex;align-items:flex-start;gap:10px">
             <div class="grow">
-              <h3 style="margin:0;font-size:17px">{{ selectedRemote.name }}</h3>
-              <div class="faint" style="font-size:12px;margin-top:2px">{{ selectedRemote.ownerLabel }} · Profile: {{ selectedRemote.ref.ownerProfile }} · <span class="run" :class="remoteJobState(selectedRemote)">{{ jobLabels[remoteJobState(selectedRemote)] }}</span></div>
+              <h3 style="margin:0;font-size:calc(17px * var(--fs))">{{ selectedRemote.name }}</h3>
+              <div class="faint" style="font-size:calc(12px * var(--fs));margin-top:2px">{{ selectedRemote.ownerLabel }} · Profile: {{ selectedRemote.ref.ownerProfile }} · <span class="run" :class="remoteJobState(selectedRemote)">{{ jobLabels[remoteJobState(selectedRemote)] }}</span></div>
             </div>
             <button class="switch" type="button" role="switch" aria-label="启用远端任务" :aria-checked="selectedRemote.enabled" :disabled="remoteBusy || !selectedRemote.capabilities.canPause" @click="toggleRemotePause(selectedRemote)"></button>
           </div>
@@ -380,7 +380,7 @@ onUnmounted(() => { clearInterval(poll) })
             <div v-else class="timeline" style="margin-top:10px">
               <div v-for="run in selectedRemoteRuns?.runs ?? []" :key="run.nativeRunId" class="t">
                 <span class="dot" :class="run.status === 'failed' ? 'danger' : run.status === 'succeeded' ? 'ok' : 'unknown'"></span>
-                <span>{{ statuses[run.status] ?? run.status }}<div class="faint" style="font-size:12px">{{ run.summary || run.nativeStatus }}</div></span>
+                <span>{{ statuses[run.status] ?? run.status }}<div class="faint" style="font-size:calc(12px * var(--fs))">{{ run.summary || run.nativeStatus }}</div></span>
                 <span class="when">{{ date(run.startedAt ?? run.scheduledAt) }}</span>
               </div>
               <div v-if="!(selectedRemoteRuns?.runs?.length)" class="faint">暂无远端执行记录</div>
@@ -389,7 +389,7 @@ onUnmounted(() => { clearInterval(poll) })
         </template>
         <template v-else-if="selected && (mobile || filtered.some(item => item.id === selected?.id))">
           <template v-if="mobile">
-            <div style="padding:4px 4px 14px"><h2 style="margin:0 0 4px;font-size:22px">{{ selected.name }}</h2><span class="run" :class="jobState(selected)">{{ jobLabels[jobState(selected)] }}</span><span class="faint" style="font-size:12.5px"> · {{ triggers[selected.triggerType as keyof typeof triggers] }}</span></div>
+            <div style="padding:4px 4px 14px"><h2 style="margin:0 0 4px;font-size:calc(22px * var(--fs))">{{ selected.name }}</h2><span class="run" :class="jobState(selected)">{{ jobLabels[jobState(selected)] }}</span><span class="faint" style="font-size:calc(12.5px * var(--fs))"> · {{ triggers[selected.triggerType as keyof typeof triggers] }}</span></div>
             <div class="owner-box oc-studiolo"><div><span class="owner o-studiolo"><span class="mark"><OpusIcon name="studiolo" /></span>Studiolo</span></div><div>由 Studiolo Core 执行，历史保存在 Core。</div></div>
             <div class="mbtns">
               <button class="btn btn-primary" type="button" :disabled="store.loading || !selected.workflowJson.some(node => node.action)" @click="auth.token && selected && operate(() => store.run(auth.token!, selected!.id))"><OpusIcon name="play" />立即运行</button>
@@ -413,7 +413,7 @@ onUnmounted(() => { clearInterval(poll) })
             </div>
           </template>
           <template v-else>
-            <div style="display:flex;align-items:flex-start;gap:10px"><div class="grow"><h3 style="margin:0;font-size:17px">{{ selected.name }}</h3><div class="faint" style="font-size:12px;margin-top:2px">{{ triggers[selected.triggerType as keyof typeof triggers] }} · <span class="run" :class="jobState(selected)">{{ jobLabels[jobState(selected)] }}</span></div></div><button class="switch" type="button" role="switch" aria-label="启用任务" :aria-checked="selected.enabled" :disabled="store.loading" @click="auth.token && selected && operate(() => store.update(auth.token!, selected!.id, { enabled: !selected!.enabled }))"></button></div>
+            <div style="display:flex;align-items:flex-start;gap:10px"><div class="grow"><h3 style="margin:0;font-size:calc(17px * var(--fs))">{{ selected.name }}</h3><div class="faint" style="font-size:calc(12px * var(--fs));margin-top:2px">{{ triggers[selected.triggerType as keyof typeof triggers] }} · <span class="run" :class="jobState(selected)">{{ jobLabels[jobState(selected)] }}</span></div></div><button class="switch" type="button" role="switch" aria-label="启用任务" :aria-checked="selected.enabled" :disabled="store.loading" @click="auth.token && selected && operate(() => store.update(auth.token!, selected!.id, { enabled: !selected!.enabled }))"></button></div>
             <div class="owner-card oc-studiolo"><div class="ttl"><span class="owner o-studiolo"><span class="mark"><OpusIcon name="studiolo" /></span>Studiolo</span></div><p>由 Studiolo Core 执行，历史保存在 Core。</p></div>
             <dl class="sched"><dt>计划</dt><dd>{{ triggers[selected.triggerType as keyof typeof triggers] ?? '旧版配置' }}</dd><dt>原生表达</dt><dd class="mono">{{ scheduleValue(selected, 'time') }}</dd><dt>所有者时区</dt><dd>{{ scheduleValue(selected, 'timezone') }}</dd><dt>下次运行</dt><dd>{{ date(store.runtimes[selected.id]?.nextRunAt) }}</dd></dl>
             <div class="btn-row">
@@ -421,7 +421,7 @@ onUnmounted(() => { clearInterval(poll) })
               <button class="btn btn-ghost" type="button" :disabled="store.loading" @click="selected && simulate(selected)">模拟测试</button><button class="btn btn-ghost" type="button" @click="selected && edit(selected)"><OpusIcon name="pencil" />编辑</button><button class="btn btn-danger" type="button" @click="selected && remove(selected)">删除</button>
             </div>
             <div><div class="card-h" style="margin-bottom:6px"><OpusIcon name="history" /> 运行历史<span class="spacer"></span><span class="chip">来源：Studiolo Core</span></div>
-              <div class="timeline" style="margin-top:10px"><button v-for="item in history" :key="item.id" class="t" type="button" style="text-align:left" @click="showDetail(item)"><span class="dot" :class="item.status === 'failed' ? 'danger' : item.status === 'succeeded' ? 'ok' : 'unknown'"></span><span>{{ statuses[item.status] }}<small v-if="item.triggerType === 'simulation'"> · 模拟</small><span class="faint"> · {{ duration(item) }}</span><div class="faint" style="font-size:12px">{{ item.resultJson?.simulated ? '未执行任何真实动作' : item.errorCode || item.message }}</div></span><span class="when">{{ date(item.startedAt) }}</span></button><div v-if="!history.length" class="faint">暂无执行记录</div></div>
+              <div class="timeline" style="margin-top:10px"><button v-for="item in history" :key="item.id" class="t" type="button" style="text-align:left" @click="showDetail(item)"><span class="dot" :class="item.status === 'failed' ? 'danger' : item.status === 'succeeded' ? 'ok' : 'unknown'"></span><span>{{ statuses[item.status] }}<small v-if="item.triggerType === 'simulation'"> · 模拟</small><span class="faint"> · {{ duration(item) }}</span><div class="faint" style="font-size:calc(12px * var(--fs))">{{ item.resultJson?.simulated ? '未执行任何真实动作' : item.errorCode || item.message }}</div></span><span class="when">{{ date(item.startedAt) }}</span></button><div v-if="!history.length" class="faint">暂无执行记录</div></div>
             </div>
           </template>
         </template>
@@ -514,7 +514,7 @@ onUnmounted(() => { clearInterval(poll) })
             </div>
             <div class="field"><label>JSON 数据</label><textarea v-model="form.payload" class="input mono" rows="4" /></div>
           </template>
-          <p v-else class="faint" style="margin:0;font-size:12px">成功创建 Core Agent 任务即视为动作成功。</p>
+          <p v-else class="faint" style="margin:0;font-size:calc(12px * var(--fs))">成功创建 Core Agent 任务即视为动作成功。</p>
         </template>
         <p v-if="formError" class="dlg-error" role="alert">{{ formError }}</p>
       </form>

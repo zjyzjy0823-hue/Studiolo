@@ -3,10 +3,12 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { isAndroidLocal } from '../../desktop/androidLocal'
 import { decodeBase64Url } from '../../services/blobTransfer'
 import type { InlineMediaAttachment } from '../../services/messageSegments'
-import { saveBlobToDevice } from '../../services/saveDownload'
-import { addDownload } from '../../services/downloadHistory'
+import { openSavedDownload, saveBlobToDevice } from '../../services/saveDownload'
+import { addDownload, readDownloads } from '../../services/downloadHistory'
+import { percentOf, type DownloadProgressState } from '../../services/downloadProgress'
 import { useFleetStore } from '../../stores/fleet'
 import type { ArtifactRef } from '../../types/fleet'
+import DownloadRing from './DownloadRing.vue'
 import OpusIcon from '../ui/OpusIcon.vue'
 import { openExternal } from '../../utils/openExternal'
 import { formatBytes } from './providerMeta'
@@ -28,6 +30,8 @@ const emit = defineEmits<{
 
 const fleet = useFleetStore()
 const downloading = ref(false)
+const downloadState = ref<DownloadProgressState | null>(null)
+const savedDisplayPath = ref<string | undefined>(undefined)
 const previewFailed = ref(false)
 const loadingPreview = ref(false)
 const imageButton = ref<HTMLButtonElement | null>(null)
@@ -39,6 +43,15 @@ const hermesReference = computed(() => props.hermesMedia && !props.attachment.ar
 const opensWorkspaceFile = computed(() => Boolean(props.attachment.filePath && !hermesReference.value))
 
 onMounted(async () => {
+  // 重进会话时恢复「已下载」状态：在同一台设备上下载过（有下载记录）就直接打勾，
+  // 点一下即可用系统「打开方式」再打开，不用重新下载。
+  const savedName = props.attachment.fileName
+  if (savedName) {
+    const hit = readDownloads().find(record => record.name === savedName)
+    if (hit) {
+      downloadState.value = { phase: 'done', percent: 100, loaded: hit.sizeBytes, total: hit.sizeBytes }
+    }
+  }
   if (props.attachment.artifact && props.attachment.mime.startsWith('image/')) {
     loadingPreview.value = true
     await fleet.ensureArtifactImagePreview(props.attachment.artifact)
@@ -84,8 +97,37 @@ const subLabel = computed(() => {
 })
 
 function handleCardClick() {
+  if (downloadState.value?.phase === 'done') {
+    void handleOpenSaved()
+    return
+  }
   if (opensWorkspaceFile.value && props.attachment.filePath) {
     emit('openFile', props.attachment.filePath)
+  }
+}
+
+async function handleOpenSaved() {
+  try {
+    await openSavedDownload({
+      name: props.attachment.fileName,
+      displayPath: savedDisplayPath.value,
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '打开失败'
+    mediaError.value = message
+    // 文件已被移走/删除：退回“可下载”状态，让用户能重新存一份
+    if (message.includes('移动') || message.includes('删除')) {
+      downloadState.value = null
+    }
+    emit('status', message)
+  }
+}
+
+function handleButtonClick() {
+  if (downloadState.value?.phase === 'done') {
+    void handleOpenSaved()
+  } else {
+    void handleDownload()
   }
 }
 
@@ -193,14 +235,29 @@ async function handleDownload() {
   const android = isAndroidLocal()
   const androidStatus = '已保存到 Download/Studiolo'
   downloading.value = true
+  downloadState.value = { phase: 'downloading', percent: null, loaded: 0, total: null }
   if (reference) mediaError.value = ''
   try {
     if (artifact) {
       await fleet.downloadArtifactToBrowser(artifact)
+      downloadState.value = { phase: 'done', percent: 100, loaded: 0, total: null }
       emit('status', android ? androidStatus : `已解密下载 ${fileName}`)
     } else if (reference) {
       if (!props.sessionKey) throw new Error('找不到附件所属的 Hermes 会话')
-      const media = await fleet.readHermesAttachment(props.sessionKey, reference, 'download')
+      const media = await fleet.readHermesAttachment(
+        props.sessionKey,
+        reference,
+        'download',
+        undefined,
+        progress => {
+          downloadState.value = {
+            phase: 'downloading',
+            percent: percentOf(progress.loaded, progress.total),
+            loaded: progress.loaded,
+            total: progress.total,
+          }
+        },
+      )
       if (media.kind === 'external') {
         // 大文件：服务端已经把文件放到 VPS，交给系统下载器（有进度、可续传）
         await openExternal(media.url)
@@ -213,18 +270,38 @@ async function handleDownload() {
           expiresAt: media.expiresAt,
           sessionKey: props.sessionKey,
         })
+        downloadState.value = {
+          phase: 'done',
+          percent: 100,
+          loaded: media.sizeBytes ?? 0,
+          total: media.sizeBytes ?? 0,
+        }
         emit('status', android ? '已交给系统下载器' : `已交给下载器 ${fileName}`)
         return
       }
-      await saveBlobToDevice(media.blob, fileName)
+      downloadState.value = {
+        phase: 'saving',
+        percent: 100,
+        loaded: media.blob.size,
+        total: media.blob.size,
+      }
+      const displayPath = await saveBlobToDevice(media.blob, fileName)
+      savedDisplayPath.value = displayPath
       addDownload({
         name: fileName,
         sizeBytes: media.blob.size,
         channel: 'relay',
         status: 'saved',
+        displayPath,
         sessionKey: props.sessionKey,
       })
-      emit('status', android ? androidStatus : `正在下载 ${fileName}`)
+      downloadState.value = {
+        phase: 'done',
+        percent: 100,
+        loaded: media.blob.size,
+        total: media.blob.size,
+      }
+      emit('status', android ? androidStatus : `已保存到 Download/Studiolo`)
     } else if (url) {
       const blob = await readDownloadBlob(url).catch(error => {
         if (android || !/^(?:https?:)?\/\//i.test(url)) throw error
@@ -239,15 +316,42 @@ async function handleDownload() {
         link.remove()
         return null
       })
-      if (blob) await saveBlobToDevice(blob, fileName)
-      emit('status', android ? androidStatus : `正在下载 ${fileName}`)
+      if (blob) {
+        downloadState.value = {
+          phase: 'saving',
+          percent: 100,
+          loaded: blob.size,
+          total: blob.size,
+        }
+        const displayPath = await saveBlobToDevice(blob, fileName)
+        savedDisplayPath.value = displayPath
+        addDownload({
+          name: fileName,
+          sizeBytes: blob.size,
+          channel: 'relay',
+          status: 'saved',
+          displayPath,
+          sessionKey: props.sessionKey,
+        })
+      }
+      downloadState.value = {
+        phase: 'done',
+        percent: 100,
+        loaded: 0,
+        total: null,
+      }
+      emit('status', android ? androidStatus : `已保存到 Download/Studiolo`)
     } else if (filePath) {
-      const onSaved = android ? () => emit('status', androidStatus) : undefined
+      const onSaved = () => {
+        downloadState.value = { phase: 'done', percent: 100, loaded: 0, total: null }
+        if (android) emit('status', androidStatus)
+      }
       if (fleet.downloadWorkspaceFile(filePath, props.sessionKey, onSaved)) {
         emit('status', `正在请求节点下载 ${fileName}`)
       }
     }
   } catch (error) {
+    downloadState.value = { phase: 'failed', percent: null, loaded: 0, total: null }
     const message = error instanceof Error ? error.message : '下载失败'
     if (reference) mediaError.value = message
     emit('status', message)
@@ -291,11 +395,27 @@ async function handleDownload() {
       <button
         type="button"
         class="btn btn-subtle btn-sm inline-att-dl-btn"
-        :disabled="downloading"
-        @click.stop="handleDownload"
+        :disabled="downloadState?.phase === 'downloading' || downloadState?.phase === 'saving'"
+        :aria-label="`下载 ${attachment.fileName}`"
+        :title="`下载 ${attachment.fileName}`"
+        @click.stop="handleButtonClick"
       >
-        <OpusIcon name="download" />
-        <span>下载</span>
+        <template v-if="downloadState?.phase === 'downloading' || downloadState?.phase === 'saving'">
+          <DownloadRing :percent="downloadState.percent" :phase="downloadState.phase" :size="15" />
+          <span>{{ downloadState.phase === 'saving' ? '保存中' : (downloadState.percent !== null ? `${downloadState.percent}%` : '下载中') }}</span>
+        </template>
+        <template v-else-if="downloadState?.phase === 'done'">
+          <DownloadRing :percent="100" phase="done" :size="15" />
+          <span>已保存</span>
+        </template>
+        <template v-else-if="downloadState?.phase === 'failed'">
+          <DownloadRing :percent="null" phase="failed" :size="15" />
+          <span>重试</span>
+        </template>
+        <template v-else>
+          <OpusIcon name="download" />
+          <span>下载</span>
+        </template>
       </button>
     </div>
   </div>
@@ -304,8 +424,8 @@ async function handleDownload() {
   <div
     v-else
     class="inline-att-file-card"
-    :class="{ 'is-clickable': opensWorkspaceFile }"
-    :data-pressable="opensWorkspaceFile ? '' : undefined"
+    :class="{ 'is-clickable': opensWorkspaceFile || downloadState?.phase === 'done' }"
+    :data-pressable="(opensWorkspaceFile || downloadState?.phase === 'done') ? '' : undefined"
     @click="handleCardClick"
   >
     <div class="inline-att-file-ic">
@@ -332,12 +452,27 @@ async function handleDownload() {
     <button
       type="button"
       class="btn btn-ghost btn-sm inline-att-dl-btn"
-      :disabled="downloading"
+      :disabled="downloadState?.phase === 'downloading' || downloadState?.phase === 'saving'"
+      :aria-label="`下载 ${attachment.fileName}`"
       :title="`下载 ${attachment.fileName}`"
-      @click.stop="handleDownload"
+      @click.stop="handleButtonClick"
     >
-      <OpusIcon name="download" />
-      <span>{{ downloading ? '下载中' : '下载' }}</span>
+      <template v-if="downloadState?.phase === 'downloading' || downloadState?.phase === 'saving'">
+        <DownloadRing :percent="downloadState.percent" :phase="downloadState.phase" :size="15" />
+        <span>{{ downloadState.phase === 'saving' ? '保存中' : (downloadState.percent !== null ? `${downloadState.percent}%` : '下载中') }}</span>
+      </template>
+      <template v-else-if="downloadState?.phase === 'done'">
+        <DownloadRing :percent="100" phase="done" :size="15" />
+        <span>已保存</span>
+      </template>
+      <template v-else-if="downloadState?.phase === 'failed'">
+        <DownloadRing :percent="null" phase="failed" :size="15" />
+        <span>重试</span>
+      </template>
+      <template v-else>
+        <OpusIcon name="download" />
+        <span>下载</span>
+      </template>
     </button>
   </div>
 </template>
@@ -446,7 +581,7 @@ async function handleDownload() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   font-weight: 560;
   color: var(--text);
 }
@@ -454,13 +589,13 @@ async function handleDownload() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--text-3);
 }
 .inline-att-dl-btn {
   flex: none;
   height: 28px;
   padding: 0 9px;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
 }
 </style>

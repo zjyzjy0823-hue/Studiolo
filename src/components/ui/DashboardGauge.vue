@@ -27,7 +27,7 @@ defineProps<{ progress: number; value: string; caption: string; compact?: boolea
   position: absolute;
   inset: auto 8% 2px;
   text-align: center;
-  font-size: clamp(14px, 1.35cqi, 24px);
+  font-size: calc(clamp(14px, 1.35cqi, 24px) * var(--fs));
   font-weight: 750;
   color: var(--text);
   letter-spacing: -.02em;
@@ -35,8 +35,8 @@ defineProps<{ progress: number; value: string; caption: string; compact?: boolea
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.gauge-value.compact { font-size: clamp(12px, 1.18cqi, 21px); }
-.gauge-caption { font-size: clamp(11px, 0.85cqi, 14px); color: var(--text-3); margin-top: 4px; text-align: center; }
+.gauge-value.compact { font-size: calc(clamp(12px, 1.18cqi, 21px) * var(--fs)); }
+.gauge-caption { font-size: calc(clamp(11px, 0.85cqi, 14px) * var(--fs)); color: var(--text-3); margin-top: 4px; text-align: center; }
 [data-motion="reduced"] .gauge-fill { transition: none; }
 @media (prefers-reduced-motion: reduce) { .gauge-fill { transition: none; } }
 </style>

@@ -21,6 +21,8 @@ import {
 import {
   buildThreadRenderItems,
   collectMessageInlineAttachments,
+  groupThreadTurns,
+  parseAttachmentNote,
   splitTextByInlineMedia,
 } from '../../services/messageSegments'
 import {
@@ -1045,6 +1047,7 @@ watchEffect(onCleanup => {
 const effectiveMessages = computed<ChatMessage[]>(() =>
   effectiveKey.value ? fleet.messagesBySession[effectiveKey.value] ?? [] : [],
 )
+const threadRows = computed(() => groupThreadTurns(effectiveMessages.value))
 const rawHistoryDialog = ref<HTMLDialogElement>()
 const rawHistoryTitleId = useId()
 const rawHistoryBoundary = ref('')
@@ -1080,7 +1083,8 @@ function openRawHistory(messageId: string, sourceKey?: string) {
 watch(effectiveKey, () => rawHistoryDialog.value?.close())
 const assistantTurns = computed(() => {
   const previews = fleet.imagePreviewByArtifactId
-  return new Map(effectiveMessages.value.filter(msg => msg.role === 'assistant').map(msg => {
+  return new Map(threadRows.value.filter(r => r.msg.role === 'assistant').map(r => {
+    const msg = r.msg
     const items = buildThreadRenderItems(msg, previews)
     const workLogs = items.filter(item => item.type === 'work-log')
     return [msg.id, {
@@ -1101,16 +1105,13 @@ const effectiveTodos = computed(() =>
 const effectiveQueue = computed(() =>
   effectiveKey.value ? fleet.queuedPromptsBySession[effectiveKey.value] ?? [] : [],
 )
-const effectiveOutbox = computed(() =>
-  fleet.outbox.filter(item => item.sessionKey === effectiveKey.value && !fleet.isOutboxTransmitting(item.id)),
-)
-const waitsForReconnect = computed(() => fleet.wsState !== 'online' || effectiveNode.value?.status !== 'online')
 const receiptStyles = {
   uploading: { icon: 'clock', label: '上传中…', statusText: '上传中…' },
   sending: { icon: 'clock', label: '发送中…', statusText: '发送中…' },
   sent: { icon: 'check', label: '已发送', statusText: '' },
   replied: { icon: 'checks', label: 'Agent 已响应', statusText: '' },
   failed: { icon: 'alert', label: '发送失败', statusText: '发送失败' },
+  unknown: { icon: 'alert', label: '发送未确认', statusText: '发送未确认' },
 } as const
 const messageReceipts = computed(() => {
   const replied = repliedUserMessageIds(effectiveMessages.value)
@@ -1421,7 +1422,8 @@ async function steerQueueItem(id: string, text: string) {
   if (!key || steeringQueueKeys.value.has(key)) return
   steeringQueueKeys.value.add(key)
   try {
-    if (await fleet.steerPromptToSession(key, text)) {
+    const outcome = await fleet.steerPromptToSession(key, text)
+    if (outcome.accepted) {
       fleet.removeQueuedPrompt(key, id)
       emit('action', '已插话，当前回合会按新指令调整')
     } else {
@@ -2090,6 +2092,9 @@ async function handleSubmit() {
     mentionMode.value = null
   }
 
+  // 先清输入框：文字绝不许留在输入框里
+  clearSubmittedExtras()
+
   sending.value = true
   followLatest.value = true
   unseenBelowCount.value = 0
@@ -2099,7 +2104,6 @@ async function handleSubmit() {
     } else {
       await fleet.sendPrompt(payloadText, files, runOpts)
     }
-    clearSubmittedExtras()
   } catch (err) {
     emit('action', err instanceof Error ? err.message : '消息发送失败')
   } finally {
@@ -2262,6 +2266,7 @@ function onLightboxBackdropFallback(event: MouseEvent) {
 
 let hasLightboxClickFallback = false
 onMounted(() => {
+  fleet.purgeStaleFailedPrompts()
   watch(() => effectiveSession.value ? effectiveKey.value : '', (key) => {
     if (key) void fleet.refreshSessionActivity(key)
   }, { immediate: true })
@@ -2349,6 +2354,98 @@ async function copyMessageText(msg: ChatMessage) {
   } catch {
     emit('action', '剪贴板写入失败，请手动选中复制')
   }
+}
+
+// —— 附件说明块（[附带文件]）渲染：剥掉路径文本，能取到解密文件就显示缩略图 ——
+const inboxUrls = ref<Record<string, string>>({})
+const inboxFailed = ref<Record<string, boolean>>({})
+const inboxQueue: Array<{ nodeId: string; path: string }> = []
+let inboxActive = 0
+
+function attachmentNotesFor(msg: ChatMessage) {
+  return parseAttachmentNote(msg.text || '').files
+}
+function userDisplayText(msg: ChatMessage) {
+  return parseAttachmentNote(msg.text || '').cleaned
+}
+function queueInboxPreview(nodeId: string, filePath: string) {
+  if (!filePath || inboxUrls.value[filePath] || inboxFailed.value[filePath]) return
+  if (inboxQueue.some(item => item.path === filePath)) return
+  inboxQueue.push({ nodeId, path: filePath })
+  void pumpInboxQueue()
+}
+async function pumpInboxQueue() {
+  while (inboxActive < 4 && inboxQueue.length) {
+    const job = inboxQueue.shift()!
+    inboxActive += 1
+    try {
+      const url = await fleet.fetchInboxPreview(job.nodeId, job.path)
+      inboxUrls.value = { ...inboxUrls.value, [job.path]: url }
+    } catch {
+      inboxFailed.value = { ...inboxFailed.value, [job.path]: true }
+    } finally {
+      inboxActive -= 1
+    }
+  }
+}
+watch(
+  () => threadRows.value.map(row => row.msg),
+  (rows) => {
+    for (const msg of rows) {
+      const nodeId = msg.nodeId || effectiveNode.value?.id || ''
+      for (const note of attachmentNotesFor(msg)) {
+        if (note.path && note.mime.startsWith('image/')) queueInboxPreview(nodeId, note.path)
+      }
+    }
+  },
+  { immediate: true },
+)
+
+// —— 调试：长按消息 → 上报原始 JSON 到 Core 日志（排查工作步骤合并不生效用）——
+let rowDebugTimer: ReturnType<typeof setTimeout> | null = null
+function startRowDebugPress(row: { msg: ChatMessage; sourceIndex: number; memberIds: string[]; stepCount: number }) {
+  if (!props.mobile) return
+  cancelRowDebugPress()
+  rowDebugTimer = setTimeout(() => {
+    rowDebugTimer = null
+    void dumpRowDebug(row)
+  }, 700)
+}
+function cancelRowDebugPress() {
+  if (rowDebugTimer) {
+    clearTimeout(rowDebugTimer)
+    rowDebugTimer = null
+  }
+}
+async function dumpRowDebug(row: { msg: ChatMessage; sourceIndex: number; memberIds: string[]; stepCount: number }) {
+  const payload = {
+    at: new Date().toISOString(),
+    sessionKey: props.sessionKey ?? null,
+    row: { id: row.msg.id, sourceIndex: row.sourceIndex, memberIds: row.memberIds, stepCount: row.stepCount },
+    itemTypes: (assistantTurns.value.get(row.msg.id)?.items ?? []).map(item => ({ type: item.type, id: item.id })),
+    msg: row.msg,
+  }
+  alert(`dbg ${row.msg.id} tools=${row.stepCount} members=${row.memberIds.length}`)
+  try {
+    await fleet.postClientDebugLog(payload)
+    emit('action', '已上报调试 JSON')
+  } catch (error) {
+    emit('action', `上报失败：${(error as Error).message}`)
+  }
+}
+
+function retryFailedMessage(msg: ChatMessage) {
+  const id = msg.requestId
+  if (id && fleet.outbox.some(item => item.id === id)) {
+    fleet.retryOutboxPrompt(id)
+    return
+  }
+  void retryTurn(msg)
+}
+
+function dismissFailedMessage(msg: ChatMessage) {
+  const id = msg.requestId || msg.id.replace(/^user-/, '')
+  fleet.discardFailedPrompt(id, effectiveKey.value ?? undefined)
 }
 
 async function retryTurn(msg: ChatMessage) {
@@ -2521,13 +2618,13 @@ async function retryTurn(msg: ChatMessage) {
           <p v-else>前往「设置 -> Agent 与连接」添加控制节点，发放 sn_live_ 凭证并在目标机器启动 agent-node。</p>
         </div>
 
-        <template v-for="(msg, msgIdx) in effectiveMessages" :key="msg.id">
-          <div v-if="firstUnreadMsgId && msg.id === firstUnreadMsgId" class="unread-divider" role="separator">
+        <template v-for="row in threadRows" :key="row.msg.id">
+          <div v-if="firstUnreadMsgId && row.msg.id === firstUnreadMsgId" class="unread-divider" role="separator">
             <span>新消息</span>
           </div>
 
-          <div v-if="msg.systemEvents?.length" :data-msg-id="msg.id" class="context-events">
-            <details v-for="(event, eventIndex) in msg.systemEvents" :key="eventIndex" class="context-event">
+          <div v-if="row.msg.systemEvents?.length" :data-msg-id="row.msg.id" class="context-events">
+            <details v-for="(event, eventIndex) in row.msg.systemEvents" :key="eventIndex" class="context-event">
               <summary class="context-event-rule">
                 <span>{{ systemEventLabel(event) }}</span>
                 <OpusIcon name="chevR" />
@@ -2535,101 +2632,105 @@ async function retryTurn(msg: ChatMessage) {
               <div class="context-event-detail">
                 <p v-if="event.detail.summary">{{ event.detail.summary }}</p>
                 <p v-else-if="event.kind === 'compacted'">该代理未提供可读的压缩摘要。</p>
-                <button type="button" class="context-event-original" @click="openRawHistory(msg.id, event.detail.sourceSessionKey)">
+                <button type="button" class="context-event-original" @click="openRawHistory(row.msg.id, event.detail.sourceSessionKey)">
                   查看原始记录 <OpusIcon name="external" />
                 </button>
               </div>
             </details>
           </div>
 
-          <template v-if="msg.role === 'system' && !msg.systemEvents?.length">
+          <template v-if="row.msg.role === 'system' && !row.msg.systemEvents?.length">
             <div
-              v-if="systemNoticeSummaries.get(msg.id)"
-              :data-msg-id="msg.id"
+              v-if="systemNoticeSummaries.get(row.msg.id)"
+              :data-msg-id="row.msg.id"
               class="sys-notice-collapsible"
               :class="{
-                'is-failed': systemNoticeSummaries.get(msg.id)?.failed,
-                'is-expanded': isSystemNoticeExpanded(msg.id),
-                'is-search-hit': highlightedMsgId === msg.id,
-                'is-deferred-msg': msgIdx < effectiveMessages.length - 8,
+                'is-failed': systemNoticeSummaries.get(row.msg.id)?.failed,
+                'is-expanded': isSystemNoticeExpanded(row.msg.id),
+                'is-search-hit': highlightedMsgId === row.msg.id,
+                'is-deferred-msg': row.sourceIndex < effectiveMessages.length - 8,
               }"
             >
               <button
                 type="button"
                 class="sys-notice-toggle"
-                :aria-expanded="isSystemNoticeExpanded(msg.id)"
-                @click="toggleSystemNotice(msg.id)"
+                :aria-expanded="isSystemNoticeExpanded(row.msg.id)"
+                @click="toggleSystemNotice(row.msg.id)"
               >
                 <span class="sys-notice-icon" aria-hidden="true">{{
-                  systemNoticeSummaries.get(msg.id)?.kind === 'delegation' ? '🤖' : '🔧'
+                  systemNoticeSummaries.get(row.msg.id)?.kind === 'delegation' ? '🤖' : '🔧'
                 }}</span>
                 <span class="sys-notice-line">
-                  <span class="sys-notice-title">{{ systemNoticeSummaries.get(msg.id)?.title }}</span>
-                  <span v-if="systemNoticeSummaries.get(msg.id)?.failed" class="sys-notice-fail-badge">失败</span>
-                  <template v-if="systemNoticeSummaries.get(msg.id)?.detail">
+                  <span class="sys-notice-title">{{ systemNoticeSummaries.get(row.msg.id)?.title }}</span>
+                  <span v-if="systemNoticeSummaries.get(row.msg.id)?.failed" class="sys-notice-fail-badge">失败</span>
+                  <template v-if="systemNoticeSummaries.get(row.msg.id)?.detail">
                     <span class="sys-notice-sep" aria-hidden="true">·</span>
-                    <span class="sys-notice-detail">{{ systemNoticeSummaries.get(msg.id)?.detail }}</span>
+                    <span class="sys-notice-detail">{{ systemNoticeSummaries.get(row.msg.id)?.detail }}</span>
                   </template>
-                  <template v-if="systemNoticeSummaries.get(msg.id)?.command">
+                  <template v-if="systemNoticeSummaries.get(row.msg.id)?.command">
                     <span class="sys-notice-sep" aria-hidden="true">·</span>
-                    <code class="sys-notice-cmd">{{ systemNoticeSummaries.get(msg.id)?.command }}</code>
+                    <code class="sys-notice-cmd">{{ systemNoticeSummaries.get(row.msg.id)?.command }}</code>
                   </template>
                 </span>
                 <OpusIcon name="chevD" class="sys-notice-chev" />
               </button>
-              <div v-if="isSystemNoticeExpanded(msg.id)" class="sys-notice-body">
+              <div v-if="isSystemNoticeExpanded(row.msg.id)" class="sys-notice-body">
                 <div class="sys-notice-body-bar">
                   <button
                     type="button"
                     class="message-action sys-notice-copy"
-                    :aria-label="copiedMsgId === msg.id ? '已复制' : '复制原文'"
-                    :title="copiedMsgId === msg.id ? '已复制' : '复制原文'"
-                    @click="copyMessageText(msg)"
+                    :aria-label="copiedMsgId === row.msg.id ? '已复制' : '复制原文'"
+                    :title="copiedMsgId === row.msg.id ? '已复制' : '复制原文'"
+                    @click="copyMessageText(row.msg)"
                   >
-                    <OpusIcon :name="copiedMsgId === msg.id ? 'check' : 'copy'" />
+                    <OpusIcon :name="copiedMsgId === row.msg.id ? 'check' : 'copy'" />
                   </button>
                 </div>
-                <pre class="sys-notice-raw">{{ msg.text }}</pre>
+                <pre class="sys-notice-raw">{{ row.msg.text }}</pre>
               </div>
             </div>
 
             <div
               v-else
-              :data-msg-id="msg.id"
+              :data-msg-id="row.msg.id"
               class="sys-notice"
               :class="{
-                'is-search-hit': highlightedMsgId === msg.id,
-                'is-deferred-msg': msgIdx < effectiveMessages.length - 8,
+                'is-search-hit': highlightedMsgId === row.msg.id,
+                'is-deferred-msg': row.sourceIndex < effectiveMessages.length - 8,
               }"
             >
               <OpusIcon name="info" />
-              <span>{{ msg.text }}</span>
+              <span>{{ row.msg.text }}</span>
             </div>
           </template>
 
           <div
-            v-else-if="msg.role !== 'system' && (msg.role === 'user' || msg.streaming || msg.text || msg.thought || msg.toolCalls?.length || msg.parts?.length || msg.error || msg.forms?.length || msg.approvals?.length || msg.artifacts?.length || msg.media?.length)"
-            :data-msg-id="msg.id"
+            v-else-if="row.msg.role !== 'system' && (row.msg.role === 'user' || row.msg.streaming || row.msg.text || row.msg.thought || row.msg.toolCalls?.length || row.msg.parts?.length || row.msg.error || row.msg.forms?.length || row.msg.approvals?.length || row.msg.artifacts?.length || row.msg.media?.length)"
+            :data-msg-id="row.msg.id"
+            @pointerdown="startRowDebugPress(row)"
+            @pointerup="cancelRowDebugPress"
+            @pointercancel="cancelRowDebugPress"
+            @pointerleave="cancelRowDebugPress"
             :class="[
               mobile ? 'mmsg' : 'msg',
-              msg.role === 'user' ? 'user' : 'agent',
-              getProviderMeta(msg.provider).accentClass,
+              row.msg.role === 'user' ? 'user' : 'agent',
+              getProviderMeta(row.msg.provider).accentClass,
               {
-                'is-search-hit': highlightedMsgId === msg.id,
-                'is-deferred-msg': msgIdx < effectiveMessages.length - 8,
+                'is-search-hit': highlightedMsgId === row.msg.id,
+                'is-deferred-msg': row.sourceIndex < effectiveMessages.length - 8,
               },
             ]"
           >
-            <template v-if="msg.role === 'user'">
+            <template v-if="row.msg.role === 'user'">
               <div class="user-col">
                 <div class="bubble">
                   <template
                     v-for="(uSeg, uIdx) in splitTextByInlineMedia(
-                      msg.text || '',
-                      collectMessageInlineAttachments(msg, fleet.imagePreviewByArtifactId),
+                      userDisplayText(row.msg),
+                      collectMessageInlineAttachments(row.msg, fleet.imagePreviewByArtifactId),
                       { allowTrailingUnmatched: true },
                     ).segments"
-                    :key="`${msg.id}-useg-${uIdx}`"
+                    :key="`${row.msg.id}-useg-${uIdx}`"
                   >
                     <div v-if="uSeg.type === 'text'" class="msg-text">{{ uSeg.text }}</div>
                     <InlineAttachmentCard
@@ -2640,70 +2741,99 @@ async function retryTurn(msg: ChatMessage) {
                       :hermes-media="effectiveProvider === 'hermes'"
                       @preview-image="openImageLightbox"
                       @open-file="fp => emit('openFile', fp)"
-                      @handoff="art => shareAsHandoff(msg, art)"
+                      @handoff="art => shareAsHandoff(row.msg, art)"
                       @status="emit('action', $event)"
                     />
                   </template>
+                  <template
+                    v-for="(note, nIdx) in attachmentNotesFor(row.msg)"
+                    :key="`${row.msg.id}-note-${nIdx}`"
+                  >
+                    <img
+                      v-if="note.mime.startsWith('image/') && inboxUrls[note.path]"
+                      class="inbox-thumb"
+                      :src="inboxUrls[note.path]"
+                      :alt="note.name"
+                      @click="openImageLightbox(inboxUrls[note.path], note.name, async () => {})"
+                    />
+                    <button
+                      v-else
+                      type="button"
+                      class="inbox-chip"
+                      :title="note.path || note.name"
+                      @click="note.path && emit('openFile', note.path)"
+                    >
+                      <span class="inbox-chip-ic" aria-hidden="true">📎</span>{{ note.name }}
+                    </button>
+                  </template>
                   <div class="user-foot">
-                    <div v-if="msg.branches && msg.branches.length > 1" class="branch-switcher">
+                    <div v-if="row.msg.branches && row.msg.branches.length > 1" class="branch-switcher">
                       <button
                         type="button"
                         class="message-action branch-nav-btn"
                         aria-label="上一分支"
                         title="上一分支"
-                        :disabled="(msg.activeBranchIndex ?? 0) <= 0 || isStreaming"
-                        @click="fleet.switchBranch(effectiveKey, msgIdx, (msg.activeBranchIndex ?? 0) - 1)"
+                        :disabled="(row.msg.activeBranchIndex ?? 0) <= 0 || isStreaming"
+                        @click="fleet.switchBranch(effectiveKey, row.sourceIndex, (row.msg.activeBranchIndex ?? 0) - 1)"
                       ><OpusIcon name="chevL" /></button>
-                      <span class="num">{{ (msg.activeBranchIndex ?? 0) + 1 }} / {{ msg.branches.length }}</span>
+                      <span class="num">{{ (row.msg.activeBranchIndex ?? 0) + 1 }} / {{ row.msg.branches.length }}</span>
                       <button
                         type="button"
                         class="message-action branch-nav-btn"
                         aria-label="下一分支"
                         title="下一分支"
-                        :disabled="(msg.activeBranchIndex ?? 0) >= msg.branches.length - 1 || isStreaming"
-                        @click="fleet.switchBranch(effectiveKey, msgIdx, (msg.activeBranchIndex ?? 0) + 1)"
+                        :disabled="(row.msg.activeBranchIndex ?? 0) >= row.msg.branches.length - 1 || isStreaming"
+                        @click="fleet.switchBranch(effectiveKey, row.sourceIndex, (row.msg.activeBranchIndex ?? 0) + 1)"
                       ><OpusIcon name="chevR" /></button>
                     </div>
                     <button
-                      v-if="msg.text"
+                      v-if="row.msg.text"
                       type="button"
                       class="message-action"
-                      :aria-label="copiedMsgId === msg.id ? '已复制' : '复制'"
-                      :title="copiedMsgId === msg.id ? '已复制' : '复制'"
-                      @click="copyMessageText(msg)"
-                    ><OpusIcon :name="copiedMsgId === msg.id ? 'check' : 'copy'" /></button>
+                      :aria-label="copiedMsgId === row.msg.id ? '已复制' : '复制'"
+                      :title="copiedMsgId === row.msg.id ? '已复制' : '复制'"
+                      @click="copyMessageText(row.msg)"
+                    ><OpusIcon :name="copiedMsgId === row.msg.id ? 'check' : 'copy'" /></button>
                     <button
                       v-if="!compact && effectiveKey && fleet.sessionsByKey[effectiveKey]"
                       type="button"
                       class="message-action"
                       aria-label="分支"
                       title="分支"
-                      @click="handleForkAt(msgIdx)"
+                      @click="handleForkAt(row.sourceIndex)"
                     ><OpusIcon name="branch" /></button>
-                    <span v-if="msg.createdAt" class="num">{{ formatMsgTime(msg.createdAt) }}</span>
+                    <span v-if="row.msg.createdAt" class="num">{{ formatMsgTime(row.msg.createdAt) }}</span>
                     <span
-                      v-if="messageReceipts.get(msg.id)"
+                      v-if="messageReceipts.get(row.msg.id)"
                       class="message-receipt"
-                      :class="'is-' + messageReceipts.get(msg.id)"
-                      :role="receiptStyles[messageReceipts.get(msg.id)!].statusText ? 'status' : 'img'"
-                      :aria-label="receiptStyles[messageReceipts.get(msg.id)!].label"
-                      :title="receiptStyles[messageReceipts.get(msg.id)!].label"
+                      :class="'is-' + messageReceipts.get(row.msg.id)"
+                      :role="receiptStyles[messageReceipts.get(row.msg.id)!].statusText ? 'status' : 'img'"
+                      :aria-label="receiptStyles[messageReceipts.get(row.msg.id)!].label"
+                      :title="receiptStyles[messageReceipts.get(row.msg.id)!].label"
                     >
-                      <OpusIcon :name="receiptStyles[messageReceipts.get(msg.id)!].icon" />
+                      <OpusIcon :name="receiptStyles[messageReceipts.get(row.msg.id)!].icon" />
                       <span
-                        v-if="receiptStyles[messageReceipts.get(msg.id)!].statusText"
+                        v-if="receiptStyles[messageReceipts.get(row.msg.id)!].statusText"
                         class="message-receipt-text"
-                      >{{ receiptStyles[messageReceipts.get(msg.id)!].statusText }}</span>
+                      >{{ receiptStyles[messageReceipts.get(row.msg.id)!].statusText }}</span>
                     </span>
                     <button
-                      v-if="messageReceipts.get(msg.id) === 'failed' && msg.text?.trim() && msg.text.trim() !== '[发送了加密文件附件]'"
+                      v-if="messageReceipts.get(row.msg.id) === 'failed' && row.msg.text?.trim() && row.msg.text.trim() !== '[发送了加密文件附件]'"
                       type="button"
                       class="message-receipt-retry"
                       :disabled="sending || isStreaming"
-                      @click="retryTurn(msg)"
+                      @click="retryFailedMessage(row.msg)"
                     >重试</button>
-                    <span v-if="msg.text?.trim()" class="user-token-count num" title="估算输入 token">
-                      {{ formatTokenCount(estimateTextTokens(msg.text)) }} tok
+                    <button
+                      v-if="messageReceipts.get(row.msg.id) === 'failed'"
+                      type="button"
+                      class="message-receipt-dismiss"
+                      title="删除这条未送达的消息"
+                      aria-label="删除未送达消息"
+                      @click="dismissFailedMessage(row.msg)"
+                    >✕</button>
+                    <span v-if="row.msg.text?.trim()" class="user-token-count num" title="估算输入 token">
+                      {{ formatTokenCount(estimateTextTokens(row.msg.text)) }} tok
                     </span>
                   </div>
                 </div>
@@ -2711,35 +2841,36 @@ async function retryTurn(msg: ChatMessage) {
             </template>
 
             <template v-else>
-              <span v-if="!mobile" class="am" :title="getProviderMeta(msg.provider).label">
-                <OpusIcon :name="getProviderMeta(msg.provider).icon" />
+              <span v-if="!mobile" class="am" :title="getProviderMeta(row.msg.provider).label">
+                <OpusIcon :name="getProviderMeta(row.msg.provider).icon" />
               </span>
               <div class="agent-col">
                 <div class="bubble">
-                  <span v-if="assistantTurns.get(msg.id)?.standaloneDuration" class="num faint">
-                    {{ assistantTurns.get(msg.id)?.standaloneDuration }}
+                  <span v-if="assistantTurns.get(row.msg.id)?.standaloneDuration" class="num faint">
+                    {{ assistantTurns.get(row.msg.id)?.standaloneDuration }}
                   </span>
-                  <template v-if="assistantTurns.get(msg.id)?.items.length">
+                  <template v-if="assistantTurns.get(row.msg.id)?.items.length">
                     <div class="msg-parts">
                       <template
-                        v-for="item in assistantTurns.get(msg.id)?.items"
+                        v-for="item in assistantTurns.get(row.msg.id)?.items"
                         :key="item.id"
                       >
                         <WorkLog
                           v-if="item.type === 'work-log'"
                           :steps="item.steps"
                           :progress="item.progress"
-                          :duration-ms="assistantTurns.get(msg.id)?.lastWorkLogId === item.id ? msg.durationMs : undefined"
-                          :epoch-snapshot="msg.epochSnapshot"
+                          :duration-ms="assistantTurns.get(row.msg.id)?.lastWorkLogId === item.id ? row.msg.durationMs : undefined"
+                          :epoch-snapshot="row.msg.epochSnapshot"
                           :sync-mode="fleet.syncMode"
                           :reveal="revealedWorkLog?.logId === item.id ? revealedWorkLog : undefined"
+                          :step-count="row.stepCount"
                           @open-file="fp => emit('openFile', fp)"
                           @open-subagent="sid => emit('openSubagent', sid)"
                         />
                         <MarkdownMessage
                           v-else-if="item.type === 'text' && item.text"
                           :text="item.text"
-                          :streaming="msg.streaming && item.isLast"
+                          :streaming="row.msg.streaming && item.isLast"
                           :known-files="knownFilesSet"
                           @open-file="(fp, ln) => emit('openFile', fp, ln)"
                         />
@@ -2749,38 +2880,47 @@ async function retryTurn(msg: ChatMessage) {
                           :compact="compact"
                           :session-key="effectiveKey || undefined"
                           :hermes-media="effectiveProvider === 'hermes'"
-                          :streaming="msg.streaming"
+                          :streaming="row.msg.streaming"
                           @preview-image="openImageLightbox"
                           @open-file="fp => emit('openFile', fp)"
-                          @handoff="art => shareAsHandoff(msg, art)"
+                          @handoff="art => shareAsHandoff(row.msg, art)"
                           @status="emit('action', $event)"
                         />
+                        <button
+                          v-else-if="item.type === 'attachment-note'"
+                          type="button"
+                          class="inbox-chip"
+                          :title="item.path || item.name"
+                          @click="item.path && emit('openFile', item.path)"
+                        >
+                          <span class="inbox-chip-ic" aria-hidden="true">📎</span>{{ item.name }}
+                        </button>
                       </template>
                     </div>
                   </template>
-                  <div v-else-if="msg.streaming" class="typing" aria-label="思考与输出中"><i></i><i></i><i></i></div>
+                  <div v-else-if="row.msg.streaming" class="typing" aria-label="思考与输出中"><i></i><i></i><i></i></div>
 
                   <FormQuestionCard
-                    v-for="frm in msg.forms"
+                    v-for="frm in row.msg.forms"
                     :key="frm.formId"
                     :form="frm"
                     @submit="(fid, ans) => fleet.replyForm(fid, ans, false)"
                     @cancel="fid => fleet.replyForm(fid, undefined, true)"
                   />
 
-                  <div v-if="msg.error" class="state warn error-card-wrap">
+                  <div v-if="row.msg.error" class="state warn error-card-wrap">
                     <div class="error-card-top">
                       <OpusIcon name="alert" />
-                      <span>{{ msg.error }}</span>
+                      <span>{{ row.msg.error }}</span>
                     </div>
-                    <div v-if="isQuotaOrModelError(msg.error) && fallbackModels.length && !isStreaming" class="error-rescue-row">
+                    <div v-if="isQuotaOrModelError(row.msg.error) && fallbackModels.length && !isStreaming" class="error-rescue-row">
                       <span class="error-rescue-lbl">切换可用模型并重试：</span>
                       <button
                         v-for="fm in fallbackModels"
                         :key="fm.id"
                         type="button"
                         class="btn btn-subtle btn-sm"
-                        @click="switchModelAndRetry(fm.id, msgIdx)"
+                        @click="switchModelAndRetry(fm.id, row.sourceIndex)"
                       >
                         <span>{{ fm.label }}</span>
                       </button>
@@ -2788,7 +2928,7 @@ async function retryTurn(msg: ChatMessage) {
                   </div>
 
                   <PermissionRequestCard
-                    v-for="card in msg.approvals"
+                    v-for="card in row.msg.approvals"
                     :key="card.callId"
                     :card="card"
                     @respond="handleApproval"
@@ -2796,52 +2936,52 @@ async function retryTurn(msg: ChatMessage) {
                 </div>
 
                 <div
-                  v-if="msg.role === 'assistant' && !msg.streaming && (msg.text || msg.error || msg.checkpointId || msg.diffSummary?.filesChanged || assistantTurns.get(msg.id)?.testResult)"
+                  v-if="row.msg.role === 'assistant' && !row.msg.streaming && (row.msg.text || row.msg.error || row.msg.checkpointId || row.msg.diffSummary?.filesChanged || assistantTurns.get(row.msg.id)?.testResult)"
                   class="msg-foot"
                 >
                   <div
-                    v-if="assistantTurns.get(msg.id)?.testResult || msg.checkpointId || msg.diffSummary?.filesChanged"
+                    v-if="assistantTurns.get(row.msg.id)?.testResult || row.msg.checkpointId || row.msg.diffSummary?.filesChanged"
                     class="msg-foot-details"
                   >
-                    <div v-if="assistantTurns.get(msg.id)?.testResult" class="turn-diff-bar" aria-label="本轮测试结果">
-                      <span class="num">{{ assistantTurns.get(msg.id)?.testResult?.passed }} 项测试通过
-                        <template v-if="assistantTurns.get(msg.id)?.testResult?.failed"> · {{ assistantTurns.get(msg.id)?.testResult?.failed }} 项失败</template>
-                        <template v-else-if="!assistantTurns.get(msg.id)?.testResult?.successful"> · 测试命令失败</template>
+                    <div v-if="assistantTurns.get(row.msg.id)?.testResult" class="turn-diff-bar" aria-label="本轮测试结果">
+                      <span class="num">{{ assistantTurns.get(row.msg.id)?.testResult?.passed }} 项测试通过
+                        <template v-if="assistantTurns.get(row.msg.id)?.testResult?.failed"> · {{ assistantTurns.get(row.msg.id)?.testResult?.failed }} 项失败</template>
+                        <template v-else-if="!assistantTurns.get(row.msg.id)?.testResult?.successful"> · 测试命令失败</template>
                       </span>
                     </div>
-                    <div v-if="msg.checkpointId || msg.diffSummary?.filesChanged" class="turn-diff-bar">
+                    <div v-if="row.msg.checkpointId || row.msg.diffSummary?.filesChanged" class="turn-diff-bar">
                       <button
                         type="button"
                         class="diff-pill num"
                         title="在右侧检查代码改动详情"
-                        @click="inspectTurnDiff(msg.checkpointId)"
+                        @click="inspectTurnDiff(row.msg.checkpointId)"
                       >
                         <OpusIcon name="branch" />
-                        <span>+{{ msg.diffSummary?.additions ?? 0 }} -{{ msg.diffSummary?.deletions ?? 0 }}</span>
-                        <span>· {{ msg.diffSummary?.filesChanged ?? 0 }} 文件</span>
+                        <span>+{{ row.msg.diffSummary?.additions ?? 0 }} -{{ row.msg.diffSummary?.deletions ?? 0 }}</span>
+                        <span>· {{ row.msg.diffSummary?.filesChanged ?? 0 }} 文件</span>
                       </button>
-                      <span v-if="msg.checkpointId && isCheckpointReverted(msg.checkpointId)" class="reverted-tag">已回滚</span>
+                      <span v-if="row.msg.checkpointId && isCheckpointReverted(row.msg.checkpointId)" class="reverted-tag">已回滚</span>
                     </div>
                   </div>
                   <div class="msg-foot-actions">
                     <button
-                      v-if="msg.text"
+                      v-if="row.msg.text"
                       type="button"
                       class="message-action"
-                      :aria-label="copiedMsgId === msg.id ? '已复制' : '复制'"
-                      :title="copiedMsgId === msg.id ? '已复制' : '复制'"
-                      @click="copyMessageText(msg)"
-                    ><OpusIcon :name="copiedMsgId === msg.id ? 'check' : 'copy'" /></button>
+                      :aria-label="copiedMsgId === row.msg.id ? '已复制' : '复制'"
+                      :title="copiedMsgId === row.msg.id ? '已复制' : '复制'"
+                      @click="copyMessageText(row.msg)"
+                    ><OpusIcon :name="copiedMsgId === row.msg.id ? 'check' : 'copy'" /></button>
                     <button
-                      v-if="canReadReplies && msg.text?.trim()"
+                      v-if="canReadReplies && row.msg.text?.trim()"
                       type="button"
                       class="message-action"
-                      :aria-label="readingReplyId === msg.id ? '停止朗读' : '朗读回复'"
-                      :title="readingReplyId === msg.id ? '停止朗读' : '朗读回复'"
-                      :aria-pressed="readingReplyId === msg.id"
-                      @click="toggleReadingReply(msg)"
+                      :aria-label="readingReplyId === row.msg.id ? '停止朗读' : '朗读回复'"
+                      :title="readingReplyId === row.msg.id ? '停止朗读' : '朗读回复'"
+                      :aria-pressed="readingReplyId === row.msg.id"
+                      @click="toggleReadingReply(row.msg)"
                     >
-                      <Square v-if="readingReplyId === msg.id" aria-hidden="true" />
+                      <Square v-if="readingReplyId === row.msg.id" aria-hidden="true" />
                       <Volume2 v-else aria-hidden="true" />
                     </button>
                     <button
@@ -2850,7 +2990,7 @@ async function retryTurn(msg: ChatMessage) {
                       aria-label="重生成"
                       title="重生成"
                       :disabled="sending || isStreaming"
-                      @click="handleRegenerate(msgIdx)"
+                      @click="handleRegenerate(row.sourceIndex)"
                     ><OpusIcon name="sync" /></button>
                     <button
                       v-if="!compact && effectiveKey && fleet.sessionsByKey[effectiveKey]"
@@ -2858,41 +2998,42 @@ async function retryTurn(msg: ChatMessage) {
                       class="message-action"
                       aria-label="分支"
                       title="分支"
-                      @click="handleForkAt(msgIdx)"
+                      @click="handleForkAt(row.sourceIndex)"
                     ><OpusIcon name="branch" /></button>
                     <button
                       type="button"
                       class="message-action"
-                      :class="{ 'is-bookmarked': isMessageBookmarked(msg.id) }"
-                      :aria-pressed="isMessageBookmarked(msg.id)"
-                      :aria-label="isMessageBookmarked(msg.id) ? '取消收藏' : '收藏'"
-                      :title="isMessageBookmarked(msg.id) ? '取消收藏' : '收藏'"
-                      @click="toggleBookmark(msg.id)"
+                      :class="{ 'is-bookmarked': isMessageBookmarked(row.msg.id) }"
+                      :aria-pressed="isMessageBookmarked(row.msg.id)"
+                      :aria-label="isMessageBookmarked(row.msg.id) ? '取消收藏' : '收藏'"
+                      :title="isMessageBookmarked(row.msg.id) ? '取消收藏' : '收藏'"
+                      @click="toggleBookmark(row.msg.id)"
                     ><OpusIcon name="sparkle" /></button>
                     <button
-                      v-if="msg.text && !compact"
+                      v-if="row.msg.text && !compact"
                       type="button"
                       class="message-action"
                       aria-label="交接会话"
                       title="交接会话"
-                      @click="shareAsHandoff(msg)"
+                      @click="shareAsHandoff(row.msg)"
                     ><OpusIcon name="send" /></button>
                     <button
-                      v-if="msg.checkpointId && !isCheckpointReverted(msg.checkpointId)"
+                      v-if="row.msg.checkpointId && !isCheckpointReverted(row.msg.checkpointId)"
                       type="button"
                       class="message-action"
                       aria-label="回滚此轮"
                       title="撤销本轮产生的代码改动"
-                      @click="handleRevertCheckpoint(msg.checkpointId)"
+                      @click="handleRevertCheckpoint(row.msg.checkpointId)"
                     ><OpusIcon name="history" /></button>
-                    <span v-if="msg.turnOutputTokens || msg.turnTokens" class="msg-foot-metrics num">
-                      <span :title="msg.turnOutputTokens ? '本轮输出 token' : '本轮总 token'">
-                        {{ formatTokenCount(msg.turnOutputTokens || msg.turnTokens || 0) }} tok
+                    <span v-if="row.msg.turnOutputTokens || row.msg.turnTokens" class="msg-foot-metrics num">
+                      <span :title="row.msg.turnOutputTokens ? '本轮输出 token' : '本轮总 token'">
+                        {{ formatTokenCount(row.msg.turnOutputTokens || row.msg.turnTokens || 0) }} tok
                       </span>
-                      <span v-if="replyTokenRate(msg) !== null" title="按本轮用时计算的平均输出速度">
-                        {{ replyTokenRate(msg) }} t/s
+                      <span v-if="replyTokenRate(row.msg) !== null" title="按本轮用时计算的平均输出速度">
+                        {{ replyTokenRate(row.msg) }} t/s
                       </span>
                     </span>
+                    <span v-if="row.msg.createdAt" class="num msg-time">{{ formatMsgTime(row.msg.createdAt) }}</span>
                   </div>
                 </div>
               </div>
@@ -2960,20 +3101,6 @@ async function retryTurn(msg: ChatMessage) {
         :streaming="isStreaming"
         @execute-plan="handleExecutePlan"
       />
-
-      <div v-if="effectiveOutbox.length" class="follow-queue">
-        <div class="queue-hdr" role="status">
-          <OpusIcon name="tasks" class="queue-ic" />
-          <span>{{ waitsForReconnect ? '重连后发送' : '待发送' }}（{{ effectiveOutbox.length }}）</span>
-        </div>
-        <div class="queue-items">
-          <div v-for="item in effectiveOutbox" :key="item.id" class="queue-row">
-            <span class="queue-text">{{ item.text }}</span>
-            <button type="button" class="btn btn-ghost btn-sm"
-              @click="fleet.cancelDeferredPrompt(item.id) || emit('action', '这条消息正在发送')">还原到输入框</button>
-          </div>
-        </div>
-      </div>
 
       <div v-if="effectiveQueue.length" class="follow-queue">
         <div class="queue-hdr">
@@ -3248,12 +3375,6 @@ async function retryTurn(msg: ChatMessage) {
               />
             </div>
             <button
-              v-if="isStreaming && (draft.trim() || queuedFiles.length || queuedContexts.length || queuedPastedBlocks.length)"
-              type="button"
-              class="btn btn-subtle btn-sm m-queue-btn"
-              @click="handleSubmit"
-            >排队</button>
-            <button
               type="button"
               class="send m-send-btn"
               :class="{ stop: isStreaming }"
@@ -3264,6 +3385,17 @@ async function retryTurn(msg: ChatMessage) {
               <Transition name="send-icon">
                 <OpusIcon :key="String(isStreaming)" :name="isStreaming ? 'stop' : 'arrowUp'" />
               </Transition>
+            </button>
+            <button
+              v-if="isStreaming && (draft.trim() || queuedFiles.length || queuedContexts.length || queuedPastedBlocks.length)"
+              type="button"
+              class="send m-send-btn send-follow"
+              aria-label="发送（运行中将以插话送达）"
+              title="发送：当前回合运行中，将作为插话立即送达"
+              :disabled="sending"
+              @click="handleSubmit"
+            >
+              <OpusIcon name="arrowUp" />
             </button>
           </div>
 
@@ -3372,16 +3504,6 @@ async function retryTurn(msg: ChatMessage) {
             <OpusIcon name="chevD" class="trigger-chev" />
           </button>
           <button
-            v-if="isStreaming && (draft.trim() || queuedFiles.length || queuedContexts.length || queuedPastedBlocks.length)"
-            type="button"
-            class="btn btn-subtle btn-sm queue-add-btn"
-            title="加入待发队列（生成结束后自动发送）"
-            @click="handleSubmit"
-          >
-            <OpusIcon name="plus" />
-            <span>排队</span>
-          </button>
-          <button
             type="button"
             class="send"
             :class="{ stop: isStreaming }"
@@ -3392,6 +3514,17 @@ async function retryTurn(msg: ChatMessage) {
             <Transition name="send-icon">
               <OpusIcon :key="String(isStreaming)" :name="isStreaming ? 'stop' : 'arrowUp'" />
             </Transition>
+          </button>
+          <button
+            v-if="isStreaming && (draft.trim() || queuedFiles.length || queuedContexts.length || queuedPastedBlocks.length)"
+            type="button"
+            class="send send-follow"
+            aria-label="发送（运行中将以插话送达）"
+            title="发送：当前回合运行中，将作为插话立即送达"
+            :disabled="sending"
+            @click="handleSubmit"
+          >
+            <OpusIcon name="arrowUp" />
           </button>
         </div>
       </div>
@@ -4128,7 +4261,7 @@ async function retryTurn(msg: ChatMessage) {
 }
 .activity-pull { overscroll-behavior-y: contain; }
 .activity-history { margin-bottom: 4px; }
-.activity-unavailable { margin: 0 0 6px; color: var(--text-2); font-size: 12px; }
+.activity-unavailable { margin: 0 0 6px; color: var(--text-2); font-size: calc(12px * var(--fs)); }
 .thread-root :deep(.composer),
 .thread-root :deep(.mcomposer) {
   position: relative;
@@ -4136,7 +4269,7 @@ async function retryTurn(msg: ChatMessage) {
 }
 .msgs:has(.thread-empty) { display: grid; align-items: safe center; }
 .msgs .thread-empty { padding: 24px 0; }
-.msgs .thread-empty h4 { font-size: clamp(18px, 2cqi, 24px); letter-spacing: -.025em; }
+.msgs .thread-empty h4 { font-size: calc(clamp(18px, 2cqi, 24px) * var(--fs)); letter-spacing: -.025em; }
 .composer { padding: 12px clamp(12px, 4%, 38px) 16px; }
 .composer-box {
   border: 1px solid var(--line-strong);
@@ -4161,7 +4294,7 @@ async function retryTurn(msg: ChatMessage) {
   width: 100%;
   padding: 4px 0;
   font: inherit;
-  font-size: 14px;
+  font-size: calc(14px * var(--fs));
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -4174,7 +4307,7 @@ async function retryTurn(msg: ChatMessage) {
 .mcomposer .composer-input, .mcomposer .draft-measure {
   min-height: 32px;
   padding: 4px 0;
-  font-size: 15px;
+  font-size: calc(15px * var(--fs));
   line-height: 1.4;
 }
 .thread-root .composer-input:focus,
@@ -4204,7 +4337,7 @@ async function retryTurn(msg: ChatMessage) {
   border-radius: 8px;
   background: var(--solid);
   color: var(--text);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   font-weight: 450;
   white-space: nowrap;
   box-shadow: 0 6px 18px -4px rgba(15, 23, 42, .12), 0 2px 6px rgba(15, 23, 42, .05);
@@ -4216,7 +4349,7 @@ async function retryTurn(msg: ChatMessage) {
 }
 .trigger-tip kbd {
   font: inherit;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--text-3);
 }
 @media (hover: hover) {
@@ -4236,7 +4369,7 @@ async function retryTurn(msg: ChatMessage) {
   padding: 0 7px;
   border-radius: 7px;
   color: var(--text-2);
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   font-weight: 450;
   cursor: pointer;
   transition: background-color var(--dur-1), color var(--dur-1);
@@ -4271,7 +4404,7 @@ async function retryTurn(msg: ChatMessage) {
 .trigger-effort {
   flex: none;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   font-weight: 400;
   white-space: nowrap;
 }
@@ -4313,7 +4446,7 @@ async function retryTurn(msg: ChatMessage) {
   background: var(--solid);
   box-shadow: 0 2px 10px rgba(15, 23, 42, .05);
   color: var(--text-2);
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   font-weight: 520;
   white-space: nowrap;
   cursor: pointer;
@@ -4349,7 +4482,7 @@ async function retryTurn(msg: ChatMessage) {
 }
 .m-status-pill .i { width: 13px; height: 13px; flex: none; }
 .m-status-pill .m-pill-chev { width: 11px; height: 11px; opacity: .7; }
-.m-status-pill .m-pill-sub { color: var(--text-3); font-size: 11.5px; }
+.m-status-pill .m-pill-sub { color: var(--text-3); font-size: calc(11.5px * var(--fs)); }
 .m-composer-bar {
   display: flex;
   align-items: flex-end;
@@ -4380,7 +4513,7 @@ async function retryTurn(msg: ChatMessage) {
   min-block-size: 38px;
   max-block-size: 136px;
   padding: 8px 2px;
-  font-size: 15px;
+  font-size: calc(15px * var(--fs));
   line-height: 1.45;
   overflow-y: auto;
   resize: none;
@@ -4388,7 +4521,7 @@ async function retryTurn(msg: ChatMessage) {
 .mcomposer .draft-measure {
   min-height: 38px;
   padding: 8px 2px;
-  font-size: 15px;
+  font-size: calc(15px * var(--fs));
   line-height: 1.45;
 }
 .m-queue-btn {
@@ -4439,9 +4572,43 @@ async function retryTurn(msg: ChatMessage) {
   height: 30px;
   border-radius: 999px;
 }
+/* [附带文件] 说明块的渲染：图片缩略图 / 文件名芯片 */
+.inbox-thumb {
+  display: block;
+  max-width: 220px;
+  max-height: 220px;
+  margin-top: 6px;
+  border-radius: 12px;
+  object-fit: cover;
+  cursor: zoom-in;
+}
+.inbox-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  margin-top: 6px;
+  padding: 6px 10px;
+  overflow: hidden;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.04);
+  color: inherit;
+  font-size: calc(12.5px * var(--fs));
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.inbox-chip-ic { flex: none; }
+
 .mcomposer .send.m-send-btn {
   width: 38px;
   height: 38px;
+}
+/* 运行中：停止键右侧的「立即发送（插话）」键 */
+.send-follow {
+  flex: none;
+  margin-left: 6px;
 }
 .thread-mobile .run-popover,
 .thread-mobile .run-popover.is-model,
@@ -4465,7 +4632,7 @@ async function retryTurn(msg: ChatMessage) {
 .thread-mobile .picker-option {
   min-height: 36px;
   padding: 6px 9px;
-  font-size: 13px;
+  font-size: calc(13px * var(--fs));
 }
 .thread-mobile .mention-option {
   min-height: 38px;
@@ -4480,7 +4647,7 @@ async function retryTurn(msg: ChatMessage) {
 .attachment-enter-from, .attachment-leave-to { opacity: 0; transform: translateY(3px); }
 .popover-head {
   padding: 2px 8px 4px;
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   font-weight: 500;
   line-height: 14px;
   color: var(--text-3);
@@ -4534,7 +4701,7 @@ async function retryTurn(msg: ChatMessage) {
   padding: 4px 8px;
   border-radius: 6px;
   text-align: left;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   line-height: 1.3;
   color: var(--text);
   cursor: pointer;
@@ -4571,7 +4738,7 @@ async function retryTurn(msg: ChatMessage) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   font-weight: 450;
   color: var(--text);
 }
@@ -4580,7 +4747,7 @@ async function retryTurn(msg: ChatMessage) {
   font-weight: 550;
 }
 .option-desc {
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   line-height: 1.3;
   color: var(--text-3);
   white-space: normal;
@@ -4588,7 +4755,7 @@ async function retryTurn(msg: ChatMessage) {
 .picker-effort {
   flex: none;
   color: var(--text-3);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   font-weight: 400;
   white-space: nowrap;
 }
@@ -4600,7 +4767,7 @@ async function retryTurn(msg: ChatMessage) {
   border-radius: 999px;
   background: var(--surface-3);
   color: var(--text-2);
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--fs));
   font-weight: 500;
   line-height: 1;
   flex: none;
@@ -4621,7 +4788,7 @@ async function retryTurn(msg: ChatMessage) {
   height: 15px;
   padding: 0 5px;
   border-radius: 999px;
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--fs));
   line-height: 1;
   flex: none;
 }
@@ -4635,7 +4802,7 @@ async function retryTurn(msg: ChatMessage) {
   border-radius: 999px;
   background: var(--surface-2);
   color: var(--text-3);
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--fs));
   line-height: 1;
   flex: none;
 }
@@ -4742,7 +4909,7 @@ async function retryTurn(msg: ChatMessage) {
   margin: 0;
   padding: 3px 8px;
   color: var(--text-3);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   line-height: 1.3;
 }
 .picker-footer-note .i {
@@ -4769,7 +4936,7 @@ async function retryTurn(msg: ChatMessage) {
   align-items: center;
   gap: 5px;
   min-width: 0;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   font-weight: 500;
   color: var(--text-2);
 }
@@ -4780,7 +4947,7 @@ async function retryTurn(msg: ChatMessage) {
   color: var(--text-3);
 }
 .usage-total {
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   font-weight: 600;
   color: var(--text);
   white-space: nowrap;
@@ -4790,14 +4957,14 @@ async function retryTurn(msg: ChatMessage) {
   flex-wrap: wrap;
   align-items: center;
   gap: 3px;
-  font-size: 10px;
+  font-size: calc(10px * var(--fs));
   line-height: 1.3;
   color: var(--text-3);
 }
 .context-details {
   margin: 2px 0;
   padding: 0 8px;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
 }
 .context-details > div {
   display: flex;
@@ -4825,11 +4992,11 @@ async function retryTurn(msg: ChatMessage) {
 .sandbox-details summary .i { width: 14px; height: 14px; flex: none; color: var(--text-3); }
 .sandbox-details summary .details-chevron { width: 12px; height: 12px; transition: transform var(--dur-1) var(--ease-out); }
 .sandbox-details summary span { display: grid; flex: 1; min-width: 0; }
-.sandbox-details summary small { color: var(--text-3); font-size: 10px; }
-.sandbox-details summary b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 500; }
+.sandbox-details summary small { color: var(--text-3); font-size: calc(10px * var(--fs)); }
+.sandbox-details summary b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: calc(11.5px * var(--fs)); font-weight: 500; }
 .sandbox-details[open] .details-chevron { transform: rotate(90deg); }
-.sandbox-list { display: grid; gap: 3px; padding: 4px 8px 3px; color: var(--text-2); font-size: 10.5px; overflow-wrap: anywhere; }
-.sandbox-list code { padding: 2px 5px; border-radius: 5px; background: var(--surface-2); font-size: 10.5px; }
+.sandbox-list { display: grid; gap: 3px; padding: 4px 8px 3px; color: var(--text-2); font-size: calc(10.5px * var(--fs)); overflow-wrap: anywhere; }
+.sandbox-list code { padding: 2px 5px; border-radius: 5px; background: var(--surface-2); font-size: calc(10.5px * var(--fs)); }
 :global([data-mode="dark"] .thread-root .run-popover),
 :global([data-mode="dark"] .thread-root .effort-submenu),
 :global([data-mode="dark"] .thread-root .trigger-tip) {
@@ -4865,8 +5032,8 @@ async function retryTurn(msg: ChatMessage) {
   padding: 44px 20px 20px;
   color: var(--text-2);
 }
-.thread-empty h4 { margin: 4px 0 0; font-size: 15px; color: var(--text); }
-.thread-empty p { margin: 0; max-width: 420px; font-size: 12.5px; line-height: 1.6; }
+.thread-empty h4 { margin: 4px 0 0; font-size: calc(15px * var(--fs)); color: var(--text); }
+.thread-empty p { margin: 0; max-width: 420px; font-size: calc(12.5px * var(--fs)); line-height: 1.6; }
 .thread-empty-ic {
   display: grid;
   place-items: center;
@@ -4908,7 +5075,7 @@ async function retryTurn(msg: ChatMessage) {
 }
 .msg-foot-details {
   gap: 4px 8px;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--text-3);
 }
 .msg-foot-metrics {
@@ -4917,7 +5084,22 @@ async function retryTurn(msg: ChatMessage) {
   gap: 7px;
   padding-inline: 5px;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
+}
+.msg-time {
+  margin-left: auto;
+  font-size: calc(11px * var(--fs));
+  color: var(--text-3);
+}
+.msg .msg-time {
+  opacity: 0;
+  transition: opacity .12s;
+}
+.msg:hover .msg-time {
+  opacity: 1;
+}
+.mmsg .msg-time {
+  opacity: .7;
 }
 .message-action {
   display: inline-grid;
@@ -5017,14 +5199,14 @@ async function retryTurn(msg: ChatMessage) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   color: var(--text-2);
 }
 .msg-media-dl {
   flex: none;
   height: 26px;
   padding: 0 8px;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
 }
 .msg-file-card {
   display: flex;
@@ -5091,7 +5273,7 @@ dialog.img-lightbox::backdrop {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   font-weight: 550;
 }
 .lightbox-img {
@@ -5129,7 +5311,7 @@ dialog.img-lightbox::backdrop {
   border-radius: 999px;
   background: var(--surface-2);
   color: var(--text-2);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   font-weight: 450;
   white-space: nowrap;
   cursor: pointer;
@@ -5175,7 +5357,7 @@ dialog.img-lightbox::backdrop {
   border: 1px solid var(--line);
   background: var(--surface-2);
   color: var(--text-2);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
 }
 .sys-notice .i { width: 13px; height: 13px; color: var(--accent); flex: none; }
 .sys-notice-collapsible {
@@ -5187,7 +5369,7 @@ dialog.img-lightbox::backdrop {
   border: 1px solid var(--line);
   background: var(--surface-2);
   color: var(--text-2);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   overflow: hidden;
 }
 .sys-notice-collapsible.is-failed {
@@ -5236,7 +5418,7 @@ dialog.img-lightbox::backdrop {
   border-radius: 999px;
   background: color-mix(in srgb, var(--danger) 15%, transparent);
   color: var(--danger);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   font-weight: 600;
   line-height: 1.5;
 }
@@ -5250,7 +5432,7 @@ dialog.img-lightbox::backdrop {
   overflow: hidden;
   text-overflow: ellipsis;
   font-family: var(--mono, monospace);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   opacity: 0.85;
 }
 .sys-notice-cmd {
@@ -5259,7 +5441,7 @@ dialog.img-lightbox::backdrop {
   overflow: hidden;
   text-overflow: ellipsis;
   font-family: var(--mono, monospace);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   opacity: 0.75;
 }
 .sys-notice-chev {
@@ -5289,7 +5471,7 @@ dialog.img-lightbox::backdrop {
   margin: 0;
   color: var(--text-2);
   font-family: var(--mono, monospace);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -5314,14 +5496,14 @@ dialog.img-lightbox::backdrop {
   border-radius: 999px;
   border: 1px solid var(--line);
   background: var(--surface-2);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--text-2);
   cursor: pointer;
 }
 .diff-pill:hover { border-color: var(--accent-line); color: var(--text); }
 .diff-pill .i { width: 11px; height: 11px; color: var(--accent); }
 .reverted-tag {
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--text-3);
   padding: 2px 6px;
 }
@@ -5347,7 +5529,7 @@ dialog.img-lightbox::backdrop {
   gap: 2px 4px;
   margin-top: 4px;
   color: var(--text-3);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   white-space: nowrap;
 }
 .message-receipt {
@@ -5357,23 +5539,35 @@ dialog.img-lightbox::backdrop {
   gap: 3px;
   flex: none;
   min-width: 20px;
-  height: 24px;
+  min-height: 24px;
 }
 .message-receipt .i { width: 17px; height: 17px; }
-.message-receipt-text { font-size: 11px; line-height: 1; }
+.message-receipt-text { font-size: calc(11px * var(--fs)); line-height: 1; }
 .message-receipt-retry {
   padding: 0 4px;
   border: none;
   background: transparent;
   color: var(--warn, #a84a18);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   line-height: 1;
   text-decoration: underline;
   cursor: pointer;
 }
 .message-receipt-retry:disabled { opacity: 0.5; cursor: not-allowed; }
+.message-receipt-dismiss {
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: calc(11px * var(--fs));
+  line-height: 1;
+  opacity: 0.6;
+  cursor: pointer;
+}
+.message-receipt-dismiss:hover { opacity: 1; }
 .message-receipt.is-replied { color: var(--info, #1675c2); }
-.message-receipt.is-failed { color: var(--warn, #a84a18); }
+.message-receipt.is-failed,
+.message-receipt.is-unknown { color: var(--warn, #a84a18); }
 .user-token-count::before {
   content: '';
   display: inline-block;
@@ -5403,7 +5597,7 @@ dialog.img-lightbox::backdrop {
   display: flex;
   align-items: center;
   gap: 5px;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--text-3);
 }
 .queue-ic { width: 12px; height: 12px; color: var(--accent); }
@@ -5417,25 +5611,36 @@ dialog.img-lightbox::backdrop {
   background: var(--solid);
   border: 1px solid var(--line);
 }
+.queue-unconfirmed-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: calc(10px * var(--fs));
+  padding: 1px 4px;
+  border-radius: var(--r-xs, 3px);
+  background: var(--warn-soft);
+  color: var(--warn);
+  margin-right: 4px;
+  flex: none;
+}
 .queue-text {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
 }
 .queue-edit-input {
   flex: 1;
   min-width: 0;
   height: 26px;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
 }
 .queue-icon-btn { width: 24px; height: 24px; flex: none; }
 .queue-steer-btn { flex: none; }
 .thread-mobile .queue-steer-btn,
 .thread-mobile .queue-icon-btn { min-height: 36px; }
-.queue-add-btn { height: 28px; padding: 0 9px; font-size: 11.5px; flex: none; }
+.queue-add-btn { height: 28px; padding: 0 9px; font-size: calc(11.5px * var(--fs)); flex: none; }
 
 .composer-box, .mcomposer .box { position: relative; }
 .mention-popover {
@@ -5462,7 +5667,7 @@ dialog.img-lightbox::backdrop {
   padding: 5px 8px;
   border-radius: 7px;
   text-align: left;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   color: var(--text);
   cursor: pointer;
 }
@@ -5474,7 +5679,7 @@ dialog.img-lightbox::backdrop {
 .mention-option.is-active .mention-ic { color: var(--accent); }
 .mention-title {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   font-weight: 550;
   flex: none;
   max-width: 55%;
@@ -5488,7 +5693,7 @@ dialog.img-lightbox::backdrop {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--text-3);
   text-align: right;
 }
@@ -5505,12 +5710,12 @@ dialog.img-lightbox::backdrop {
   align-items: center;
   justify-content: space-between;
   padding: 4px 10px;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   font-weight: 600;
   color: var(--text-3);
   border-bottom: 1px solid var(--line);
 }
-.mcp-empty { padding: 14px 12px; font-size: 12px; text-align: center; }
+.mcp-empty { padding: 14px 12px; font-size: calc(12px * var(--fs)); text-align: center; }
 .mcp-row {
   padding: 8px 10px;
   border-bottom: 1px solid var(--line);
@@ -5519,15 +5724,15 @@ dialog.img-lightbox::backdrop {
 }
 .mcp-row:last-child { border-bottom: 0; }
 .mcp-row-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.mcp-name { font-weight: 600; font-size: 12px; color: var(--text); }
+.mcp-name { font-weight: 600; font-size: calc(12px * var(--fs)); color: var(--text); }
 .mcp-badge {
   padding: 1px 6px;
   border-radius: var(--r-full);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
 }
 .mcp-badge.is-ok { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
 .mcp-badge.is-warn { background: var(--warn-soft); color: var(--warn); }
-.mcp-tools, .mcp-err { margin: 0; font-size: 11px; }
+.mcp-tools, .mcp-err { margin: 0; font-size: calc(11px * var(--fs)); }
 .mcp-err { color: var(--warn); }
 
 .thread-search-bar {
@@ -5549,10 +5754,10 @@ dialog.img-lightbox::backdrop {
   border-radius: var(--r-xs);
   background: var(--solid);
   color: var(--text);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
 }
 .ts-count {
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--text-3);
   white-space: nowrap;
 }
@@ -5571,7 +5776,7 @@ dialog.img-lightbox::backdrop {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   font-weight: 600;
   color: var(--accent);
   flex: none;
@@ -5588,7 +5793,7 @@ dialog.img-lightbox::backdrop {
   border-radius: var(--r-full);
   background: var(--solid);
   color: var(--text-2);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   cursor: pointer;
   white-space: nowrap;
 }
@@ -5609,7 +5814,7 @@ dialog.img-lightbox::backdrop {
   border-radius: var(--r-full);
   background: var(--surface-2);
   border: 1px solid var(--line);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   color: var(--text-3);
   white-space: nowrap;
 }
@@ -5622,7 +5827,7 @@ dialog.img-lightbox::backdrop {
   border-radius: var(--r-full);
   background: var(--accent-soft);
   color: var(--accent);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   cursor: pointer;
   white-space: nowrap;
 }
@@ -5639,7 +5844,7 @@ dialog.img-lightbox::backdrop {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   font-weight: 600;
   color: var(--text-2);
 }
@@ -5647,7 +5852,7 @@ dialog.img-lightbox::backdrop {
   padding: 0 6px;
   border-radius: var(--r-full);
   background: var(--surface-2);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   color: var(--text-3);
 }
 .trust-chips {
@@ -5663,7 +5868,7 @@ dialog.img-lightbox::backdrop {
   border-radius: 5px;
   border: 1px solid var(--line-strong);
   background: var(--surface-2);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
 }
 .trust-chip code { font-family: var(--mono); }
 .trust-chip-x {
@@ -5672,12 +5877,12 @@ dialog.img-lightbox::backdrop {
   color: var(--text-3);
   cursor: pointer;
   padding: 0 2px;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
 }
 .trust-chip-x:hover { color: var(--warn); }
 .trust-empty {
   margin: 0;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   line-height: 1.4;
 }
 .trust-add-form {
@@ -5689,7 +5894,7 @@ dialog.img-lightbox::backdrop {
   min-width: 0;
   height: 26px;
   padding: 0 7px;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   font-family: var(--mono);
 }
 
@@ -5701,7 +5906,7 @@ dialog.img-lightbox::backdrop {
   content-visibility: auto;
   contain-intrinsic-size: auto none auto 140px;
 }
-.context-event { color: var(--text-3); font-size: 12px; }
+.context-event { color: var(--text-3); font-size: calc(12px * var(--fs)); }
 .context-event-rule {
   display: flex;
   align-items: center;
@@ -5744,9 +5949,9 @@ dialog.img-lightbox::backdrop {
 .raw-history-dialog[open] { display: flex; flex-direction: column; gap: 10px; }
 .raw-history-dialog::backdrop { background: rgb(0 0 0 / 35%); }
 .raw-history-header { display: flex; align-items: center; justify-content: space-between; }
-.raw-history-header h4 { margin: 0; font-size: 14px; }
+.raw-history-header h4 { margin: 0; font-size: calc(14px * var(--fs)); }
 .raw-history-content { margin: 0; padding: 8px 2px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 var(--mono, monospace); }
-.raw-history-empty { color: var(--text-2); font-size: 13px; }
+.raw-history-empty { color: var(--text-2); font-size: calc(13px * var(--fs)); }
 .raw-history-dialog > button { align-self: flex-start; }
 .older-history-bar {
   display: flex;
@@ -5762,7 +5967,7 @@ dialog.img-lightbox::backdrop {
   border-radius: var(--r-full);
   background: var(--surface-1);
   color: var(--text-2);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   cursor: pointer;
   transition: background-color 0.14s ease, color 0.14s ease;
 }
@@ -5779,7 +5984,7 @@ dialog.img-lightbox::backdrop {
   align-items: center;
   gap: 10px;
   margin: 6px 0 10px;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   font-weight: 560;
   color: var(--accent);
 }
@@ -5802,7 +6007,7 @@ dialog.img-lightbox::backdrop {
   border-radius: var(--r-full);
   background: var(--accent);
   color: var(--accent-ink, #fff);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   font-weight: 560;
   box-shadow: var(--shadow-2);
   cursor: pointer;
@@ -5829,7 +6034,7 @@ dialog.img-lightbox::backdrop {
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   color: var(--text);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   font-weight: 580;
   box-shadow: var(--shadow-2);
   cursor: pointer;
@@ -5895,7 +6100,7 @@ dialog.img-lightbox::backdrop {
   border-radius: var(--r-sm);
   border: 1px solid color-mix(in srgb, var(--warn) 32%, var(--line));
   background: color-mix(in srgb, var(--warn-soft) 55%, var(--surface-1));
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
 }
 .interrupted-txt {
   color: var(--text-2);
@@ -5904,12 +6109,12 @@ dialog.img-lightbox::backdrop {
   margin: 0;
   padding: 6px 12px;
   color: var(--warn);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
 }
 .queue-att-badge {
   margin-left: 5px;
   font-style: normal;
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   color: var(--text-3);
 }
 .chip--paste {
@@ -5939,7 +6144,7 @@ dialog.img-lightbox::backdrop {
   align-items: center;
   justify-content: space-between;
   padding: 4px 8px;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--text-3);
   border-bottom: 1px solid var(--line);
 }
@@ -5949,7 +6154,7 @@ dialog.img-lightbox::backdrop {
   max-height: 130px;
   overflow: auto;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   line-height: 1.45;
   color: var(--text-2);
   white-space: pre-wrap;
@@ -5964,7 +6169,7 @@ dialog.img-lightbox::backdrop {
   border-radius: var(--r-xs);
   background: var(--accent-soft);
   color: var(--accent);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
 }
 .speech-dot {
   width: 6px;
@@ -6042,7 +6247,7 @@ dialog.img-lightbox::backdrop {
   border-top: 1px dashed color-mix(in srgb, var(--warn) 35%, var(--line));
 }
 .error-rescue-lbl {
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   color: var(--text-2);
 }
 
@@ -6057,7 +6262,7 @@ dialog.img-lightbox::backdrop {
   border-radius: var(--r-sm);
   border: 1px solid var(--line-strong);
   background: var(--surface-2);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   color: var(--text-2);
 }
 .esc-arm-banner kbd {
@@ -6066,7 +6271,7 @@ dialog.img-lightbox::backdrop {
   border: 1px solid var(--line-strong);
   background: var(--solid);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
 }
 
 /* ---------------- 五套对话气泡样式偏好（Minimal / Claude / Lobe / AntD / Timeline） ---------------- */

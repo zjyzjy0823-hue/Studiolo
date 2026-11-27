@@ -20,10 +20,10 @@ withDefaults(defineProps<{
 <style scoped>
 .page-header { display:flex; align-items:flex-end; justify-content:space-between; gap:20px; min-width:0; margin:6px 0 22px; color:var(--workbench-text); }
 .page-header__copy { min-width:0; }
-.page-header__eyebrow { margin-bottom:5px; color:var(--workbench-muted); font-size:12px; font-weight:600; }
+.page-header__eyebrow { margin-bottom:5px; color:var(--workbench-muted); font-size:calc(12px * var(--fs)); font-weight:600; }
 .page-header__sparkle { display:none; }
-h1 { margin:0; font-size:clamp(28px,3vw,38px); line-height:1.15; letter-spacing:-.04em; font-weight:730; }
-p { margin:7px 0 0; color:var(--workbench-muted); font-size:13px; line-height:1.5; }
+h1 { margin:0; font-size:calc(clamp(28px,3vw,38px) * var(--fs)); line-height:1.15; letter-spacing:-.04em; font-weight:730; }
+p { margin:7px 0 0; color:var(--workbench-muted); font-size:calc(13px * var(--fs)); line-height:1.5; }
 .page-header__actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; flex:none; }
 @media (max-width:700px) { .page-header { align-items:flex-start; flex-direction:column; gap:12px; margin:3px 0 16px; } }
 </style>

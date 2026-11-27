@@ -84,7 +84,7 @@ onUnmounted(() => mediaQuery?.removeEventListener('change', updateDesktop))
 .resizable-widget :deep(.glass-card:hover) { transform: none; }
 .resizable-widget__content { width: 100%; height: 100%; min-width: 0; min-height: 0; }
 .resizable-widget--editing { outline: 2px dashed rgba(255,255,255,.85); outline-offset: 3px; }
-.widget-control { position: absolute; z-index: 8; display: flex; align-items: center; justify-content: center; gap: 3px; height: 26px; padding: 0 8px; border: 1px solid var(--workbench-line); border-radius: 9px; background: var(--workbench-muted-surface); box-shadow: 0 4px 12px rgba(28,42,86,.25); color: var(--workbench-text); font-size: 11px; font-weight: 600; touch-action: none; user-select: none; }
+.widget-control { position: absolute; z-index: 8; display: flex; align-items: center; justify-content: center; gap: 3px; height: 26px; padding: 0 8px; border: 1px solid var(--workbench-line); border-radius: 9px; background: var(--workbench-muted-surface); box-shadow: 0 4px 12px rgba(28,42,86,.25); color: var(--workbench-text); font-size: calc(11px * var(--fs)); font-weight: 600; touch-action: none; user-select: none; }
 .widget-control:hover, .widget-control:focus-visible { background: var(--workbench-soft); }
 .widget-control:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 .widget-control--move { top: -12px; left: 50%; transform: translateX(-50%); cursor: grab; }

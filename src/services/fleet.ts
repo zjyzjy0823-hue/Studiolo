@@ -4,6 +4,7 @@
 
 import { apiRequest, apiResponse, ApiError } from '../api/client'
 import { blobResult, externalResultFromPayload, isJsonContentType, type HermesMediaResult } from './hermesMedia'
+import { shouldReport } from './downloadProgress'
 import { mapSessionProcesses, mapSessionSubagents, type SessionActivityResult } from './sessionActivity'
 import type { AdapterProvider, AgentNode, NodePlatform, NodeTokenOut } from '../types/fleet'
 
@@ -72,11 +73,58 @@ export const fetchSessionSubagents = (nodeId: string, sessionKey: string, option
 
 export type { HermesMediaResult }
 
+export interface MediaProgress {
+  loaded: number
+  total: number | null
+}
+
+async function readWithProgress(
+  response: Response,
+  onProgress?: (p: MediaProgress) => void,
+): Promise<Blob> {
+  const lengthHeader = response.headers.get('Content-Length')
+  const total = lengthHeader && !isNaN(Number(lengthHeader)) && Number(lengthHeader) > 0
+    ? Number(lengthHeader)
+    : null
+
+  if (!response.body || typeof response.body.getReader !== 'function') {
+    const blob = await response.blob()
+    const size = blob.size
+    onProgress?.({ loaded: size, total: total ?? size })
+    return blob
+  }
+
+  const reader = response.body.getReader()
+  const chunks: BlobPart[] = []
+  let loaded = 0
+  let lastReportAt = 0
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (value) {
+      chunks.push(value as unknown as BlobPart)
+      loaded += value.length
+      const now = Date.now()
+      if (shouldReport(now, lastReportAt)) {
+        lastReportAt = now
+        onProgress?.({ loaded, total })
+      }
+    }
+  }
+
+  onProgress?.({ loaded, total: total ?? loaded })
+
+  const contentType = response.headers.get('Content-Type') || ''
+  return new Blob(chunks, { type: contentType })
+}
+
 export async function fetchHermesMedia(
   token: string,
   origin: string,
   scope: { nodeId: string; sessionId: string; reference: string; purpose: 'preview' | 'download' },
   signal?: AbortSignal,
+  onProgress?: (progress: MediaProgress) => void,
 ): Promise<HermesMediaResult> {
   const base = '/api/v1/fleet/media'
   const post = (body: object) => ({ method: 'POST', body: JSON.stringify(body), signal })
@@ -93,7 +141,8 @@ export async function fetchHermesMedia(
     if (isJsonContentType(response.headers.get('Content-Type'))) {
       return externalResultFromPayload(await response.json(), sizeBytes)
     }
-    return blobResult(await response.blob(), sizeBytes)
+    const blob = await readWithProgress(response, onProgress)
+    return blobResult(blob, sizeBytes)
   }
   try {
     return await redeem()

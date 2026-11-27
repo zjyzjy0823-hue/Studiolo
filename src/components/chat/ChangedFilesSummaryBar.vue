@@ -108,7 +108,7 @@ const fileRows = computed(() =>
   border: 0;
   background: transparent;
   color: var(--text);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   cursor: pointer;
   text-align: left;
 }
@@ -125,7 +125,7 @@ const fileRows = computed(() =>
   background: var(--surface-2);
   color: var(--text-3);
   font-family: var(--mono);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   max-width: 140px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -164,7 +164,7 @@ const fileRows = computed(() =>
   border-radius: var(--r-sm);
   background: var(--solid);
   color: var(--text);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   font-weight: 550;
   cursor: pointer;
   flex: none;
@@ -194,7 +194,7 @@ const fileRows = computed(() =>
   border-radius: var(--r-xs);
   background: transparent;
   text-align: left;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   cursor: pointer;
 }
 .cfs-row:hover {
@@ -209,7 +209,7 @@ const fileRows = computed(() =>
   display: inline-grid;
   place-items: center;
   font-family: var(--mono);
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--fs));
   font-weight: 700;
   letter-spacing: -0.02em;
   background: var(--surface-2);
@@ -234,7 +234,7 @@ const fileRows = computed(() =>
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   color: var(--text-3);
 }
 .cfs-row-stats {
@@ -242,7 +242,7 @@ const fileRows = computed(() =>
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   font-weight: 550;
 }
 </style>

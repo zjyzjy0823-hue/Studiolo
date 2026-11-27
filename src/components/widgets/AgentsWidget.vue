@@ -55,12 +55,12 @@ function activityPoints(values: number[]) {
 
 <style scoped>
 .agents-card { min-width: 0; padding: 17px 18px 10px; }
-.agents-card :deep(.glass-card__title) { color: var(--workbench-text); font-size: 20px; font-weight: 500; }
+.agents-card :deep(.glass-card__title) { color: var(--workbench-text); font-size: calc(20px * var(--fs)); font-weight: 500; }
 .agents-card :deep(.glass-card__header) { margin-bottom: 10px; }
-.agents-card :deep(.glass-card__title)::after { content: '›'; display: inline-block; margin-left: 12px; font-size: 26px; font-weight: 300; line-height: .5; vertical-align: -1px; }
-.view-all { color: var(--workbench-text); font-size: 13px; white-space: nowrap; }
+.agents-card :deep(.glass-card__title)::after { content: '›'; display: inline-block; margin-left: 12px; font-size: calc(26px * var(--fs)); font-weight: 300; line-height: .5; vertical-align: -1px; }
+.view-all { color: var(--workbench-text); font-size: calc(13px * var(--fs)); white-space: nowrap; }
 .agent-list { display: grid; gap: 3px; }
-.widget-empty { align-self: center; margin: 28px 0; color: var(--workbench-text); font-size: 12px; text-align: center; }
+.widget-empty { align-self: center; margin: 28px 0; color: var(--workbench-text); font-size: calc(12px * var(--fs)); text-align: center; }
 .agent-row { display: grid; grid-template-columns: 48px minmax(0,1fr) 9px 90px; align-items: center; gap: 8px; min-width: 0; height: 58px; padding: 5px 11px; border: 1px solid var(--workbench-line); border-radius: 15px; background: var(--workbench-solid); box-shadow: inset 0 1px rgba(255,255,255,.5); transition: transform .2s ease, background .2s ease; }
 .agent-row:hover { transform: translateX(2px); background: var(--workbench-soft); }
 .agent-row--running { background: var(--workbench-solid); }
@@ -71,8 +71,8 @@ function activityPoints(values: number[]) {
 .lili-photo { width: 100%; height: 100%; object-fit: cover; object-position: center 22%; }
 .agent-identity { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .agent-identity strong,.agent-identity small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agent-identity strong { color: var(--workbench-text); font-size: 15px; font-weight: 650; line-height: 1.15; letter-spacing: -.025em; }
-.agent-identity small { color: var(--workbench-muted); font-size: 13px; line-height: 1.18; }
+.agent-identity strong { color: var(--workbench-text); font-size: calc(15px * var(--fs)); font-weight: 650; line-height: 1.15; letter-spacing: -.025em; }
+.agent-identity small { color: var(--workbench-muted); font-size: calc(13px * var(--fs)); line-height: 1.18; }
 .agent-identity small span { color: var(--workbench-muted); }
 .agent-identity em { color: var(--workbench-muted); font-style: normal; }
 .agent-identity .running-text { color: var(--workbench-good); }
@@ -85,9 +85,9 @@ function activityPoints(values: number[]) {
   .agent-row { grid-template-columns: 38px minmax(0, 1fr) 8px; gap: 6px; padding-inline: 7px; }
   .agent-avatar { width: 36px; height: 36px; }
   .agent-sparkline { display: none; }
-  .agent-identity strong { font-size: 12px; }
-  .agent-identity small { font-size: 10px; }
-  .view-all { font-size: 11px; }
+  .agent-identity strong { font-size: calc(12px * var(--fs)); }
+  .agent-identity small { font-size: calc(10px * var(--fs)); }
+  .view-all { font-size: calc(11px * var(--fs)); }
 }
 @container (max-height: 230px) {
   .agents-card { padding: 12px 13px 9px; }
@@ -96,5 +96,5 @@ function activityPoints(values: number[]) {
   .agent-avatar { width: 34px; height: 34px; }
   .agent-list { gap: 3px; }
 }
-@media (max-width: 470px) { .agent-row { grid-template-columns: 41px minmax(0,1fr) 8px 67px; gap: 6px; padding-inline: 7px; } .agent-avatar { width: 40px; height: 40px; } .agent-sparkline { width: 67px; } .agent-identity strong { font-size: 13px; } .agent-identity small { font-size: 11px; } }
+@media (max-width: 470px) { .agent-row { grid-template-columns: 41px minmax(0,1fr) 8px 67px; gap: 6px; padding-inline: 7px; } .agent-avatar { width: 40px; height: 40px; } .agent-sparkline { width: 67px; } .agent-identity strong { font-size: calc(13px * var(--fs)); } .agent-identity small { font-size: calc(11px * var(--fs)); } }
 </style>

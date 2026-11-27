@@ -246,9 +246,9 @@ function closePassword() {
 }
 .share-space-mark .i { width: 16px; height: 16px; }
 .share-space-label { display: grid; min-width: 0; gap: 2px; }
-.share-space-label > span { color: var(--text-2); font-size: 10px; }
+.share-space-label > span { color: var(--text-2); font-size: calc(10px * var(--fs)); }
 .share-space-label strong, .share-space-option-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.share-space-label strong { font-size: 13px; }
+.share-space-label strong { font-size: calc(13px * var(--fs)); }
 .share-space-chevron { width: 13px; height: 13px; flex: none; color: var(--text-2); }
 .share-space-menu {
   position: absolute;
@@ -269,12 +269,12 @@ function closePassword() {
 .share-space-option {
   display: flex; align-items: center; gap: 8px;
   width: 100%; min-height: 40px; padding: 5px 8px;
-  border-radius: 8px; color: var(--text); font-size: 13px; text-align: start;
+  border-radius: 8px; color: var(--text); font-size: calc(13px * var(--fs)); text-align: start;
 }
 .share-space-option[aria-pressed="true"], .share-space-option:hover { background: var(--accent-soft); }
 .share-space-option .i { width: 14px; height: 14px; flex: none; }
 .share-space-option-name { flex: 1; }
-.share-space-tier { color: var(--text-2); font-size: 11px; white-space: nowrap; }
+.share-space-tier { color: var(--text-2); font-size: calc(11px * var(--fs)); white-space: nowrap; }
 .share-space-check { color: var(--accent); }
 .share-file-button { flex: none; min-height: 42px; padding-inline: 11px; border: 1px solid var(--line); border-radius: 11px; }
 .share-file-button .i { width: 16px; height: 16px; }
@@ -285,18 +285,18 @@ function closePassword() {
   border: 1px solid var(--line-strong);
   border-radius: 14px;
   background: var(--surface-2);
-  font-size: 16px;
+  font-size: calc(16px * var(--fs));
   line-height: 1.6;
   resize: none;
 }
-.share-placeholder { display: grid; place-items: center; color: var(--text-2); font-size: 13px; text-align: center; }
-.share-attachment { display: flex; align-items: center; gap: 8px; padding-inline-start: 10px; border: 1px solid var(--line); border-radius: 10px; font-size: 13px; }
+.share-placeholder { display: grid; place-items: center; color: var(--text-2); font-size: calc(13px * var(--fs)); text-align: center; }
+.share-attachment { display: flex; align-items: center; gap: 8px; padding-inline-start: 10px; border: 1px solid var(--line); border-radius: 10px; font-size: calc(13px * var(--fs)); }
 .share-attachment > .i { width: 16px; height: 16px; flex: none; color: var(--text-2); }
 .share-attachment span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .share-actions { display: flex; justify-content: space-between; gap: 12px; }
 .share-actions .btn { min-height: 42px; }
 .share-save { min-width: 92px; }
-.share-note, .share-error { margin: 0; font-size: 12px; }
+.share-note, .share-error { margin: 0; font-size: calc(12px * var(--fs)); }
 .share-note { color: var(--text-2); }
 .share-error { color: var(--danger); }
 </style>

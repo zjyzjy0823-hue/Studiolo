@@ -138,7 +138,7 @@ function isPossiblyMissingFile(filePath: string): boolean {
   padding: 5px 9px;
   border-top: 1px solid var(--line);
   background: var(--solid);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
 }
 .md-inline-img-caption {
   min-width: 0;

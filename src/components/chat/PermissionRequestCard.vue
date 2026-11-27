@@ -85,7 +85,7 @@ const decisionLabel: Record<ApprovalDecision | 'submitted', string> = {
   display: flex;
   align-items: center;
   gap: 7px;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   font-weight: 620;
   color: var(--text);
 }
@@ -93,7 +93,7 @@ const decisionLabel: Record<ApprovalDecision | 'submitted', string> = {
 .perm-card.resolved .perm-top .i { color: var(--text-2); }
 .perm-title { flex: 1; min-width: 0; }
 .perm-risk {
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   font-weight: 600;
   padding: 2px 7px;
   border-radius: var(--r-pill);
@@ -106,7 +106,7 @@ const decisionLabel: Record<ApprovalDecision | 'submitted', string> = {
   border-radius: var(--r-xs);
   background: var(--solid);
   color: var(--text);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   word-break: break-all;
 }
@@ -122,7 +122,7 @@ const decisionLabel: Record<ApprovalDecision | 'submitted', string> = {
   border-radius: var(--r-xs);
   background: var(--solid);
   color: var(--text);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   text-align: start;
 }
 .perm-cmd-first {
@@ -147,7 +147,7 @@ const decisionLabel: Record<ApprovalDecision | 'submitted', string> = {
   .perm-actions .btn {
     min-height: 40px;
     justify-content: center;
-    font-size: 13.5px;
+    font-size: calc(13.5px * var(--fs));
     border-radius: 12px;
   }
   .perm-cmd-collapsed { min-height: 40px; }
@@ -156,7 +156,7 @@ const decisionLabel: Record<ApprovalDecision | 'submitted', string> = {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   color: var(--text-2);
 }
 .perm-done .i { width: 13px; height: 13px; }

@@ -104,28 +104,28 @@ const isNight = computed(() => now.value.getHours() < 6 || now.value.getHours() 
 .night-vignette { background: var(--workbench-solid); }
 .clock-main, .weather-reading, .weather-location { position: relative; z-index: 1; }
 .clock-main { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
-.clock-time { font-size: clamp(44px, 3.3vw, 51px); font-weight: 430; line-height: 1; letter-spacing: -.045em; font-variant-numeric: tabular-nums; text-shadow: none; }
-.clock-date { font-size: 16px; font-weight: 450; letter-spacing: -.018em; text-shadow: none; }
+.clock-time { font-size: calc(clamp(44px, 3.3vw, 51px) * var(--fs)); font-weight: 430; line-height: 1; letter-spacing: -.045em; font-variant-numeric: tabular-nums; text-shadow: none; }
+.clock-date { font-size: calc(16px * var(--fs)); font-weight: 450; letter-spacing: -.018em; text-shadow: none; }
 .weather-reading { display: flex; align-items: center; gap: 10px; margin-top: auto; color: var(--workbench-muted); }
 .weather-symbol { width: 44px; height: 44px; flex: none; }
 .weather-reading span { display: flex; flex-direction: column; color: var(--workbench-text); }
-.weather-reading strong { font-size: 24px; font-weight: 490; line-height: 1; letter-spacing: -.045em; }
-.weather-reading small { margin-top: 3px; font-size: 14px; font-weight: 450; }
-.weather-location { display: flex; align-items: center; gap: 8px; align-self: flex-start; margin-top: 19px; padding: 0; color: var(--workbench-text); border: 0; background: none; font: inherit; font-size: 14px; font-weight: 500; text-shadow: none; cursor: pointer; }
+.weather-reading strong { font-size: calc(24px * var(--fs)); font-weight: 490; line-height: 1; letter-spacing: -.045em; }
+.weather-reading small { margin-top: 3px; font-size: calc(14px * var(--fs)); font-weight: 450; }
+.weather-location { display: flex; align-items: center; gap: 8px; align-self: flex-start; margin-top: 19px; padding: 0; color: var(--workbench-text); border: 0; background: none; font: inherit; font-size: calc(14px * var(--fs)); font-weight: 500; text-shadow: none; cursor: pointer; }
 .weather-location:focus-visible { outline: 2px solid white; outline-offset: 4px; }
-.weather-credit { position: absolute; z-index: 2; right: 10px; bottom: 8px; color: var(--workbench-muted); font-size: 9px; text-decoration: none; text-shadow: none; }
+.weather-credit { position: absolute; z-index: 2; right: 10px; bottom: 8px; color: var(--workbench-muted); font-size: calc(9px * var(--fs)); text-decoration: none; text-shadow: none; }
 .weather-credit:hover { color: var(--workbench-text); text-decoration: underline; }
 @container (max-width: 280px) {
   .clock-content { padding-inline: 16px; }
-  .clock-time { font-size: clamp(37px, 17cqw, 48px); }
-  .clock-date { font-size: 13px; }
+  .clock-time { font-size: calc(clamp(37px, 17cqw, 48px) * var(--fs)); }
+  .clock-date { font-size: calc(13px * var(--fs)); }
   .clock-feature-moon { width: 51px; height: 51px; }
 }
 @container (max-height: 240px) {
   .clock-content { padding-block: 13px 15px; }
   .weather-symbol { width: 34px; height: 34px; }
-  .weather-reading strong { font-size: 20px; }
-  .weather-reading small, .weather-location { font-size: 12px; }
+  .weather-reading strong { font-size: calc(20px * var(--fs)); }
+  .weather-reading small, .weather-location { font-size: calc(12px * var(--fs)); }
   .weather-location { margin-top: 8px; }
 }
 @media (max-width: 800px) { .clock-content { min-height: 275px; } }

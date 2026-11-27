@@ -816,7 +816,7 @@ onUnmounted(() => {
   outline: none;
   box-shadow: none;
   padding: 0;
-  font-size: 13.5px;
+  font-size: calc(13.5px * var(--fs));
   color: var(--text);
 }
 .home-capture input::placeholder { color: var(--text-3); }
@@ -840,7 +840,7 @@ onUnmounted(() => {
   height: 30px;
   padding: 0 11px;
   border-radius: 6px;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   font-weight: 550;
   color: var(--text-2);
   transition: background-color var(--dur-1), color var(--dur-1), box-shadow var(--dur-1);
@@ -902,7 +902,7 @@ onUnmounted(() => {
   height: 30px;
   padding: 0 11px 0 8px;
   border-radius: 999px;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   font-weight: 500;
 }
 .is-card .bm-item {
@@ -925,7 +925,7 @@ onUnmounted(() => {
   border-radius: 5px;
   background: var(--surface-3);
   color: var(--text);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   font-weight: 700;
   flex: none;
   overflow: hidden;
@@ -939,8 +939,8 @@ onUnmounted(() => {
 .is-icon .bm-fav { width: 20px; height: 20px; }
 .bm-name { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bm-card-copy { display: grid; line-height: 1.2; text-align: left; }
-.bm-card-copy strong { font-size: 12px; font-weight: 600; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bm-card-copy small { font-size: 10.5px; color: var(--text-3); max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bm-card-copy strong { font-size: calc(12px * var(--fs)); font-weight: 600; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bm-card-copy small { font-size: calc(10.5px * var(--fs)); color: var(--text-3); max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bm-add {
   display: inline-flex;
   align-items: center;
@@ -950,7 +950,7 @@ onUnmounted(() => {
   border-radius: 999px;
   border: 1px dashed var(--line-strong);
   color: var(--text-3);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   flex: none;
 }
 .is-card .bm-add { height: 40px; border-radius: var(--r-sm); }
@@ -991,7 +991,7 @@ onUnmounted(() => {
   border-radius: 7px;
   border: 1px solid var(--line);
   background: var(--solid);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   color: var(--text-2);
 }
 .bm-all:hover { color: var(--text); background: var(--surface-2); }
@@ -1050,8 +1050,8 @@ onUnmounted(() => {
   flex: none;
 }
 .deliv-head-copy { display: grid; gap: 2px; min-width: 0; }
-.deliv-head-copy strong { font-size: clamp(13px, 1cqi, 17px); font-weight: 650; color: var(--text); line-height: 1.3; }
-.deliv-head-copy span { font-size: clamp(11.5px, 0.85cqi, 14px); color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.deliv-head-copy strong { font-size: calc(clamp(13px, 1cqi, 17px) * var(--fs)); font-weight: 650; color: var(--text); line-height: 1.3; }
+.deliv-head-copy span { font-size: calc(clamp(11.5px, 0.85cqi, 14px) * var(--fs)); color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .deliv-kpi-body {
   display: grid;
@@ -1062,7 +1062,7 @@ onUnmounted(() => {
   padding: 4px 0 2px;
 }
 .deliv-value {
-  font-size: clamp(24px, 2.2cqi, 44px);
+  font-size: calc(clamp(24px, 2.2cqi, 44px) * var(--fs));
   font-weight: 750;
   letter-spacing: -.03em;
   line-height: 1.15;
@@ -1077,12 +1077,12 @@ onUnmounted(() => {
   display: grid;
   gap: 2px;
 }
-.deliv-split b { font-size: clamp(20px, 1.9cqi, 36px); font-weight: 750; letter-spacing: -.02em; line-height: 1.15; color: var(--text); }
-.deliv-split small { font-size: clamp(11px, 0.85cqi, 13.5px); color: var(--text-3); }
+.deliv-split b { font-size: calc(clamp(20px, 1.9cqi, 36px) * var(--fs)); font-weight: 750; letter-spacing: -.02em; line-height: 1.15; color: var(--text); }
+.deliv-split small { font-size: calc(clamp(11px, 0.85cqi, 13.5px) * var(--fs)); color: var(--text-3); }
 .deliv-split i { width: 1px; height: clamp(26px, 2cqi, 36px); background: var(--line-strong); }
 
 .deliv-delta {
-  font-size: clamp(11.5px, 0.85cqi, 14px);
+  font-size: calc(clamp(11.5px, 0.85cqi, 14px) * var(--fs));
   font-weight: 550;
   color: var(--text-3);
 }

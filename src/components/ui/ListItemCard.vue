@@ -21,7 +21,7 @@ withDefaults(defineProps<{
 .list-item-card__leading,.list-item-card__trailing { display:flex; align-items:center; flex:none; }
 .list-item-card__trailing { margin-left:auto; }
 .list-item-card__text { display:flex; flex-direction:column; gap:4px; min-width:0; }
-.list-item-card__text strong { overflow:hidden; font-size:12px; font-weight:690; text-overflow:ellipsis; white-space:nowrap; }
-.list-item-card__text small { overflow:hidden; color:var(--workbench-muted); font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
+.list-item-card__text strong { overflow:hidden; font-size:calc(12px * var(--fs)); font-weight:690; text-overflow:ellipsis; white-space:nowrap; }
+.list-item-card__text small { overflow:hidden; color:var(--workbench-muted); font-size:calc(10px * var(--fs)); text-overflow:ellipsis; white-space:nowrap; }
 @media (prefers-reduced-motion:reduce) { .list-item-card { transition:none; } .list-item-card:hover { transform:none; } }
 </style>

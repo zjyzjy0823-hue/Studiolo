@@ -181,7 +181,7 @@ function showDate(index: number) {
   background: var(--usage-surface);
   color: var(--request-color);
 }
-.plot-totals { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 15px; font-size: 12px; }
+.plot-totals { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 15px; font-size: calc(12px * var(--fs)); }
 .plot-totals div { display: flex; align-items: center; gap: 6px; }
 .plot-totals strong { font-weight: 650; }
 .plot-totals span { color: var(--usage-axis); }
@@ -197,7 +197,7 @@ function showDate(index: number) {
 }
 .plot-axis { display: flex; flex-direction: column; justify-content: space-between; margin-block: -5px; text-align: right; }
 .plot-axis-requests { text-align: left; }
-.plot-axis, .plot-dates { color: var(--usage-axis); font-size: 10px; line-height: 12px; font-variant-numeric: tabular-nums; }
+.plot-axis, .plot-dates { color: var(--usage-axis); font-size: calc(10px * var(--fs)); line-height: 12px; font-variant-numeric: tabular-nums; }
 .plot-area { position: relative; min-width: 0; }
 .plot-rules, .request-line, .plot-days, .plot-bars { position: absolute; inset: 0; }
 .plot-rules { display: flex; flex-direction: column; justify-content: space-between; }
@@ -254,7 +254,7 @@ function showDate(index: number) {
   background: var(--usage-surface);
   box-shadow: 0 4px 14px rgba(0, 0, 0, .12);
   color: var(--usage-axis);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   text-align: left;
   pointer-events: none;
 }
@@ -264,6 +264,6 @@ function showDate(index: number) {
 .token-legend { display: flex; flex-wrap: wrap; gap: 6px 12px; }
 .token-legend span { display: inline-flex; align-items: center; gap: 5px; }
 .tooltip-row i, .token-legend i { width: 7px; height: 7px; border-radius: 2px; flex: none; }
-.token-legend, .usage-empty { color: var(--usage-axis); font-size: 11px; }
+.token-legend, .usage-empty { color: var(--usage-axis); font-size: calc(11px * var(--fs)); }
 .usage-empty { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; }
 </style>

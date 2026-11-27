@@ -220,7 +220,7 @@ onUnmounted(() => {
 <style scoped>
 .tool-card {
   min-width: 0;
-  font-size: 13px;
+  font-size: calc(13px * var(--fs));
 }
 .tool-card-head {
   list-style: none;
@@ -263,7 +263,7 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 .tool-card.is-error .tool-card-label { color: var(--warn); }
-.tool-meta { font-size: 11px; color: var(--text-3); overflow-wrap: anywhere; }
+.tool-meta { font-size: calc(11px * var(--fs)); color: var(--text-3); overflow-wrap: anywhere; }
 .tool-meta code { font-family: var(--mono); }
 .tool-detail { margin: 0; color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; }
 .tool-pill-btn {
@@ -272,7 +272,7 @@ onUnmounted(() => {
   border: 1px solid var(--line);
   background: var(--surface-1);
   color: var(--text-2);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   cursor: pointer;
   flex: none;
 }
@@ -314,7 +314,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   color: var(--text-3);
 }
 .tool-copy-btn {
@@ -323,7 +323,7 @@ onUnmounted(() => {
   gap: 4px;
   padding: 2px 6px;
   border-radius: 4px;
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   color: var(--text-2);
   background: var(--surface-2);
   cursor: pointer;
@@ -339,7 +339,7 @@ onUnmounted(() => {
   border-radius: var(--r-xs);
   background: var(--surface-2);
   font-family: var(--mono);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   line-height: 1.45;
   color: var(--text);
   white-space: pre-wrap;
@@ -374,12 +374,12 @@ onUnmounted(() => {
   border-radius: var(--r-xs);
   background: var(--warn-soft);
   color: var(--warn);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
 }
 .tool-err .i { width: 13px; height: 13px; flex: none; margin-top: 1px; }
 .tool-empty {
   margin: 0;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   color: var(--text-3);
 }
 .tool-media-list {
@@ -417,7 +417,7 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--text-2);
 }
 </style>

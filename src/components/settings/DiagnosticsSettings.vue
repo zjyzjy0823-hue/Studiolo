@@ -56,7 +56,7 @@ watch(() => auth.token, refresh, { immediate: true, flush: 'sync' })
 
 <style scoped>
 .diagnostics-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
-h3 { flex: 1; margin: 0; color: var(--text); font-size: 14px; font-weight: 600; }
-.diagnostics-note { margin: 0; padding: 10px 16px; color: var(--text-2); font-size: 12.5px; }
-.diagnostics-value { max-width: 100%; overflow-wrap: anywhere; color: var(--text); font-size: 12.5px; line-height: 1.5; }
+h3 { flex: 1; margin: 0; color: var(--text); font-size: calc(14px * var(--fs)); font-weight: 600; }
+.diagnostics-note { margin: 0; padding: 10px 16px; color: var(--text-2); font-size: calc(12.5px * var(--fs)); }
+.diagnostics-value { max-width: 100%; overflow-wrap: anywhere; color: var(--text); font-size: calc(12.5px * var(--fs)); line-height: 1.5; }
 </style>

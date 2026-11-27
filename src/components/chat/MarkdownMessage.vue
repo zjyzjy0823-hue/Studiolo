@@ -355,10 +355,10 @@ onUnmounted(() => {
 .md-quote p {
   margin: 0;
 }
-.md-h1 { font-size: 16px; font-weight: 680; line-height: 1.35; }
-.md-h2 { font-size: 14.5px; font-weight: 650; line-height: 1.38; }
+.md-h1 { font-size: calc(16px * var(--fs)); font-weight: 680; line-height: 1.35; }
+.md-h2 { font-size: calc(14.5px * var(--fs)); font-weight: 650; line-height: 1.38; }
 .md-h3,
-.md-h4 { font-size: 13.5px; font-weight: 620; line-height: 1.4; }
+.md-h4 { font-size: calc(13.5px * var(--fs)); font-weight: 620; line-height: 1.4; }
 .md-list {
   margin: 0;
   padding-left: 1.35em;
@@ -424,7 +424,7 @@ onUnmounted(() => {
   background: var(--solid);
   color: var(--accent);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   cursor: pointer;
   max-width: 240px;
   overflow: hidden;
@@ -438,7 +438,7 @@ onUnmounted(() => {
   word-break: break-word;
 }
 .md-code-lang {
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   font-weight: 550;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color: var(--text-3);
@@ -450,7 +450,7 @@ onUnmounted(() => {
   gap: 4px;
   padding: 2px 7px;
   border-radius: 5px;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--text-2);
   cursor: pointer;
   transition: background-color var(--dur-1), color var(--dur-1);
@@ -473,7 +473,7 @@ onUnmounted(() => {
   margin: 0;
   padding: 10px 12px;
   overflow-x: auto;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   line-height: 1.5;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color: var(--text);
@@ -487,7 +487,7 @@ onUnmounted(() => {
 .md-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
 }
 .md-table th,
 .md-table td {
@@ -521,7 +521,7 @@ onUnmounted(() => {
   border-radius: 5px;
   background: transparent;
   color: var(--text-3);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   cursor: pointer;
 }
 .md-seg-btn.is-active {
@@ -547,12 +547,12 @@ onUnmounted(() => {
 }
 .md-dia-nlbl {
   fill: var(--text);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   font-weight: 500;
 }
 .md-dia-elbl {
   fill: var(--text-3);
-  font-size: 10px;
+  font-size: calc(10px * var(--fs));
 }
 .md-sandbox-frame {
   display: block;
@@ -577,7 +577,7 @@ onUnmounted(() => {
   border: 0;
   background: transparent;
   color: var(--accent);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   font-weight: 500;
   cursor: pointer;
 }

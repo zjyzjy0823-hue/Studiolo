@@ -264,7 +264,7 @@ onUnmounted(() => {
       </aside>
       <section style="display:flex;flex-direction:column;min-width:0;overflow:hidden">
         <div class="toolbar">
-          <h2 style="margin:0;font-size:16px">{{ selectedCollection?.name ?? '集合' }}</h2><span class="faint">{{ selectedCollection?.recordCount ?? 0 }} 条</span><span class="spacer"></span>
+          <h2 style="margin:0;font-size:calc(16px * var(--fs))">{{ selectedCollection?.name ?? '集合' }}</h2><span class="faint">{{ selectedCollection?.recordCount ?? 0 }} 条</span><span class="spacer"></span>
           <div class="search"><OpusIcon name="search" /><input v-model="query" class="input" type="search" placeholder="在集合中搜索" aria-label="在集合中搜索"></div>
           <button class="btn btn-primary" type="button" :disabled="!selectedCollection" @click="openRecord()"><OpusIcon name="plus" />新建记录</button>
         </div>
@@ -291,8 +291,8 @@ onUnmounted(() => {
           <p v-if="selectedCollection.description" class="muted">{{ selectedCollection.description }}</p>
           <div class="btn-row"><button class="btn btn-sm btn-ghost" :class="{ 'is-copied': isCopied(`col-${selectedCollection.id}`) }" type="button" @click="copyCollectionName(selectedCollection)"><OpusIcon :name="isCopied(`col-${selectedCollection.id}`) ? 'check' : 'copy'" />{{ isCopied(`col-${selectedCollection.id}`) ? '已复制' : '复制名称' }}</button><button class="btn btn-sm btn-ghost" type="button" @click="openEditCollection(selectedCollection)">编辑集合</button><button class="btn btn-sm btn-danger" type="button" @click="removeCollection(selectedCollection)">删除集合</button></div>
           <details v-if="store.overview || store.overviewError">
-            <summary class="muted" style="cursor:pointer;font-size:12.5px">数据概览</summary>
-            <ul v-if="store.overview" class="muted" style="font-size:12.5px;padding-left:18px"><li>活跃 {{ dataOverview.active }} 条 · 已完成 {{ dataOverview.completed }} 条</li><li v-for="item in dataOverview.activities" :key="item.id">{{ item.title }} · {{ item.time }}</li></ul>
+            <summary class="muted" style="cursor:pointer;font-size:calc(12.5px * var(--fs))">数据概览</summary>
+            <ul v-if="store.overview" class="muted" style="font-size:calc(12.5px * var(--fs));padding-left:18px"><li>活跃 {{ dataOverview.active }} 条 · 已完成 {{ dataOverview.completed }} 条</li><li v-for="item in dataOverview.activities" :key="item.id">{{ item.title }} · {{ item.time }}</li></ul>
             <div v-if="store.overviewError" class="notice danger" role="alert">{{ store.overviewError }} <button class="btn btn-sm btn-ghost" type="button" @click="retryLoad">重试</button></div>
           </details>
         </div>

@@ -17,10 +17,10 @@ const agents = [
     <div :class="mobile ? undefined : 'vault-lock'">
       <div :class="mobile ? 'vault-m' : 'vault-card mat'">
         <div class="lk"><OpusIcon name="lock" /></div><h2>共享空间</h2>
-        <p class="muted" style="margin:0;font-size:13px">每次查看内容都需要输入密码，离线时也一样。</p>
+        <p class="muted" style="margin:0;font-size:calc(13px * var(--fs))">每次查看内容都需要输入密码，离线时也一样。</p>
         <template v-if="mobile">
           <button class="btn btn-primary btn-lg" style="width:100%;margin-top:14px" type="button" disabled><OpusIcon name="unlock" />输入密码查看目录</button>
-          <p class="faint" style="font-size:12.5px;margin:6px 0 0">共享空间待接入</p>
+          <p class="faint" style="font-size:calc(12.5px * var(--fs));margin:6px 0 0">共享空间待接入</p>
         </template>
         <template v-else>
           <div><div class="pw-field"><OpusIcon name="lock" /><input class="input" type="password" placeholder="共享空间密码" aria-label="共享空间密码" disabled></div>
@@ -35,7 +35,7 @@ const agents = [
     <div class="mhead"><h1>对话</h1><span class="spacer"></span><button class="icon-btn" type="button" aria-label="新会话" style="width:40px;height:40px" disabled><OpusIcon name="plus" /></button></div>
     <div class="agent-tabs">
       <button v-for="item in agents" :key="item.id" type="button" class="agent-tab" :class="'oc-' + item.id" :aria-pressed="agent === item.id" @click="agent = item.id">
-        <span class="am"><OpusIcon :name="item.icon" /></span><span style="min-width:0"><div style="font-weight:650">{{ item.name }}</div><div class="conn offline" style="font-size:11.5px">待接入</div></span>
+        <span class="am"><OpusIcon :name="item.icon" /></span><span style="min-width:0"><div style="font-weight:650">{{ item.name }}</div><div class="conn offline" style="font-size:calc(11.5px * var(--fs))">待接入</div></span>
       </button>
     </div>
     <div class="notice"><OpusIcon name="chat" /><div><b>{{ agents.find(item => item.id === agent)?.name }} 对话待接入</b><br>会话由 Agent 提供。</div></div>

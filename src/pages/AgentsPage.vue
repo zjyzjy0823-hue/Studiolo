@@ -313,7 +313,7 @@ async function copyApiPath(path: string, key: string) {
     <div v-else-if="!agents.length && fleet.nodes.length" class="card mat agents-compact-na">
       <div>
         <strong>本地 Data Actions 智能体（na_live_）</strong>
-        <div class="faint" style="font-size:12.5px">尚未添加通过 API 读写个人账本/资料库的独立数据智能体；上方已为您展示当前对话中所有可用的控制节点与引擎。</div>
+        <div class="faint" style="font-size:calc(12.5px * var(--fs))">尚未添加通过 API 读写个人账本/资料库的独立数据智能体；上方已为您展示当前对话中所有可用的控制节点与引擎。</div>
       </div>
       <button class="btn btn-subtle btn-sm" type="button" @click="openCreate"><OpusIcon name="plus" />添加数据智能体</button>
     </div>
@@ -321,7 +321,7 @@ async function copyApiPath(path: string, key: string) {
       <aside class="card mat agents-side">
         <div class="agents-side__head">
           <div class="search" style="flex:1"><OpusIcon name="search" /><input v-model="searchQuery" class="input" type="search" placeholder="搜索智能体…" aria-label="搜索智能体" /></div>
-          <span class="faint" style="font-size:12px">{{ agents.length }}</span>
+          <span class="faint" style="font-size:calc(12px * var(--fs))">{{ agents.length }}</span>
         </div>
         <div class="agents-filters" aria-label="智能体状态筛选">
           <button v-for="filter in ([['all', '全部'], ['running', '运行中'], ['idle', '空闲'], ['offline', '离线'], ['error', '错误'], ['disabled', '已停用']] as const)" :key="filter[0]" class="chip" type="button" :aria-pressed="directoryFilter === filter[0]" @click="directoryFilter = filter[0]">{{ filter[1] }}</button>
@@ -340,9 +340,9 @@ async function copyApiPath(path: string, key: string) {
         <div class="agents-hero">
           <span class="tile-icon" style="width:46px;height:46px;border-radius:14px"><component :is="avatarIcons[selectedAgent.avatar]" class="i" style="width:22px;height:22px" /></span>
           <div class="grow" style="min-width:0">
-            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h2 style="margin:0;font-size:19px">{{ selectedAgent.name }}</h2><span class="conn" :class="agentStatus(selectedAgent.status).cls">{{ agentStatus(selectedAgent.status).label }}</span></div>
-            <div class="faint" style="font-size:12.5px;margin-top:2px">{{ selectedAgent.role }} · {{ selectedAgent.model }} · {{ selectedAgent.workspace }}</div>
-            <p v-if="selectedAgent.description" class="muted" style="margin:6px 0 0;font-size:13px">{{ selectedAgent.description }}</p>
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h2 style="margin:0;font-size:calc(19px * var(--fs))">{{ selectedAgent.name }}</h2><span class="conn" :class="agentStatus(selectedAgent.status).cls">{{ agentStatus(selectedAgent.status).label }}</span></div>
+            <div class="faint" style="font-size:calc(12.5px * var(--fs));margin-top:2px">{{ selectedAgent.role }} · {{ selectedAgent.model }} · {{ selectedAgent.workspace }}</div>
+            <p v-if="selectedAgent.description" class="muted" style="margin:6px 0 0;font-size:calc(13px * var(--fs))">{{ selectedAgent.description }}</p>
           </div>
           <div class="btn-row">
             <button class="btn btn-sm btn-ghost" type="button" @click="toggleAgentStatus"><OpusIcon :name="selectedAgent.enabled ? 'pause' : 'play'" />{{ selectedAgent.enabled ? '暂停' : '启用' }}</button>
@@ -360,7 +360,7 @@ async function copyApiPath(path: string, key: string) {
           <div class="agents-overview__grid">
             <div class="owner-card oc-studiolo">
               <div class="ttl"><OpusIcon name="zap" />{{ currentTask?.status === 'running' ? '当前任务' : '接下来' }}</div>
-              <div style="font-weight:650;font-size:15px">{{ currentTask?.title ?? '一切准备就绪' }}</div>
+              <div style="font-weight:650;font-size:calc(15px * var(--fs))">{{ currentTask?.title ?? '一切准备就绪' }}</div>
               <p>{{ currentTask?.description ?? '创建一个任务，开始与智能体协作。' }}</p>
               <div><button class="btn btn-sm btn-subtle" type="button" @click="activeTab = 'tasks'">查看全部任务 <OpusIcon name="chevR" /></button></div>
             </div>
@@ -378,7 +378,7 @@ async function copyApiPath(path: string, key: string) {
           <div class="mat-solid agents-token-row">
             <div class="grow">
               <div style="font-weight:600">Agent Token</div>
-              <div class="faint" style="font-size:12px">数据权限由 Scope 控制 · {{ selectedAgent.dataScopes?.length ? `已授权 ${selectedAgent.dataScopes.length} 项` : '无数据权限' }}</div>
+              <div class="faint" style="font-size:calc(12px * var(--fs))">数据权限由 Scope 控制 · {{ selectedAgent.dataScopes?.length ? `已授权 ${selectedAgent.dataScopes.length} 项` : '无数据权限' }}</div>
             </div>
             <code class="mono">{{ revealedToken || (selectedAgent.tokenLast4 ? `na_live_••••${selectedAgent.tokenLast4}` : '尚未生成') }}</code>
             <button v-if="revealedToken" class="btn btn-sm btn-ghost" :class="{ 'is-copied': isCopied('agent-token') }" type="button" @click="copyAgentToken"><OpusIcon :name="isCopied('agent-token') ? 'check' : 'copy'" />{{ isCopied('agent-token') ? '已复制' : '复制' }}</button>
@@ -395,7 +395,7 @@ async function copyApiPath(path: string, key: string) {
             <table class="tbl">
               <thead><tr><th>任务</th><th>状态</th><th>时间</th><th></th></tr></thead>
               <tbody>
-                <tr v-for="task in visibleTasks" :key="task.id"><td style="font-weight:550">{{ task.title }}<div class="faint" style="font-size:12px">{{ task.description }}</div><div v-if="task.result?.text" class="faint" style="font-size:12px">结果：{{ task.result.text }}</div><div v-if="task.errorMessage" style="font-size:12px;color:var(--danger)">错误：{{ task.errorMessage }}</div></td><td><span class="run" :class="taskStateClass(task.status)">{{ taskStateLabel(task.status) }}</span></td><td class="muted">{{ task.time }}</td><td class="r"><button v-if="task.status === 'queued'" class="btn btn-sm btn-danger" type="button" @click="removeTask(task)">删除</button></td></tr>
+                <tr v-for="task in visibleTasks" :key="task.id"><td style="font-weight:550">{{ task.title }}<div class="faint" style="font-size:calc(12px * var(--fs))">{{ task.description }}</div><div v-if="task.result?.text" class="faint" style="font-size:calc(12px * var(--fs))">结果：{{ task.result.text }}</div><div v-if="task.errorMessage" style="font-size:calc(12px * var(--fs));color:var(--danger)">错误：{{ task.errorMessage }}</div></td><td><span class="run" :class="taskStateClass(task.status)">{{ taskStateLabel(task.status) }}</span></td><td class="muted">{{ task.time }}</td><td class="r"><button v-if="task.status === 'queued'" class="btn btn-sm btn-danger" type="button" @click="removeTask(task)">删除</button></td></tr>
                 <tr v-if="!visibleTasks.length"><td colspan="4" class="faint" style="text-align:center;height:70px">当前筛选下没有任务</td></tr>
               </tbody>
             </table>
@@ -421,9 +421,9 @@ async function copyApiPath(path: string, key: string) {
 
         <div v-else class="agents-overview">
           <div class="stats4" style="grid-template-columns:repeat(3,minmax(0,1fr));margin-bottom:0">
-            <div class="mat-solid" style="padding:14px;border-radius:var(--r-md)"><div class="faint" style="font-size:12px">今日任务</div><div class="v num" style="font-size:20px;font-weight:700;margin-top:4px">{{ selectedAgent.tasksToday }}</div></div>
-            <div class="mat-solid" style="padding:14px;border-radius:var(--r-md)"><div class="faint" style="font-size:12px">API 调用</div><div class="v num" style="font-size:20px;font-weight:700;margin-top:4px">{{ selectedAgent.callsToday }}</div></div>
-            <div class="mat-solid" style="padding:14px;border-radius:var(--r-md)"><div class="faint" style="font-size:12px">任务完成率</div><div class="v num" style="font-size:20px;font-weight:700;margin-top:4px">{{ selectedAgent.successRate }}</div></div>
+            <div class="mat-solid" style="padding:14px;border-radius:var(--r-md)"><div class="faint" style="font-size:calc(12px * var(--fs))">今日任务</div><div class="v num" style="font-size:calc(20px * var(--fs));font-weight:700;margin-top:4px">{{ selectedAgent.tasksToday }}</div></div>
+            <div class="mat-solid" style="padding:14px;border-radius:var(--r-md)"><div class="faint" style="font-size:calc(12px * var(--fs))">API 调用</div><div class="v num" style="font-size:calc(20px * var(--fs));font-weight:700;margin-top:4px">{{ selectedAgent.callsToday }}</div></div>
+            <div class="mat-solid" style="padding:14px;border-radius:var(--r-md)"><div class="faint" style="font-size:calc(12px * var(--fs))">任务完成率</div><div class="v num" style="font-size:calc(20px * var(--fs));font-weight:700;margin-top:4px">{{ selectedAgent.successRate }}</div></div>
           </div>
           <div class="bars" style="height:100px;margin-top:16px"><i v-for="(day, i) in activityByDay" :key="day.label" :style="{ height: Math.max(8, Math.min(100, day.count * 22)) + '%', animationDelay: i * 25 + 'ms' }" :title="`${day.label}: ${day.count} 个任务`"></i></div>
         </div>
@@ -444,7 +444,7 @@ async function copyApiPath(path: string, key: string) {
         <label>数据访问权限</label>
         <div class="agents-scope-grid">
           <div v-for="group in scopeDomains" :key="group.id" class="agents-scope-row">
-            <span class="muted" style="font-size:12px;font-weight:600">{{ group.label }}</span>
+            <span class="muted" style="font-size:calc(12px * var(--fs));font-weight:600">{{ group.label }}</span>
             <div style="display:flex;gap:10px;flex-wrap:wrap">
               <label v-for="effect in scopeEffects" :key="effect.id" class="dlg-check" :style="effect.id === 'delete' ? 'color:var(--danger)' : undefined">
                 <input v-model="newAgentScopes" type="checkbox" :value="`${group.id}:${effect.id}`" />{{ effect.label }}
@@ -452,7 +452,7 @@ async function copyApiPath(path: string, key: string) {
             </div>
           </div>
           <div class="agents-scope-row">
-            <span class="muted" style="font-size:12px;font-weight:600">Shared Space</span>
+            <span class="muted" style="font-size:calc(12px * var(--fs));font-weight:600">Shared Space</span>
             <div style="display:flex;gap:10px;flex-wrap:wrap">
               <label class="dlg-check">
                 <input v-model="newAgentScopes" type="checkbox" value="space:read" />仅普通共享只读（机密与 E2EE 始终禁止）
@@ -489,7 +489,7 @@ async function copyApiPath(path: string, key: string) {
 .agents-side__head { display: flex; align-items: center; gap: 8px; }
 .agents-side__head .search { position: relative; }
 .agents-side__head .search :deep(svg.i) { position: absolute; left: 10px; top: 50%; translate: 0 -50%; width: 15px; height: 15px; color: var(--text-3); pointer-events: none; }
-.agents-side__head .search .input { height: 32px; padding-left: 32px; font-size: 13px; }
+.agents-side__head .search .input { height: 32px; padding-left: 32px; font-size: calc(13px * var(--fs)); }
 .agents-filters { display: flex; flex-wrap: wrap; gap: 6px; }
 .agents-hero { display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap; }
 .agents-overview { display: grid; gap: 14px; }

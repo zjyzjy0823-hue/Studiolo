@@ -165,7 +165,7 @@ const sessionListNow = ref(Date.now())
 const mobileNodeFilter = ref<string>('all')
 const mobileStatusLabels = {
   all: '全部状态', running: '运行中', approval: '待审批', input: '待回复', complete: '已完成',
-  waiting: '待发送', todo: '有待办', snoozed: '已暂缓', settled: '已整理', diff: '有代码改动',
+  waiting: '发送中', todo: '有待办', snoozed: '已暂缓', settled: '已整理', diff: '有代码改动',
 }
 const mobileStatusFilter = ref<keyof typeof mobileStatusLabels>('all')
 const mobileInboxQuery = ref('')
@@ -736,7 +736,7 @@ const sessionStatus = computed(() => {
     if (approvals.has(key)) return { key: 'approval', label: '待审批', rank: 0 }
     if (inputs.has(key)) return { key: 'input', label: '待回复', rank: 1 }
     if (fleet.isSessionStreaming(key)) return { key: 'running', label: '运行中', rank: 2 }
-    if (waiting.has(key)) return { key: 'waiting', label: '待发送', rank: 3 }
+    if (waiting.has(key)) return { key: 'waiting', label: '发送中', rank: 3 }
     return { key: 'done', label: '', rank: 4 }
   }
 })
@@ -3181,7 +3181,7 @@ function handleClearMemory() {
           <select v-if="createAdapters.length" id="new-chat-agent" v-model="newSessionProvider" class="input">
             <option v-for="ad in createAdapters" :key="ad.provider" :value="ad.provider">{{ getProviderMeta(ad.provider).label }}</option>
           </select>
-          <p v-else class="faint" style="margin:0;font-size:12.5px">当前节点暂无就绪的代理引擎，请确认本地 CLI / 服务运行且鉴权正常。</p>
+          <p v-else class="faint" style="margin:0;font-size:calc(12.5px * var(--fs))">当前节点暂无就绪的代理引擎，请确认本地 CLI / 服务运行且鉴权正常。</p>
         </div>
         <div v-if="createNodes.length" class="field">
           <label for="new-chat-directory">{{ newSessionProvider === 'hermes' ? '运行目录' : '工作目录' }}</label>
@@ -3230,7 +3230,7 @@ function handleClearMemory() {
           <label>交接任务摘要</label>
           <textarea v-model="handoffSummary" class="input" rows="4" placeholder="描述请目标 Agent 接力审阅、构建或测试的内容…" />
         </div>
-        <div v-if="handoffArtifact" class="faint" style="font-size:12px">
+        <div v-if="handoffArtifact" class="faint" style="font-size:calc(12px * var(--fs))">
           将随 E2EE 密钥信封一并转交附件：<b>{{ handoffArtifact.fileName }}</b>
         </div>
         <div class="modal-foot">
@@ -3244,7 +3244,7 @@ function handleClearMemory() {
     <div v-if="showFanout" class="modal-scrim" @click.self="showFanout = false">
       <div class="modal-card card">
         <h3>群发对比 (Fan-out)</h3>
-        <p class="faint" style="font-size:12.5px;margin:0">同时向多台主机或不同 Agent 发送同一需求，自动开启右侧分屏对照。</p>
+        <p class="faint" style="font-size:calc(12.5px * var(--fs));margin:0">同时向多台主机或不同 Agent 发送同一需求，自动开启右侧分屏对照。</p>
         <div class="fanout-grid">
           <template v-for="n in fleet.nodes" :key="n.id">
             <label v-for="ad in readyAt(n.id)" :key="`${n.id}-${ad.provider}`" class="toggle-row">
@@ -3316,7 +3316,7 @@ function handleClearMemory() {
   align-items: center;
   gap: 3px;
 }
-.tree-top-actions strong { margin-right: auto; font-size: 13px; }
+.tree-top-actions strong { margin-right: auto; font-size: calc(13px * var(--fs)); }
 .tree-top-actions .icon-btn { width: 26px; height: 26px; flex: none; }
 .tree-top-actions .icon-btn.is-active { background: var(--surface-3); color: var(--text); }
 .tree-search {
@@ -3340,7 +3340,7 @@ function handleClearMemory() {
   border-radius: var(--r-sm);
   border: 1px solid var(--line);
   background: var(--solid);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   outline: 0;
 }
 .tree-search input:focus { border-color: var(--accent-line); }
@@ -3396,8 +3396,8 @@ function handleClearMemory() {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.tree-node-name { font-size: 13px; font-weight: 650; }
-.tree-hostname { color: var(--text-3); font-size: 11px; }
+.tree-node-name { font-size: calc(13px * var(--fs)); font-weight: 650; }
+.tree-hostname { color: var(--text-3); font-size: calc(11px * var(--fs)); }
 .tree-mini-btn {
   display: grid;
   place-items: center;
@@ -3449,7 +3449,7 @@ function handleClearMemory() {
 .tree-project-toggle[aria-expanded="true"] .tree-project-chevron { transform: rotate(90deg); }
 :global([data-motion="reduced"]) .tree-project-chevron { transition: none; }
 .tree-project-icon { width: 17px; height: 17px; color: var(--warn); flex: none; }
-.tree-project-name { flex: 1; font-size: 13px; font-weight: 650; }
+.tree-project-name { flex: 1; font-size: calc(13px * var(--fs)); font-weight: 650; }
 .tree-section-body { gap: 4px; }
 .tree-more-btn {
   display: flex;
@@ -3461,7 +3461,7 @@ function handleClearMemory() {
   padding: 0 6px;
   border-radius: 5px;
   color: var(--text-3);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
 }
 .tree-more-btn:hover { background: var(--surface-3); color: var(--text); }
 .tree-more-btn .i { width: 12px; height: 12px; }
@@ -3484,15 +3484,15 @@ function handleClearMemory() {
 }
 .tree-worktree-hdr > .i { width: 14px; height: 14px; margin-top: 2px; color: var(--text-2); flex: none; }
 .tree-worktree-hdr span { display: grid; min-width: 0; gap: 2px; }
-.tree-worktree-hdr strong { color: var(--text); font-size: 12px; font-weight: 600; }
-.tree-worktree-hdr small { color: var(--text-3); font-size: 11px; }
+.tree-worktree-hdr strong { color: var(--text); font-size: calc(12px * var(--fs)); font-weight: 600; }
+.tree-worktree-hdr small { color: var(--text-3); font-size: calc(11px * var(--fs)); }
 .tree-workspace.is-worktree :deep(.node-session-row) { margin-left: 10px; }
 .tree-hermes {
   margin-top: 3px;
   padding-top: 5px;
   border-top: 1px solid var(--line);
 }
-.tree-section-note { margin: 0 10px 4px 34px; color: var(--text-3); font-size: 11px; overflow-wrap: anywhere; }
+.tree-section-note { margin: 0 10px 4px 34px; color: var(--text-3); font-size: calc(11px * var(--fs)); overflow-wrap: anywhere; }
 @container node-sidebar (max-width: 230px) {
   .tree-hostname { display: none; }
 }
@@ -3503,7 +3503,7 @@ function handleClearMemory() {
 .diff-count-dot {
   padding: 0 5px;
   border-radius: 999px;
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   background: var(--accent-soft);
   color: var(--accent);
 }
@@ -3526,7 +3526,7 @@ function handleClearMemory() {
   background: var(--solid);
   box-shadow: var(--shadow-1);
 }
-.tree-empty-state p { margin: 0; font-size: 12px; }
+.tree-empty-state p { margin: 0; font-size: calc(12px * var(--fs)); }
 
 /* 中央多标签 + 对话主区域 */
 .fleet-main {
@@ -3569,7 +3569,7 @@ function handleClearMemory() {
   height: 28px;
   padding: 0 8px 0 10px;
   border-radius: var(--r-sm);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   color: var(--text-2);
   max-width: 210px;
   flex: none;
@@ -3587,18 +3587,18 @@ function handleClearMemory() {
   white-space: nowrap;
 }
 .chat-tab-eng {
-  font-size: 10px;
+  font-size: calc(10px * var(--fs));
   color: var(--text-3);
 }
 .chat-tab-close {
-  font-size: 13px;
+  font-size: calc(13px * var(--fs));
   line-height: 1;
   color: var(--text-3);
   padding: 0 2px;
 }
 .chat-tab-close:hover { color: var(--text); }
 .chat-empty-tab {
-  font-size: 13px;
+  font-size: calc(13px * var(--fs));
   font-weight: 600;
   padding: 0 6px;
   color: var(--text);
@@ -3645,7 +3645,7 @@ function handleClearMemory() {
   border-radius: var(--r-sm);
   background: transparent;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   font-weight: 500;
   white-space: nowrap;
   cursor: pointer;
@@ -3661,7 +3661,7 @@ function handleClearMemory() {
 .wb-tab-badge {
   padding: 0 5px;
   border-radius: 999px;
-  font-size: 10px;
+  font-size: calc(10px * var(--fs));
   background: var(--accent-soft);
   color: var(--accent);
 }
@@ -3688,18 +3688,18 @@ function handleClearMemory() {
   border-bottom: 1px solid var(--line);
 }
 .right-hdr .spacer { flex: 1; }
-.right-title { font-size: 13px; font-weight: 650; }
+.right-title { font-size: calc(13px * var(--fs)); font-weight: 650; }
 .right-select {
   flex: 1;
   min-width: 0;
   height: 28px;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   padding: 0 8px;
 }
 .right-empty {
   padding: 28px 18px;
   text-align: center;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
 }
 .root-list { display: grid; gap: 5px; }
 .root-path {
@@ -3707,7 +3707,7 @@ function handleClearMemory() {
   padding: 6px 8px;
   border-radius: var(--r-xs);
   background: var(--surface-2);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   word-break: break-all;
 }
 .kv-pill { padding: 6px 10px; border-radius: var(--r-sm); background: var(--surface-2); }
@@ -3730,13 +3730,13 @@ function handleClearMemory() {
   background: var(--solid);
   box-shadow: var(--shadow-pop);
 }
-.modal-card h3 { margin: 0; font-size: 16px; }
+.modal-card h3 { margin: 0; font-size: calc(16px * var(--fs)); }
 .modal-foot { display: flex; justify-content: flex-end; gap: 8px; }
 .toggle-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   color: var(--text-2);
 }
 .fanout-grid { display: grid; gap: 6px; max-height: 180px; overflow: auto; }
@@ -3767,7 +3767,7 @@ function handleClearMemory() {
   gap: 6px;
   padding: 4px 10px;
   border-radius: var(--r-pill);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   background: var(--surface-2);
   color: var(--text-2);
   white-space: nowrap;
@@ -3791,7 +3791,7 @@ function handleClearMemory() {
   box-shadow: var(--shadow-pop);
 }
 .mchat-thread { min-height: 0; }
-.mchat-sec { font-size: 11.5px; font-weight: 600; color: var(--text-3); }
+.mchat-sec { font-size: calc(11.5px * var(--fs)); font-weight: 600; color: var(--text-3); }
 .mchat-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .tabs-actions .is-notify-on {
   color: var(--accent);
@@ -3806,7 +3806,7 @@ function handleClearMemory() {
   border-radius: 999px;
   background: var(--accent);
   color: var(--accent-ink, #fff);
-  font-size: 10px;
+  font-size: calc(10px * var(--fs));
   font-weight: 650;
 }
 .bg-approval-strip {
@@ -3817,7 +3817,7 @@ function handleClearMemory() {
   padding: 6px 12px;
   border-bottom: 1px solid color-mix(in srgb, var(--warn) 32%, var(--line));
   background: color-mix(in srgb, var(--warn-soft) 60%, var(--solid));
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   flex: none;
 }
 .bga-ic {
@@ -3836,7 +3836,7 @@ function handleClearMemory() {
 }
 .bga-text code {
   font-family: var(--mono);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   color: var(--text-2);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3861,7 +3861,7 @@ function handleClearMemory() {
   border-radius: 999px;
   background: var(--accent);
   color: var(--accent-ink, #fff);
-  font-size: 9.5px;
+  font-size: calc(9.5px * var(--fs));
   line-height: 14px;
   font-weight: 650;
 }
@@ -3882,7 +3882,7 @@ function handleClearMemory() {
 .m-wb-sheet .wb-tab-btn {
   min-height: 36px;
   padding: 0 12px;
-  font-size: 13.5px;
+  font-size: calc(13.5px * var(--fs));
 }
 .m-wb-sheet .wb-close-btn {
   width: 38px;
@@ -3953,7 +3953,7 @@ function handleClearMemory() {
   border-radius: var(--r-xs);
   background: transparent;
   color: var(--text-3);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   cursor: pointer;
   white-space: nowrap;
 }
@@ -3992,7 +3992,7 @@ function handleClearMemory() {
   border-radius: var(--r-xs);
   background: transparent;
   color: var(--text);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   text-align: left;
   cursor: pointer;
 }
@@ -4040,7 +4040,7 @@ function handleClearMemory() {
 }
 .m-inbox-title {
   margin: 0;
-  font-size: 24px;
+  font-size: calc(24px * var(--fs));
   font-weight: 720;
   letter-spacing: -0.02em;
   line-height: 1.15;
@@ -4055,7 +4055,7 @@ function handleClearMemory() {
   border-radius: 999px;
   background: var(--surface-3);
   color: var(--text-3);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   font-weight: 600;
 }
 .m-active-filter-chip {
@@ -4068,7 +4068,7 @@ function handleClearMemory() {
   border-radius: 999px;
   background: var(--accent-soft);
   color: var(--accent);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   font-weight: 560;
   cursor: pointer;
 }
@@ -4144,7 +4144,7 @@ function handleClearMemory() {
   border-radius: 10px;
   background: transparent;
   color: var(--text);
-  font-size: 13px;
+  font-size: calc(13px * var(--fs));
   font-weight: 520;
   text-align: left;
   cursor: pointer;
@@ -4154,7 +4154,7 @@ function handleClearMemory() {
   background: var(--surface-2);
 }
 .m-fmenu-item:disabled { opacity: .45; cursor: default; }
-.m-create-empty { margin: 0; padding: 8px 10px; font-size: 13px; color: var(--text-3); }
+.m-create-empty { margin: 0; padding: 8px 10px; font-size: calc(13px * var(--fs)); color: var(--text-3); }
 .m-fmenu-item.is-reset {
   color: var(--accent);
 }
@@ -4170,7 +4170,7 @@ function handleClearMemory() {
 }
 .m-fmenu-val {
   max-width: 82px;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4205,7 +4205,7 @@ function handleClearMemory() {
   border-radius: 8px;
   background: transparent;
   color: var(--text-2);
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   text-align: left;
   cursor: pointer;
 }
@@ -4285,14 +4285,14 @@ function handleClearMemory() {
   gap: 2px;
 }
 .m-appr-copy strong {
-  font-size: 14px;
+  font-size: calc(14px * var(--fs));
   font-weight: 650;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .m-appr-copy span {
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   color: var(--text-2);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4304,7 +4304,7 @@ function handleClearMemory() {
   border-radius: 12px;
   background: var(--solid);
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   color: var(--text);
   word-break: break-all;
 }
@@ -4317,7 +4317,7 @@ function handleClearMemory() {
   min-height: 42px;
   justify-content: center;
   border-radius: 13px;
-  font-size: 14px;
+  font-size: calc(14px * var(--fs));
 }
 
 .m-inbox-scroll-chips {
@@ -4335,7 +4335,7 @@ function handleClearMemory() {
   flex: none;
   min-height: 34px;
   padding: 0 12px;
-  font-size: 13px;
+  font-size: calc(13px * var(--fs));
 }
 
 .m-inbox-subbar {
@@ -4359,7 +4359,7 @@ function handleClearMemory() {
   border-radius: 9px;
   background: transparent;
   color: var(--text-2);
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   font-weight: 560;
   cursor: pointer;
 }
@@ -4372,7 +4372,7 @@ function handleClearMemory() {
   border: 0;
   background: transparent;
   color: var(--text-2);
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   font-weight: 550;
   padding: 6px 8px;
   border-radius: 8px;
@@ -4398,7 +4398,7 @@ function handleClearMemory() {
 }
 .m-project-trigger > .i { width: 17px; height: 17px; flex: none; color: var(--text-3); }
 .m-project-heading h2 { flex: 1; min-width: 0; margin: 0; }
-.m-project-name { min-width: 0; font-size: 14px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.m-project-name { min-width: 0; font-size: calc(14px * var(--fs)); font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .m-project-trigger {
   display: flex;
   align-items: center;
@@ -4429,7 +4429,7 @@ function handleClearMemory() {
 }
 .m-project-add .i { width: 16px; height: 16px; }
 .m-project-add:hover, .m-project-add:focus-visible { color: var(--accent); background: var(--surface-2); }
-.m-project-more, .m-project-empty { font-size: 12px; color: var(--text-3); }
+.m-project-more, .m-project-empty { font-size: calc(12px * var(--fs)); color: var(--text-3); }
 .m-project-more { padding: 4px 5px; min-height: 30px; border: 0; background: transparent; cursor: pointer; }
 .m-project-trigger:hover, .m-project-more:hover { color: var(--accent); }
 .m-project-empty { margin: 0; padding: 12px 6px; }
@@ -4480,7 +4480,7 @@ function handleClearMemory() {
 .m-inbox-row .grow { flex: 1; min-width: 0; }
 .m-inbox-row:hover { background: var(--surface-2); }
 .m-inbox-row .title {
-  font-size: 14px;
+  font-size: calc(14px * var(--fs));
   font-weight: 600;
   line-height: 1.35;
   overflow: hidden;
@@ -4511,7 +4511,7 @@ function handleClearMemory() {
 }
 .m-sess-time {
   flex: none;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   color: var(--text-3);
 }
 .m-sess-bottom {
@@ -4525,7 +4525,7 @@ function handleClearMemory() {
 .m-sess-sub-mini {
   flex: 1;
   min-width: 0;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4560,8 +4560,8 @@ function handleClearMemory() {
   color: var(--accent);
 }
 .m-empty-ic .i { width: 24px; height: 24px; }
-.m-inbox-empty h3 { margin: 2px 0 0; font-size: 17px; }
-.m-inbox-empty p { margin: 0; font-size: 13px; line-height: 1.55; max-width: 280px; }
+.m-inbox-empty h3 { margin: 2px 0 0; font-size: calc(17px * var(--fs)); }
+.m-inbox-empty p { margin: 0; font-size: calc(13px * var(--fs)); line-height: 1.55; max-width: 280px; }
 .m-empty-actions {
   display: grid;
   gap: 8px;
@@ -4573,7 +4573,7 @@ function handleClearMemory() {
   min-height: 44px;
   justify-content: center;
   border-radius: 14px;
-  font-size: 14.5px;
+  font-size: calc(14.5px * var(--fs));
 }
 
 /* 第二层：全屏沉浸对话页 */
@@ -4620,7 +4620,7 @@ function handleClearMemory() {
   min-width: 16px;
   height: 16px;
   padding: 0 4px;
-  font-size: 10px;
+  font-size: calc(10px * var(--fs));
   line-height: 16px;
   box-shadow: 0 0 0 2px var(--bg);
 }
@@ -4640,7 +4640,7 @@ function handleClearMemory() {
 }
 .m-tt-main {
   max-width: 100%;
-  font-size: 14.5px;
+  font-size: calc(14.5px * var(--fs));
   font-weight: 650;
   letter-spacing: -0.01em;
   line-height: 1.25;
@@ -4653,7 +4653,7 @@ function handleClearMemory() {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--fs));
   color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4678,7 +4678,7 @@ function handleClearMemory() {
   padding: 8px 12px;
   background: var(--warn-soft);
   border-bottom: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
 }
 .m-bga-copy {
   flex: 1;
@@ -4722,9 +4722,9 @@ function handleClearMemory() {
   align-items: center;
   justify-content: space-between;
 }
-.msheet-hdr h3 { margin: 0; font-size: 16px; font-weight: 680; }
+.msheet-hdr h3 { margin: 0; font-size: calc(16px * var(--fs)); font-weight: 680; }
 .msheet-sec { display: grid; gap: 8px; }
-.msheet-label { font-size: 12px; font-weight: 600; color: var(--text-3); }
+.msheet-label { font-size: calc(12px * var(--fs)); font-weight: 600; color: var(--text-3); }
 .msheet-rename-row { display: flex; gap: 8px; }
 .msheet-rename-row .input { flex: 1; height: 40px; }
 .msheet-actions {
@@ -4743,7 +4743,7 @@ function handleClearMemory() {
   border: 0;
   background: transparent;
   color: var(--text);
-  font-size: 14px;
+  font-size: calc(14px * var(--fs));
   text-align: left;
   cursor: pointer;
 }

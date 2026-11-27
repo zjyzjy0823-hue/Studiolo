@@ -67,7 +67,7 @@ function axisMoney(value: number) {
 .finance-chart__canvas { width: 100%; min-height: 244px; margin-top: 8px; padding: 12px 8px 4px; border-radius: var(--r-md); background: var(--solid); box-shadow: var(--shadow-1); }
 .finance-chart__canvas svg { display: block; width: 100%; height: auto; min-height: 244px; overflow: visible; }
 .finance-chart__grid { stroke: var(--line); stroke-dasharray: 4 6; }
-.finance-chart__axis { fill: var(--text-3); font-family: inherit; font-size: 11px; font-weight: 550; }
+.finance-chart__axis { fill: var(--text-3); font-family: inherit; font-size: calc(11px * var(--fs)); font-weight: 550; }
 @media (max-width: 650px) { .finance-chart .card-h { flex-wrap: wrap; } }
 @media (max-width: 420px) { .finance-chart__canvas, .finance-chart__canvas svg { min-height: 205px; } }
 </style>

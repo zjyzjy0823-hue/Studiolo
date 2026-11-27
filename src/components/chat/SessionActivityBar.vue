@@ -38,7 +38,7 @@ const emit = defineEmits<{ open: [] }>()
   background: var(--surface-2);
   color: var(--text-2);
   font: inherit;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   cursor: pointer;
 }
 .session-activity-bar:hover { color: var(--text); border-color: var(--accent-line); }

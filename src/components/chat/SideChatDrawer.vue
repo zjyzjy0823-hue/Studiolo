@@ -119,7 +119,7 @@ const session = computed(() => (props.sessionKey ? fleet.sessionsByKey[props.ses
 }
 
 .side-title {
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   font-weight: 600;
   color: var(--text);
   overflow: hidden;
@@ -128,7 +128,7 @@ const session = computed(() => (props.sessionKey ? fleet.sessionsByKey[props.ses
 }
 
 .side-sub {
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -152,6 +152,6 @@ const session = computed(() => (props.sessionKey ? fleet.sessionsByKey[props.ses
 .side-empty {
   padding: 32px 16px;
   text-align: center;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
 }
 </style>

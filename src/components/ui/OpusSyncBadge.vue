@@ -10,7 +10,7 @@ defineProps<{ kind: keyof typeof labels; label?: string; dotOnly?: boolean }>()
 
 <template>
   <span class="sync" :class="['is-' + kind, { 'dot-only': dotOnly }]" :aria-label="dotOnly ? (label ?? labels[kind]) : undefined">
-    <span class="glyph"><OpusIcon v-if="kind === 'local' || kind === 'synced'" :name="kind === 'local' ? 'check' : 'checks'" /><b v-else-if="kind === 'conflict'" style="font-size:10px">!</b></span>
+    <span class="glyph"><OpusIcon v-if="kind === 'local' || kind === 'synced'" :name="kind === 'local' ? 'check' : 'checks'" /><b v-else-if="kind === 'conflict'" style="font-size:calc(10px * var(--fs))">!</b></span>
     <template v-if="!dotOnly">{{ label ?? labels[kind] }}</template>
   </span>
 </template>

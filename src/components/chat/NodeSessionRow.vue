@@ -88,8 +88,8 @@ const provider = computed(() => getProviderMeta(props.session.provider))
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.node-session-title { font-size: 12.5px; font-weight: 530; }
-.node-session-subtitle, .node-session-facts { font-size: 11px; color: var(--text-3); }
+.node-session-title { font-size: calc(12.5px * var(--fs)); font-weight: 530; }
+.node-session-subtitle, .node-session-facts { font-size: calc(11px * var(--fs)); color: var(--text-3); }
 .node-session-facts { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .node-session-model { max-width: 70px; font-family: var(--mono, monospace); }
 .node-session-actions {
@@ -120,7 +120,7 @@ const provider = computed(() => getProviderMeta(props.session.provider))
 .node-session-actions button:hover { background: var(--surface-2); color: var(--text); }
 .node-session-actions .i { width: 13px; height: 13px; }
 .node-session-row.is-renaming { padding: 3px 6px; }
-.tree-rename-input { width: 100%; min-width: 0; height: 27px; padding: 2px 6px; font-size: 12px; }
+.tree-rename-input { width: 100%; min-width: 0; height: 27px; padding: 2px 6px; font-size: calc(12px * var(--fs)); }
 @container node-sidebar (max-width: 260px) {
   .node-session-model { display: none; }
 }

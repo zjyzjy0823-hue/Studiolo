@@ -429,6 +429,7 @@ export interface CheckpointInfo {
   sessionId: string
   runId?: string
   requestId?: string
+  commandId?: string
   summary: DiffSummary
   reverted?: boolean
   createdAt: number
@@ -471,12 +472,13 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
   runId?: string
   requestId?: string
+  commandId?: string
   nodeId: string
   provider: AdapterProvider
   text: string
   epochSnapshot?: true
   /** Optimistic user messages track delivery until the node acknowledges them. */
-  delivery?: 'sending' | 'sent' | 'failed'
+  delivery?: 'sending' | 'sent' | 'failed' | 'unknown'
   thought?: string
   streaming?: boolean
   interrupted?: boolean
@@ -512,6 +514,7 @@ export interface FleetWsEvent {
   sessionId?: string
   runId?: string
   requestId?: string
+  commandId?: string
   text?: string
   name?: string
   toolKind?: string

@@ -502,7 +502,7 @@ onUnmounted(() => {
                 <select
                   v-if="fleet.nodes.length"
                   class="input"
-                  style="height:28px;font-size:12px;max-width:128px;padding:0 8px"
+                  style="height:28px;font-size:calc(12px * var(--fs));max-width:128px;padding:0 8px"
                   :value="fleet.selectedNode?.id || ''"
                   aria-label="选择控制节点"
                   @change="fleet.selectNode(($event.target as HTMLSelectElement).value)"
@@ -548,13 +548,13 @@ onUnmounted(() => {
         </footer>
         <div id="sync-panel" class="sync-panel" :hidden="!panelOpen">
           <h3>同步</h3>
-          <div class="faint" style="font-size:12.5px">{{ syncStatus?.lastSuccessAt ? '最近同步 ' + new Date(syncStatus.lastSuccessAt).toLocaleString() : syncLabel }}</div>
+          <div class="faint" style="font-size:calc(12.5px * var(--fs))">{{ syncStatus?.lastSuccessAt ? '最近同步 ' + new Date(syncStatus.lastSuccessAt).toLocaleString() : syncLabel }}</div>
           <div v-if="auth.mode === 'local'" class="queue">
-            <div v-if="queued" class="row"><span class="tile-icon" style="width:26px;height:26px"><OpusIcon name="sync" /></span><span class="grow"><div class="title" style="font-size:12.5px">{{ queued }} 项待同步</div><div class="sub">更改已保存在本机，联网后同步到 Core</div></span><OpusSyncBadge kind="pending" label="排队中" /></div>
-            <div v-if="syncStatus?.conflicts" class="row"><span class="tile-icon" style="width:26px;height:26px"><OpusIcon name="alert" /></span><span class="grow"><div class="title" style="font-size:12.5px">{{ syncStatus.conflicts }} 个冲突待处理</div><div class="sub">需要确认保留本机或 Core 版本</div></span><button type="button" class="btn btn-sm btn-danger" @click="openSyncSettings">处理冲突</button></div>
+            <div v-if="queued" class="row"><span class="tile-icon" style="width:26px;height:26px"><OpusIcon name="sync" /></span><span class="grow"><div class="title" style="font-size:calc(12.5px * var(--fs))">{{ queued }} 项待同步</div><div class="sub">更改已保存在本机，联网后同步到 Core</div></span><OpusSyncBadge kind="pending" label="排队中" /></div>
+            <div v-if="syncStatus?.conflicts" class="row"><span class="tile-icon" style="width:26px;height:26px"><OpusIcon name="alert" /></span><span class="grow"><div class="title" style="font-size:calc(12.5px * var(--fs))">{{ syncStatus.conflicts }} 个冲突待处理</div><div class="sub">需要确认保留本机或 Core 版本</div></span><button type="button" class="btn btn-sm btn-danger" @click="openSyncSettings">处理冲突</button></div>
             <div v-if="!queued && !syncStatus?.conflicts" class="cleared" style="padding:20px"><OpusIcon :name="syncKind === 'offline' ? 'wifiOff' : 'checks'" />{{ syncKind === 'offline' ? '离线：所有更改都已保存在本机' : '所有更改均已同步' }}</div>
           </div>
-          <div v-if="auth.mode === 'local'" style="display:flex;gap:8px;align-items:center"><span class="faint" style="font-size:11.5px;flex:1">共享空间只同步密文，这里不显示内容名称。</span><button type="button" class="btn btn-ghost btn-sm" @click="openSyncSettings">同步设置</button><button type="button" class="btn btn-primary btn-sm" :disabled="!syncStatus?.connected || busy || syncStatus.running" @click="sync()"><OpusIcon name="sync" />立即同步</button></div>
+          <div v-if="auth.mode === 'local'" style="display:flex;gap:8px;align-items:center"><span class="faint" style="font-size:calc(11.5px * var(--fs));flex:1">共享空间只同步密文，这里不显示内容名称。</span><button type="button" class="btn btn-ghost btn-sm" @click="openSyncSettings">同步设置</button><button type="button" class="btn btn-primary btn-sm" :disabled="!syncStatus?.connected || busy || syncStatus.running" @click="sync()"><OpusIcon name="sync" />立即同步</button></div>
         </div>
         <div class="toast-host desk"><div v-for="item in toasts" :key="item.id" class="toast" :class="{ out: item.out }" role="status">{{ item.text }}</div></div>
       </div>

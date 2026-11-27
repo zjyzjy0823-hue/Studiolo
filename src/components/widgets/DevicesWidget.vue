@@ -67,12 +67,12 @@ function activityPoints(values: number[]) {
 <style scoped>
 .devices-card { min-width: 0; padding: 19px 19px 1px; }
 .devices-card :deep(.glass-card__header) { margin-bottom: 12px; }
-.devices-card :deep(.glass-card__title) { color: var(--workbench-text); font-size: 18px; font-weight: 580; text-shadow: none; }
-.devices-card :deep(.glass-card__title)::after { content: '›'; margin-left: 11px; font-size: 25px; font-weight: 300; vertical-align: -1px; }
-.view-all { color: var(--workbench-text); font-size: 14px; font-weight: 450; white-space: nowrap; }
+.devices-card :deep(.glass-card__title) { color: var(--workbench-text); font-size: calc(18px * var(--fs)); font-weight: 580; text-shadow: none; }
+.devices-card :deep(.glass-card__title)::after { content: '›'; margin-left: 11px; font-size: calc(25px * var(--fs)); font-weight: 300; vertical-align: -1px; }
+.view-all { color: var(--workbench-text); font-size: calc(14px * var(--fs)); font-weight: 450; white-space: nowrap; }
 .devices-card :deep(.glass-card__body) { min-height: 0; }
 .device-list { display: grid; height: 100%; grid-template-rows: repeat(4, minmax(42px, 1fr)); gap: 4px; }
-.widget-empty { grid-row: 1 / -1; align-self: center; margin: 0; color: var(--workbench-text); font-size: 12px; text-align: center; }
+.widget-empty { grid-row: 1 / -1; align-self: center; margin: 0; color: var(--workbench-text); font-size: calc(12px * var(--fs)); text-align: center; }
 .device-row { display: grid; grid-template-columns: 37px minmax(0,1fr) 62px 72px 60px; align-items: center; gap: 7px; min-width: 0; min-height: 0; padding: 5px 11px; border: 1px solid var(--workbench-line); border-radius: 15px; background: var(--workbench-solid); box-shadow: inset 0 1px 0 rgba(255,255,255,.58); transition: transform .2s ease, background .2s ease; }
 .device-row:hover { transform: translateX(2px); background: var(--workbench-soft); }
 .device-icon { display: grid; width: 34px; height: 34px; place-items: center; }
@@ -85,14 +85,14 @@ function activityPoints(values: number[]) {
 .minecraft-mark { width: 34px; height: 34px; filter: drop-shadow(0 2px 2px rgba(38,63,32,.24)); }
 .device-identity { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .device-identity strong, .device-identity small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.device-identity strong { color: var(--workbench-text); font-size: 13px; font-weight: 680; letter-spacing: -.025em; }
-.device-identity small { color: var(--workbench-muted); font-size: 11px; font-weight: 500; }
-.connection-status { display: flex; align-items: center; gap: 5px; color: var(--workbench-good); font-size: 11px; font-weight: 540; white-space: nowrap; }
+.device-identity strong { color: var(--workbench-text); font-size: calc(13px * var(--fs)); font-weight: 680; letter-spacing: -.025em; }
+.device-identity small { color: var(--workbench-muted); font-size: calc(11px * var(--fs)); font-weight: 500; }
+.connection-status { display: flex; align-items: center; gap: 5px; color: var(--workbench-good); font-size: calc(11px * var(--fs)); font-weight: 540; white-space: nowrap; }
 .connection-status i { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--workbench-muted-surface); }
 .connection-status--offline { color: var(--workbench-muted); }
 .connection-status--offline i { background: var(--workbench-solid); }
 .device-metrics { display: flex; min-width: 0; flex-direction: column; gap: 2px; padding-left: 9px; border-left: 1px solid var(--workbench-line); }
-.device-metrics span { color: var(--workbench-muted); font-size: 11px; line-height: 1.22; white-space: nowrap; }
+.device-metrics span { color: var(--workbench-muted); font-size: calc(11px * var(--fs)); line-height: 1.22; white-space: nowrap; }
 .device-metrics strong { float: right; margin-left: 4px; color: var(--workbench-text); font-weight: 680; font-variant-numeric: tabular-nums; }
 .device-visual { display: flex; align-items: center; justify-content: center; min-width: 0; }
 .device-sparkline { width: 60px; height: 28px; overflow: visible; filter: drop-shadow(0 2px 3px rgba(26,129,247,.18)); }
@@ -103,13 +103,13 @@ function activityPoints(values: number[]) {
 @container (max-width: 440px) {
   .devices-card { padding: 13px 13px 9px; }
   .devices-card :deep(.glass-card__header) { margin-bottom: 8px; }
-  .view-all { font-size: 11px; }
+  .view-all { font-size: calc(11px * var(--fs)); }
   .device-row { grid-template-columns: 30px minmax(0, 1fr) 50px 56px; gap: 5px; padding-inline: 7px; }
   .device-icon, .minecraft-mark, .android-mark { width: 28px; height: 28px; }
   .windows-mark { width: 22px; height: 22px; }
   .device-visual { display: none; }
-  .device-identity strong { font-size: 11px; }
-  .device-identity small, .connection-status, .device-metrics span { font-size: 9px; }
+  .device-identity strong { font-size: calc(11px * var(--fs)); }
+  .device-identity small, .connection-status, .device-metrics span { font-size: calc(9px * var(--fs)); }
   .device-metrics { padding-left: 5px; }
 }
 @container (max-width: 300px) {
@@ -120,5 +120,5 @@ function activityPoints(values: number[]) {
   .device-list { grid-template-rows: repeat(4, minmax(38px, 1fr)); }
   .device-row { padding-block: 3px; }
 }
-@media (max-width: 480px) { .devices-card { padding-inline: 12px; } .device-row { grid-template-columns: 29px minmax(0,1fr) 51px 60px 40px; gap: 5px; padding-inline: 7px; } .device-icon, .minecraft-mark, .android-mark { width: 27px; height: 27px; } .windows-mark { width: 22px; height: 22px; } .device-identity strong { font-size: 11px; } .device-identity small, .connection-status, .device-metrics span { font-size: 9px; } .device-metrics { padding-left: 5px; } .device-sparkline { width: 40px; } .battery { width: 29px; } }
+@media (max-width: 480px) { .devices-card { padding-inline: 12px; } .device-row { grid-template-columns: 29px minmax(0,1fr) 51px 60px 40px; gap: 5px; padding-inline: 7px; } .device-icon, .minecraft-mark, .android-mark { width: 27px; height: 27px; } .windows-mark { width: 22px; height: 22px; } .device-identity strong { font-size: calc(11px * var(--fs)); } .device-identity small, .connection-status, .device-metrics span { font-size: calc(9px * var(--fs)); } .device-metrics { padding-left: 5px; } .device-sparkline { width: 40px; } .battery { width: 29px; } }
 </style>

@@ -19,7 +19,7 @@ function onImport(event: Event) {
 <template>
   <SettingsSection title="存储" description="查看本地数据、附件与缓存的空间占用。">
     <div class="settings-card storage-overview">
-      <div class="storage-overview__header"><div class="settings-icon-tile"><HardDrive :size="18" /></div><div><span class="faint" style="font-size:12px">已用存储</span><strong v-if="info.totalGb">{{ info.usedGb.toFixed(1) }} GB <small>/ {{ info.totalGb }} GB</small></strong><strong v-else>暂不可用</strong></div><b v-if="info.totalGb">{{ usedPercent() }}%</b></div>
+      <div class="storage-overview__header"><div class="settings-icon-tile"><HardDrive :size="18" /></div><div><span class="faint" style="font-size:calc(12px * var(--fs))">已用存储</span><strong v-if="info.totalGb">{{ info.usedGb.toFixed(1) }} GB <small>/ {{ info.totalGb }} GB</small></strong><strong v-else>暂不可用</strong></div><b v-if="info.totalGb">{{ usedPercent() }}%</b></div>
       <div class="storage-progress" role="meter" :aria-valuenow="info.usedGb" :aria-valuemax="info.totalGb" aria-valuemin="0" aria-label="已使用存储空间">
         <span v-for="segment in info.segments" :key="segment.id" :style="{ width: `${segment.bytes / info.totalGb * 100}%`, backgroundColor: segment.color }" />
       </div>
@@ -44,18 +44,18 @@ function onImport(event: Event) {
 <style scoped>
 .storage-overview__header { display: flex; align-items: center; gap: 12px; }
 .storage-overview__header > div:nth-child(2) { display: flex; flex-direction: column; gap: 2px; }
-.storage-overview__header strong { color: var(--text); font-size: 18px; font-weight: 700; }
-.storage-overview__header strong small { color: var(--text-3); font-size: 13px; font-weight: 500; }
-.storage-overview__header b { margin-left: auto; color: var(--accent); font-size: 14px; }
+.storage-overview__header strong { color: var(--text); font-size: calc(18px * var(--fs)); font-weight: 700; }
+.storage-overview__header strong small { color: var(--text-3); font-size: calc(13px * var(--fs)); font-weight: 500; }
+.storage-overview__header b { margin-left: auto; color: var(--accent); font-size: calc(14px * var(--fs)); }
 .storage-progress { display: flex; width: 100%; height: 8px; overflow: hidden; margin-top: 14px; border-radius: 99px; background: var(--surface-3); }
 .storage-progress > span { flex: none; height: 100%; }
-.storage-overview__footer { display: flex; justify-content: space-between; margin-top: 8px; color: var(--text-3); font-size: 12px; }
+.storage-overview__footer { display: flex; justify-content: space-between; margin-top: 8px; color: var(--text-3); font-size: calc(12px * var(--fs)); }
 .storage-segments { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.storage-segment { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-3); color: var(--text-2); font-size: 13px; }
+.storage-segment { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-3); color: var(--text-2); font-size: calc(13px * var(--fs)); }
 .storage-segment__dot { width: 8px; height: 8px; flex: none; border-radius: 2px; }
-.storage-segment strong { margin-left: auto; color: var(--text); font-size: 13px; white-space: nowrap; }
+.storage-segment strong { margin-left: auto; color: var(--text); font-size: calc(13px * var(--fs)); white-space: nowrap; }
 .storage-import-button { position: relative; cursor: pointer; }
 .storage-import-button input { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; }
-.storage-help { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--text-3); font-size: 12px; }
+.storage-help { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--text-3); font-size: calc(12px * var(--fs)); }
 @media (max-width: 560px) { .storage-segments { grid-template-columns: 1fr; } }
 </style>

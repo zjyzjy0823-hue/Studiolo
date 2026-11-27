@@ -147,13 +147,15 @@ export function mergeToolCallUpdate(
     | 'durationMs'
     | 'subagentSessionId'
     | 'media'
-  >,
+  > & { startedAt?: number; tool?: { startedAt?: number } },
 ): ToolCallBadge[] {
   const list = [...(existing ?? [])]
   const key = evt.callId || `legacy-${evt.name || 'tool'}`
   const matchIdx = evt.callId
     ? list.findIndex(item => item.callId === evt.callId || item.id === evt.callId)
     : -1
+
+  const eventStartedAt = evt.startedAt ?? evt.tool?.startedAt
 
   if (matchIdx === -1) {
     const status: ToolCallStatus = evt.status
@@ -173,7 +175,7 @@ export function mergeToolCallUpdate(
       durationMs: evt.durationMs,
       subagentSessionId: evt.subagentSessionId,
       ...(evt.media?.length ? { media: evt.media } : {}),
-      startedAt: Date.now(),
+      startedAt: eventStartedAt ?? Date.now(),
     }
     list.push(created)
     return list
@@ -198,6 +200,7 @@ export function mergeToolCallUpdate(
     output: nextOutput,
     error: evt.error !== undefined ? evt.error : prev.error,
     durationMs: evt.durationMs ?? prev.durationMs,
+    startedAt: eventStartedAt ?? prev.startedAt,
     subagentSessionId: evt.subagentSessionId ?? prev.subagentSessionId,
     media: evt.media?.length ? evt.media : prev.media,
   }
@@ -631,6 +634,15 @@ export function formatWorkLogDuration(ms?: number | null): string {
   if (ms == null || ms <= 0) return ''
   const elapsed = formatElapsedTime(ms)
   return elapsed ? `用时 ${elapsed}` : ''
+}
+
+export function formatClockTime(ts?: number | null, options: { seconds?: boolean } = {}): string {
+  if (!ts) return ''
+  const { seconds = true } = options
+  return new Date(ts).toLocaleTimeString('zh-CN', {
+    hour12: false, hour: '2-digit', minute: '2-digit',
+    ...(seconds ? { second: '2-digit' } : {}),
+  })
 }
 
 export function readTurnTestResult(tools: ToolCallBadge[] = []) {

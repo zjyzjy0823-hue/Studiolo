@@ -331,7 +331,7 @@ const totalReadyAdapters = computed(() =>
       @close="issuedToken = null"
     >
       <div v-if="issuedToken" class="issued-token-body">
-        <div class="faint" style="font-size:12.5px">节点 <b>{{ issuedToken.nodeName }}</b> 的独立凭证：</div>
+        <div class="faint" style="font-size:calc(12.5px * var(--fs))">节点 <b>{{ issuedToken.nodeName }}</b> 的独立凭证：</div>
         <code class="token-box">{{ issuedToken.nodeToken }}</code>
         <code class="cmd-box">STUDIOLO_NODE_TOKEN={{ issuedToken.nodeToken }} python -m agent_node --config config.json</code>
       </div>
@@ -380,7 +380,7 @@ const totalReadyAdapters = computed(() =>
 }
 .fleet-panel-title h3 {
   margin: 0;
-  font-size: 15px;
+  font-size: calc(15px * var(--fs));
   font-weight: 650;
 }
 .fph-ic {
@@ -390,7 +390,7 @@ const totalReadyAdapters = computed(() =>
 }
 .fleet-panel-sub {
   margin: 4px 0 0;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
 }
 .fleet-panel-actions {
   display: flex;
@@ -405,7 +405,7 @@ const totalReadyAdapters = computed(() =>
   padding: 16px;
   border-radius: var(--r-md);
   background: var(--surface-2);
-  font-size: 13px;
+  font-size: calc(13px * var(--fs));
 }
 .fleet-empty p { margin: 0; }
 .fleet-empty-ic { width: 20px; height: 20px; color: var(--text-3); flex: none; }
@@ -453,20 +453,20 @@ const totalReadyAdapters = computed(() =>
   gap: 8px;
   flex-wrap: wrap;
 }
-.fleet-node-name-row strong { font-size: 14.5px; }
+.fleet-node-name-row strong { font-size: calc(14.5px * var(--fs)); }
 .fn-chip {
   padding: 1px 7px;
   border-radius: var(--r-full);
   background: var(--surface-2);
   color: var(--text-3);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
 }
 .fleet-node-sub {
   display: flex;
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
 }
 .fn-roots {
   max-width: 320px;
@@ -529,11 +529,11 @@ const totalReadyAdapters = computed(() =>
   gap: 6px;
   flex-wrap: wrap;
 }
-.adapter-name { font-size: 13px; font-weight: 650; color: var(--text); }
+.adapter-name { font-size: calc(13px * var(--fs)); font-weight: 650; color: var(--text); }
 .adapter-badge {
   padding: 1px 6px;
   border-radius: var(--r-full);
-  font-size: 10px;
+  font-size: calc(10px * var(--fs));
   font-weight: 600;
   background: var(--surface-3);
   color: var(--text-3);
@@ -547,11 +547,11 @@ const totalReadyAdapters = computed(() =>
   border-radius: 999px;
   background: var(--accent-soft);
   color: var(--accent);
-  font-size: 10px;
+  font-size: calc(10px * var(--fs));
 }
 .adapter-desc {
   margin-top: 2px;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -567,7 +567,7 @@ const totalReadyAdapters = computed(() =>
   background: var(--surface-2);
   color: var(--text-3);
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: calc(10px * var(--fs));
 }
 .adapter-foot {
   display: flex;
@@ -583,7 +583,7 @@ const totalReadyAdapters = computed(() =>
   gap: 4px;
   min-width: 0;
   flex: 1;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
 }
 .ap-lbl { color: var(--text-3); flex: none; }
 .ap-val {
@@ -595,7 +595,7 @@ const totalReadyAdapters = computed(() =>
   border-radius: 4px;
   background: var(--surface-2);
   color: var(--text-2);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
 }
 .ap-clear {
   border: 0;
@@ -603,14 +603,14 @@ const totalReadyAdapters = computed(() =>
   color: var(--text-3);
   cursor: pointer;
   padding: 0 3px;
-  font-size: 13px;
+  font-size: calc(13px * var(--fs));
 }
 .ap-clear:hover { color: var(--warn); }
-.adapter-pref-empty { font-size: 11px; }
+.adapter-pref-empty { font-size: calc(11px * var(--fs)); }
 .adapter-chat-btn { flex: none; }
 .fleet-no-adapters {
   margin: 0;
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   padding: 8px 10px;
   border-radius: var(--r-xs);
   background: var(--surface-2);
@@ -625,7 +625,7 @@ const totalReadyAdapters = computed(() =>
   padding: 9px 10px;
   border-radius: var(--r-sm);
   background: var(--surface-2);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   word-break: break-all;
 }
 </style>

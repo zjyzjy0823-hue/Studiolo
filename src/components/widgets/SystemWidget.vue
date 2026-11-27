@@ -60,22 +60,22 @@ onMounted(() => { if (auth.token) void store.load(auth.token) })
 
 <style scoped>
 .system-card{padding:17px 30px 14px 28px}
-.system-state{margin:52px 0;color:var(--workbench-text);text-align:center;font-size:12px}.system-state button{border:0;background:none;color:var(--workbench-text);text-decoration:underline;cursor:pointer}
+.system-state{margin:52px 0;color:var(--workbench-text);text-align:center;font-size:calc(12px * var(--fs))}.system-state button{border:0;background:none;color:var(--workbench-text);text-decoration:underline;cursor:pointer}
 .system-card :deep(.glass-card__header){margin-bottom:10px}
-.system-card :deep(.glass-card__title){color:var(--workbench-text);font-size:20px;font-weight:500}
-.system-card :deep(.glass-card__title)::before{content:'✧';display:inline-block;margin-right:12px;font-size:26px;line-height:.4;vertical-align:-2px}
-.system-card :deep(.glass-card__title)::after{content:'›';display:inline-block;margin-left:11px;font-size:26px;font-weight:300;line-height:.5;vertical-align:-1px}
+.system-card :deep(.glass-card__title){color:var(--workbench-text);font-size:calc(20px * var(--fs));font-weight:500}
+.system-card :deep(.glass-card__title)::before{content:'✧';display:inline-block;margin-right:12px;font-size:calc(26px * var(--fs));line-height:.4;vertical-align:-2px}
+.system-card :deep(.glass-card__title)::after{content:'›';display:inline-block;margin-left:11px;font-size:calc(26px * var(--fs));font-weight:300;line-height:.5;vertical-align:-1px}
 .system-action-arrow{color:var(--workbench-text)}
 .system-layout{display:flex;align-items:center;justify-content:space-between;gap:22px;min-width:0;height:100%;transform:translateY(-14px)}
 .system-metrics{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:space-between;gap:12px;padding:4px 0 9px}
-.metric{display:grid;grid-template-columns:60px minmax(42px,1fr) 36px;align-items:center;gap:8px;font-size:14px}
+.metric{display:grid;grid-template-columns:60px minmax(42px,1fr) 36px;align-items:center;gap:8px;font-size:calc(14px * var(--fs))}
 .metric-name{color:var(--workbench-text)}
 .metric-track{display:block;height:12px;border-radius:20px;background:var(--workbench-solid);overflow:hidden}
 .metric-track>span{display:block;height:100%;border-radius:inherit;background:var(--workbench-solid);box-shadow:0 0 12px rgba(115,196,255,.35)}
 .metric[data-type="memory"] .metric-track>span{background:var(--workbench-solid)}
 .metric[data-type="disk"] .metric-track>span{background:var(--workbench-solid)}
-.metric strong{color:var(--workbench-text);font-size:14px;font-weight:560;text-align:right;font-variant-numeric:tabular-nums}
-.network-row{display:flex;align-items:center;gap:10px;color:var(--workbench-text);font-size:13px;white-space:nowrap}
+.metric strong{color:var(--workbench-text);font-size:calc(14px * var(--fs));font-weight:560;text-align:right;font-variant-numeric:tabular-nums}
+.network-row{display:flex;align-items:center;gap:10px;color:var(--workbench-text);font-size:calc(13px * var(--fs));white-space:nowrap}
 .network-row>span:first-child{margin-right:3px}
 .network-row>span:not(:first-child){display:inline-flex;align-items:center;gap:2px}
 .network-row svg{color:var(--workbench-good)}
@@ -85,22 +85,22 @@ onMounted(() => { if (auth.token) void store.load(auth.token) })
 .ring circle{fill:none;stroke-width:11}
 .ring-track{stroke:rgba(223,235,255,.24)}
 .ring-fill{stroke:url(#memory-ring);stroke-linecap:round;filter:drop-shadow(0 0 5px rgba(128,210,255,.34))}
-.ring strong{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--workbench-text);font-size:28px;font-weight:650;font-variant-numeric:tabular-nums}
-.ring small{font-size:16px;font-weight:520}
-.memory-label{margin-top:4px;color:var(--workbench-muted);font-size:16px}
-.memory-detail{margin-top:2px;color:var(--workbench-muted);font-size:14px;white-space:nowrap}
+.ring strong{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--workbench-text);font-size:calc(28px * var(--fs));font-weight:650;font-variant-numeric:tabular-nums}
+.ring small{font-size:calc(16px * var(--fs));font-weight:520}
+.memory-label{margin-top:4px;color:var(--workbench-muted);font-size:calc(16px * var(--fs))}
+.memory-detail{margin-top:2px;color:var(--workbench-muted);font-size:calc(14px * var(--fs));white-space:nowrap}
 @container (max-width: 400px) {
   .system-card { padding: 12px 14px; }
   .system-layout { gap: 8px; transform: none; }
-  .metric { grid-template-columns: 48px minmax(28px, 1fr) 30px; gap: 5px; font-size: 11px; }
-  .metric strong { font-size: 11px; }
+  .metric { grid-template-columns: 48px minmax(28px, 1fr) 30px; gap: 5px; font-size: calc(11px * var(--fs)); }
+  .metric strong { font-size: calc(11px * var(--fs)); }
   .metric-track { height: 9px; }
-  .network-row { flex-wrap: wrap; gap: 3px 6px; font-size: 10px; white-space: normal; }
+  .network-row { flex-wrap: wrap; gap: 3px 6px; font-size: calc(10px * var(--fs)); white-space: normal; }
   .memory-overview { width: 90px; }
   .ring { width: 78px; height: 78px; }
-  .ring strong { font-size: 21px; }
-  .memory-label { font-size: 12px; }
-  .memory-detail { font-size: 10px; }
+  .ring strong { font-size: calc(21px * var(--fs)); }
+  .memory-label { font-size: calc(12px * var(--fs)); }
+  .memory-detail { font-size: calc(10px * var(--fs)); }
 }
 @container (max-width: 280px) {
   .memory-overview { width: 66px; }
@@ -111,5 +111,5 @@ onMounted(() => { if (auth.token) void store.load(auth.token) })
   .system-card :deep(.glass-card__header) { margin-bottom: 5px; }
   .system-metrics { gap: 5px; padding-block: 0; }
 }
-@media(max-width:460px){.system-card{padding-inline:18px}.system-layout{gap:6px;transform:none}.metric{grid-template-columns:55px minmax(35px,1fr) 30px;gap:6px;font-size:12px}.metric strong{font-size:12px}.network-row{gap:5px;font-size:10px}.memory-overview{width:100px}.ring{width:93px;height:93px}.ring strong{font-size:24px}.memory-label{font-size:13px}.memory-detail{font-size:11px}}
+@media(max-width:460px){.system-card{padding-inline:18px}.system-layout{gap:6px;transform:none}.metric{grid-template-columns:55px minmax(35px,1fr) 30px;gap:6px;font-size:calc(12px * var(--fs))}.metric strong{font-size:calc(12px * var(--fs))}.network-row{gap:5px;font-size:calc(10px * var(--fs))}.memory-overview{width:100px}.ring{width:93px;height:93px}.ring strong{font-size:calc(24px * var(--fs))}.memory-label{font-size:calc(13px * var(--fs))}.memory-detail{font-size:calc(11px * var(--fs))}}
 </style>

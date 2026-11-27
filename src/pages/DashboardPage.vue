@@ -72,7 +72,7 @@ onUnmounted(() => {
     </header>
     <TopBar @navigate="focusSection" @create="kind => ['网站快捷方式', '数据集', '自动化'].includes(kind) ? emit('create', kind) : showToast(`${kind}功能即将推出。`)" />
     <div class="board-wrap">
-      <p v-if="editing && desktop" class="faint" style="margin:0 0 10px;font-size:12.5px">拖动卡片上方移动，拖动右下角调整大小</p>
+      <p v-if="editing && desktop" class="faint" style="margin:0 0 10px;font-size:calc(12.5px * var(--fs))">拖动卡片上方移动，拖动右下角调整大小</p>
       <div ref="board" class="board-measure">
         <DashboardRenderer
           :widgets="dashboard.widgets"

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch, type ObjectDirective } from 'vue'
-import { describeToolCall, formatElapsedTime, formatWorkLogDuration } from '../../services/chatHelpers'
+import { describeToolCall, formatClockTime, formatElapsedTime, formatWorkLogDuration } from '../../services/chatHelpers'
 import type { WorkLogProgress, WorkLogStep } from '../../services/messageSegments'
 import type { SyncMode } from '../../services/sessionSync'
 import OpusIcon from '../ui/OpusIcon.vue'
@@ -14,6 +14,7 @@ const props = defineProps<{
   epochSnapshot?: boolean
   syncMode?: SyncMode
   reveal?: { stepId: string }
+  stepCount?: number
 }>()
 
 const emit = defineEmits<{
@@ -64,6 +65,10 @@ const label = computed(() => {
   if (currentTool.value) return currentTool.value.label
   if (isThinking.value) return '思考中'
   if (props.progress?.type === 'text') return '回复中'
+  if (props.stepCount !== undefined && props.stepCount > 1) {
+    const duration = formatWorkLogDuration(props.durationMs)
+    return duration ? `工作步骤 · ${props.stepCount} 步 · ${duration}` : `工作步骤 · ${props.stepCount} 步`
+  }
   if (isEpoch.value) return formatWorkLogDuration(props.durationMs) || '工作步骤'
   const elapsed = formatElapsedTime(props.durationMs)
   if (elapsed) return `用时 ${elapsed}`
@@ -81,7 +86,7 @@ const label = computed(() => {
       <OpusIcon v-if="currentTool" :name="currentTool.icon" class="work-log-icon" />
       <ThoughtPulseIcon v-else-if="isThinking" class="work-log-icon" :active="!isOpen" />
       <span v-else-if="isWorking" class="work-log-spinner" aria-hidden="true" />
-      <span class="work-log-label" :class="{ 'chat-progress-shimmer': isWorking && !isThinking }" aria-live="polite">{{ label }}</span>
+      <span class="work-log-label" :class="{ 'chat-progress-shimmer': isWorking }" aria-live="polite">{{ label }}</span>
       <OpusIcon name="chevD" class="work-log-chevron" />
     </summary>
 
@@ -107,13 +112,16 @@ const label = computed(() => {
           @open-file="path => emit('openFile', path)"
           @open-subagent="id => emit('openSubagent', id)"
         />
+        <span v-if="step.type === 'tool'" class="step-time num" :title="step.tool.durationMs ? `用时 ${formatWorkLogDuration(step.tool.durationMs)}` : undefined">
+          {{ step.tool.startedAt ? formatClockTime(step.tool.startedAt) : '—' }}
+        </span>
       </li>
     </ol>
   </details>
 </template>
 
 <style scoped>
-.work-log { min-width: 0; color: var(--text-2); font-size: 13px; }
+.work-log { min-width: 0; color: var(--text-2); font-size: calc(13px * var(--fs)); }
 .work-log-toggle {
   display: inline-flex;
   align-items: center;
@@ -153,6 +161,12 @@ const label = computed(() => {
   position: relative;
   min-width: 0;
   padding-inline-start: 16px;
+  display: flex;
+  align-items: flex-start;
+}
+.work-log-timeline :deep(.tool-card) {
+  min-width: 0;
+  flex: 1;
 }
 .work-log-timeline > li:not(:last-child)::before {
   position: absolute;
@@ -174,7 +188,7 @@ const label = computed(() => {
 }
 .step-thought .step-marker, .step-running .step-marker { background: var(--accent); }
 .step-error .step-marker { background: var(--warn); }
-.work-log-thought { min-width: 0; }
+.work-log-thought { min-width: 0; flex: 1; }
 .thought-label {
   display: flex;
   width: fit-content;
@@ -200,6 +214,24 @@ const label = computed(() => {
 }
 .work-log-thought p.thought-fade {
   mask-image: linear-gradient(to bottom, #000 calc(100% - 18px), transparent);
+}
+.step-time {
+  margin-left: auto;
+  flex: none;
+  white-space: nowrap;
+  font-size: calc(10.5px * var(--fs));
+  color: var(--text-3);
+  opacity: .75;
+  font-variant-numeric: tabular-nums;
+  line-height: var(--work-step-height);
+  padding-inline-start: 8px;
+  display: inline-block;
+}
+@media (max-width: 380px) {
+  .step-time {
+    max-width: 5.5ch;
+    overflow: hidden;
+  }
 }
 @keyframes thought-reveal {
   from { max-height: 0; opacity: 0; }

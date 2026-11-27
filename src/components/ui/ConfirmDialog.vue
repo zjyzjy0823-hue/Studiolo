@@ -21,5 +21,5 @@ watch(() => confirmation.value?.message, message => {
 </template>
 
 <style scoped>
-.confirm-message { margin: 0; line-height: 1.65; overflow-wrap: anywhere; font-size: 13.5px; color: var(--text-2); }
+.confirm-message { margin: 0; line-height: 1.65; overflow-wrap: anywhere; font-size: calc(13.5px * var(--fs)); color: var(--text-2); }
 </style>

@@ -324,7 +324,7 @@ onUnmounted(() => {
   height: 26px;
   padding: 0 9px;
   border-radius: 6px;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   font-weight: 500;
   color: var(--text-2);
   transition: background-color var(--dur-1), color var(--dur-1);
@@ -364,7 +364,7 @@ onUnmounted(() => {
   height: 30px;
   padding: 0 8px;
   border-radius: 7px;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   color: var(--text);
   text-align: left;
   transition: background-color var(--dur-1), color var(--dur-1);
@@ -374,7 +374,7 @@ onUnmounted(() => {
 .ide-menu-item.is-danger { color: var(--danger); }
 .ide-menu-check { display: inline-grid; place-items: center; width: 16px; flex: none; color: var(--accent); }
 .ide-menu-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ide-menu-kbd { font-size: 11px; color: var(--text-3); margin-left: 12px; }
+.ide-menu-kbd { font-size: calc(11px * var(--fs)); color: var(--text-3); margin-left: 12px; }
 
 .ide-drag-spacer { flex: 1; min-width: 24px; height: 100%; }
 

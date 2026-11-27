@@ -142,16 +142,16 @@ defineExpose({ open, close })
 }
 .session-activity-drawer::backdrop { background: rgb(0 0 0 / 35%); }
 .activity-drawer-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.activity-drawer-header h2 { margin: 0; font-size: 17px; }
+.activity-drawer-header h2 { margin: 0; font-size: calc(17px * var(--fs)); }
 .activity-section { margin-top: 12px; }
-.activity-section h3 { margin: 0 0 6px; font-size: 13px; }
+.activity-section h3 { margin: 0 0 6px; font-size: calc(13px * var(--fs)); }
 .activity-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .activity-list > li { overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); }
 .activity-list > .is-ended { color: var(--text-2); background: transparent; }
 .activity-list summary, .activity-subagent { padding: 8px 10px; overflow-wrap: anywhere; }
 .activity-list summary { cursor: pointer; }
-.activity-meta { display: flex; flex-wrap: wrap; gap: 2px 12px; margin-top: 3px; color: var(--text-2); font-size: 12px; }
-.activity-empty { margin: 0; color: var(--text-2); font-size: 13px; }
+.activity-meta { display: flex; flex-wrap: wrap; gap: 2px 12px; margin-top: 3px; color: var(--text-2); font-size: calc(12px * var(--fs)); }
+.activity-empty { margin: 0; color: var(--text-2); font-size: calc(13px * var(--fs)); }
 .activity-list pre {
   max-height: 180px;
   overflow: auto;
