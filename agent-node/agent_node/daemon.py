@@ -23,7 +23,7 @@ from uuid import uuid4
 import uvicorn
 import websockets
 
-from .adapters.base import AgentAdapter, ApprovalCallback, EventEmitter
+from .adapters.base import AgentAdapter, ApprovalCallback, EventEmitter, merge_prompt_with_attachments
 from .adapters.hermes import HermesAdapter
 from .adapters.hermes_ws import HermesWsAdapter, ProviderError, ResumeTimeoutError
 from .adapters.jsonrpc import JsonRpcError
@@ -1971,6 +1971,28 @@ class AgentNodeDaemon:
                         **extra_kwargs,
                     )
                 except Exception as err:
+                    # 运行中收到“新提示”：上游会以「当前会话已有任务运行中」拒绝。
+                    # 这里降级为插话，保证用户点发送的每一条消息都能送达（老客户端也能用）。
+                    if "当前会话已有任务运行中" in str(err):
+                        steered = False
+                        steer_text = merge_prompt_with_attachments(text, atts)
+                        for name in ("steer", "steer_external"):
+                            steer_fn = getattr(adapter, name, None)
+                            if steer_fn is None:
+                                continue
+                            try:
+                                steered = bool(await steer_fn(session_id=sid, text=steer_text))
+                            except Exception:  # noqa: BLE001
+                                steered = False
+                            if steered:
+                                break
+                        if steered:
+                            _LOG.info("prompt.send during active run -> steered (session=%s)", sid)
+                            await wrapped_emit({
+                                "type": "Accepted", "sessionId": sid, "requestId": eff_req_id,
+                                "runId": turn_state["runId"] or eff_req_id, "steered": True,
+                            })
+                            return
                     _LOG.exception("prompt failed (provider=%s)", provider)
                     await wrapped_emit({
                         "type": "Failed", "sessionId": sid, "requestId": eff_req_id,

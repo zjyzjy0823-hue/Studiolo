@@ -84,7 +84,7 @@ app.add_middleware(
     else list(runtime_config.cors_origins),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Chunk-Sha256", "Range"],
+    allow_headers=["Authorization", "Content-Type", "X-Chunk-Sha256", "X-Studiolo-Media-Link", "X-Transfer-Token", "Range"],
     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
 )
 for router in (

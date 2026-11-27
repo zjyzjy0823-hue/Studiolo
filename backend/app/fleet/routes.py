@@ -4,13 +4,17 @@ import asyncio
 from contextlib import contextmanager
 from datetime import date
 import hashlib
+import json
 import logging
+import mimetypes
+from pathlib import Path
 import secrets
 from typing import Any, Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from fastapi.concurrency import run_in_threadpool
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import ValidationError
@@ -101,6 +105,71 @@ def _fleet_actor(
         raise HTTPException(401, "Invalid or expired token")
     workspace = get_personal_workspace(db, user)
     return ("user", str(user.id), user.id, workspace.id)
+
+
+@router.post("/_debug/client-log", status_code=204)
+def client_debug_log(payload: dict[str, Any], user: User = Depends(current_user)) -> Response:
+    """客户端调试上报：把 JSON 追加写入 ~/.hermes/logs/studiolo-client-debug.log（排查用）。"""
+    log_path = Path.home() / ".hermes" / "logs" / "studiolo-client-debug.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    return Response(status_code=204)
+
+
+INBOX_DIR_NAME = ".studiolo-inbox"
+INBOX_PREVIEW_SUFFIXES = {
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic",
+    ".pdf", ".txt", ".md", ".csv", ".json", ".zip",
+}
+INBOX_PREVIEW_MAX_BYTES = 20 * 1024 * 1024
+
+
+@router.get("/inbox/preview")
+def inbox_preview(
+    node_id: str,
+    path: str,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    """把 agent-node 解密后落在 <workspace>/.studiolo-inbox 的文件回传给客户端预览。
+
+    安全边界：节点必须属于当前用户；文件必须真实存在、位于 .studiolo-inbox 内、
+    在节点上报的 allowedRoots 之内（未上报时退化为仅校验 inbox 目录），扩展名白名单。
+    """
+    node = db.scalar(select(AgentNode).where(AgentNode.id == node_id, AgentNode.user_id == user.id))
+    if node is None:
+        raise HTTPException(404, "Not found")
+    try:
+        target = Path(path).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise HTTPException(404, "Not found")
+    if not target.is_file() or INBOX_DIR_NAME not in target.parts:
+        raise HTTPException(404, "Not found")
+    if target.stat().st_size > INBOX_PREVIEW_MAX_BYTES:
+        raise HTTPException(400, "File too large")
+    roots = [str(item) for item in (node.allowed_roots_json or []) if str(item).strip()]
+    if roots:
+        allowed = False
+        for root in roots:
+            try:
+                root_path = Path(root).expanduser().resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            if target == root_path or root_path in target.parents:
+                allowed = True
+                break
+        if not allowed:
+            raise HTTPException(404, "Not found")
+    suffix = target.suffix.lower()
+    if suffix not in INBOX_PREVIEW_SUFFIXES:
+        raise HTTPException(400, "Unsupported file type")
+    media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    return FileResponse(
+        target,
+        media_type=media_type,
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
 
 
 @router.get("/nodes", response_model=list[NodeOut])

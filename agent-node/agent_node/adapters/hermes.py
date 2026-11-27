@@ -121,6 +121,12 @@ def _gateway_history(items: list[Any]) -> list[dict[str, Any]]:
         if reasoning:
             row["thought"] = reasoning
         if tools:
+            # 工具步骤的时间戳：历史回放里没有单独的 startedAt，用该条消息的
+            # 创建时间（真实时间源，非推算）兜底，供客户端在展开的工作步骤里显示。
+            row_started = row.get("createdAt")
+            if type(row_started) in (int, float):
+                for tool in tools.values():
+                    tool.setdefault("startedAt", int(row_started))
             row["toolCalls"] = list(tools.values())
         if reasoning or tools:
             row["parts"] = parts
