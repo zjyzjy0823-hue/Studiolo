@@ -115,7 +115,7 @@ def create_edge_app(
             stop_evt.set()
             await task
 
-    app = FastAPI(title="Studiolo Edge Blob Relay", version="0.9.9", docs_url=None, redoc_url=None, lifespan=lifespan)
+    app = FastAPI(title="Studiolo Edge Blob Relay", version="0.9.10", docs_url=None, redoc_url=None, lifespan=lifespan)
 
     if origins:
         app.add_middleware(
