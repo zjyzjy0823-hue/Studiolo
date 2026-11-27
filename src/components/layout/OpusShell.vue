@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { Wifi, WifiOff } from 'lucide-vue-next'
+import { RefreshCw, RotateCw, Wifi, WifiOff } from 'lucide-vue-next'
 import { desktopPlatform } from '../../desktop/platform'
 import type { WorkbenchTheme } from '../../composables/useWorkbenchTheme'
 import DesktopTitleBar from '../desktop/DesktopTitleBar.vue'
@@ -22,6 +22,7 @@ import AgentChatThread from '../chat/AgentChatThread.vue'
 import FleetCoreSignIn from '../chat/FleetCoreSignIn.vue'
 import { getProviderMeta } from '../chat/providerMeta'
 import { version } from '../../../package.json'
+import { useUpdater, formatBytes } from '../../composables/useUpdater'
 import OpusSegment from '../ui/OpusSegment.vue'
 import OpusIcon from '../ui/OpusIcon.vue'
 import OpusSyncBadge from '../ui/OpusSyncBadge.vue'
@@ -149,6 +150,54 @@ watch(dockOpen, open => {
     fleet.connectSocket()
   }
 })
+const updater = useUpdater()
+const updatePopoverOpen = ref(false)
+
+const updateBtnTitle = computed(() => {
+  switch (updater.state.value) {
+    case 'checking':
+      return '正在检查更新…'
+    case 'available':
+      return `发现新版本 v${updater.version.value || ''}`
+    case 'downloading':
+      return `下载中 ${updater.percent.value}%`
+    case 'ready':
+      return '重启以完成更新'
+    case 'error':
+      return `更新失败: ${updater.error.value || '未知错误'}`
+    case 'up-to-date':
+      return '已是最新版本'
+    case 'idle':
+    default:
+      return '检查更新'
+  }
+})
+
+const notesPreviewLines = computed(() => {
+  if (!updater.notes.value) return ['包含性能优化与错误修复。']
+  return updater.notes.value
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .slice(0, 3)
+})
+
+function handleUpdateClick() {
+  const s = updater.state.value
+  if (s === 'idle' || s === 'up-to-date' || s === 'error') {
+    void updater.check({ force: true })
+  } else if (s === 'available') {
+    updatePopoverOpen.value = !updatePopoverOpen.value
+  } else if (s === 'ready') {
+    void updater.restart()
+  }
+}
+
+function handleInstallFromPopover() {
+  updatePopoverOpen.value = false
+  void updater.install()
+}
+
 const panelOpen = ref(false)
 const palette = ref<HTMLDialogElement>()
 const query = ref('')
@@ -264,6 +313,7 @@ async function moveCommand(step: number) {
 function go(page: string, mobileTab = false, section?: 'downloads') {
   palette.value?.close()
   panelOpen.value = false
+  updatePopoverOpen.value = false
   add.value = ''
   if (mobileTab) emit('mobile-tab', page)
   else emit('navigate', page, section)
@@ -277,6 +327,7 @@ function keydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
     add.value = ''
     panelOpen.value = false
+    updatePopoverOpen.value = false
   }
   if (props.mobile || !(event.ctrlKey || event.metaKey)) return
   if (event.key.toLowerCase() === 'k') {
@@ -297,6 +348,9 @@ function keydown(event: KeyboardEvent) {
 function dismissSync(event: PointerEvent) {
   if (panelOpen.value && event.target instanceof Element && !event.target.closest('.sync-panel, .sync-pill, .sb-item, .mpill')) {
     panelOpen.value = false
+  }
+  if (updatePopoverOpen.value && event.target instanceof Element && !event.target.closest('.update-popover, .update-btn')) {
+    updatePopoverOpen.value = false
   }
 }
 function openSyncSettings() {
@@ -545,7 +599,57 @@ onUnmounted(() => {
           </button>
           <span class="spacer"></span>
           <span class="sb-item faint">v{{ version }}</span>
+          <button
+            class="update-btn"
+            type="button"
+            :class="{
+              'is-checking': updater.state.value === 'checking',
+              'is-downloading': updater.state.value === 'downloading',
+              'is-ready': updater.state.value === 'ready',
+              'is-error': updater.state.value === 'error',
+              'has-update': updater.state.value === 'available',
+            }"
+            :style="updater.state.value === 'downloading' ? { '--dl-percent': `${updater.percent.value}%` } : undefined"
+            :title="updateBtnTitle"
+            :aria-label="updateBtnTitle"
+            @click="handleUpdateClick"
+          >
+            <div class="update-btn-inner">
+              <RotateCw v-if="updater.state.value === 'ready'" :size="15" :stroke-width="2" />
+              <RefreshCw
+                v-else
+                :size="15"
+                :stroke-width="2"
+                :class="{ 'spin-icon': updater.state.value === 'checking' }"
+              />
+            </div>
+            <span v-if="updater.state.value === 'available'" class="update-dot" aria-hidden="true" />
+          </button>
         </footer>
+        <div
+          v-if="updatePopoverOpen && updater.state.value === 'available'"
+          class="update-popover mat-solid"
+          role="dialog"
+          aria-label="版本更新"
+        >
+          <div class="update-popover-header">
+            <div class="update-popover-title">发现新版本</div>
+            <div class="update-popover-meta">
+              <span class="update-ver mono">v{{ updater.version.value }}</span>
+              <span v-if="updater.contentLength.value" class="update-size faint mono">{{ formatBytes(updater.contentLength.value) }}</span>
+            </div>
+          </div>
+          <div v-if="notesPreviewLines.length" class="update-popover-notes">
+            <p v-for="(line, idx) in notesPreviewLines" :key="idx">{{ line }}</p>
+          </div>
+          <button
+            type="button"
+            class="btn btn-primary btn-sm update-act-btn"
+            @click="handleInstallFromPopover"
+          >
+            下载并安装
+          </button>
+        </div>
         <div id="sync-panel" class="sync-panel" :hidden="!panelOpen">
           <h3>同步</h3>
           <div class="faint" style="font-size:calc(12.5px * var(--fs))">{{ syncStatus?.lastSuccessAt ? '最近同步 ' + new Date(syncStatus.lastSuccessAt).toLocaleString() : syncLabel }}</div>
@@ -571,3 +675,134 @@ onUnmounted(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.update-btn {
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: #111;
+  color: #fff;
+  cursor: pointer;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  outline: none;
+  margin-left: 4px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  transition: transform 0.15s ease, background 0.2s ease;
+}
+.update-btn:hover {
+  transform: scale(1.05);
+}
+.update-btn:active {
+  transform: scale(0.95);
+}
+.update-btn-inner {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.update-btn.is-downloading {
+  background: conic-gradient(var(--accent, #3b82f6) var(--dl-percent, 0%), rgba(255, 255, 255, 0.15) 0);
+  padding: 2.5px;
+}
+.update-btn.is-downloading .update-btn-inner {
+  background: #111;
+  border-radius: 50%;
+}
+.update-btn.is-error {
+  color: var(--danger, #ef4444);
+}
+.update-dot {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent, #3b82f6);
+  border: 1.5px solid #111;
+  pointer-events: none;
+}
+.spin-icon {
+  animation: spin 1s linear infinite;
+}
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.update-popover {
+  position: fixed;
+  z-index: 60;
+  right: 16px;
+  bottom: 44px;
+  width: 240px;
+  padding: 12px 14px;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--line);
+  background: var(--solid);
+  box-shadow: var(--shadow-pop);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+[data-theme="glass"] .update-popover {
+  background: var(--surface);
+  backdrop-filter: var(--material-filter);
+  -webkit-backdrop-filter: var(--material-filter);
+}
+.update-popover-header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.update-popover-title {
+  font-size: calc(13px * var(--fs));
+  font-weight: 600;
+  color: var(--text);
+}
+.update-popover-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: calc(12px * var(--fs));
+}
+.update-ver {
+  color: var(--accent);
+  font-weight: 600;
+}
+.update-size {
+  color: var(--text-3);
+  font-size: calc(11px * var(--fs));
+}
+.update-popover-notes {
+  font-size: calc(11.5px * var(--fs));
+  color: var(--text-2);
+  line-height: 1.4;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.update-popover-notes p {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.update-act-btn {
+  width: 100%;
+  margin-top: 4px;
+  justify-content: center;
+}
+</style>
