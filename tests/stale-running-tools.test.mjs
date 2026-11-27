@@ -95,7 +95,7 @@ test('turn end settles running tools in the ended session only and preserves ter
     [['t-prev-run', 'completed'], ['t-prev-err', 'error']],
   )
   assert.equal(fleet.messagesBySession[keyA][0].text, '先前文本')
-  assert.equal(fleet.messagesBySession[keyA][0].streaming, true)
+  assert.equal(fleet.messagesBySession[keyA][0].streaming, false)
   assert.deepEqual(
     fleet.messagesBySession[keyA][1].toolCalls.map(tool => [tool.id, tool.status]),
     [['t-cur-run', 'completed'], ['t-cur-done', 'completed']],

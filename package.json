@@ -33,7 +33,8 @@
   "android:prepare": "node scripts/android-prepare.mjs",
   "test:attachment": "node --experimental-strip-types --test tests/attachment-note.test.mjs",
   "test:downloads": "node --experimental-strip-types --test tests/download-progress.test.mjs",
-  "test:cors": "node --test tests/cors-headers.test.mjs"
+  "test:cors": "node --test tests/cors-headers.test.mjs",
+  "test:streaming": "node --experimental-strip-types --test tests/streaming-state.test.mjs"
  },
  "dependencies": {
   "@noble/hashes": "^2.4.0",

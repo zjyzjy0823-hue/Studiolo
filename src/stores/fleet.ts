@@ -3,6 +3,10 @@
  */
 
 import { defineStore } from 'pinia'
+
+export const STREAM_STALE_MS = 90_000
+
+let activeFleetStoreInstance: any = null
 import { Channel, invoke } from '@tauri-apps/api/core'
 import { computed, nextTick, onScopeDispose, ref, shallowReactive, toRaw, watch } from 'vue'
 import { apiRequest, ApiError } from '../api/client'
@@ -193,7 +197,7 @@ export function traceFleetRoute(reason: string, detail: Record<string, unknown> 
   console.info(`[fleet] 路由不可用：${reason}`, detail)
 }
 
-export const useFleetStore = defineStore('fleet', () => {
+const useFleetStoreInternal = defineStore('fleet', () => {
   const auth = useAuthStore()
   const useLinkedCore = computed(() => auth.mode === 'local' && auth.workstation)
   const linkedCore = computed(() => useLinkedCore.value && auth.coreConnection?.connected ? auth.coreConnection : null)
@@ -392,6 +396,7 @@ export const useFleetStore = defineStore('fleet', () => {
   const messagesBySession = ref<Record<string, ChatMessage[]>>({})
   const pendingApprovalsByCall = ref<Record<string, PermissionRequestCard>>({})
   const runningBySession = ref<Record<string, string>>({}) // sessionKey -> active runId
+  const lastFrameAtBySession = ref<Record<string, number>>({}) // sessionKey -> timestamp of last stream frame
   const processesBySession = ref<Record<string, ProcessItem[]>>({})
   const subagentsBySession = ref<Record<string, SubagentItem[]>>({})
   const activityFetchedAt = ref<Record<string, number>>({})
@@ -727,8 +732,17 @@ export const useFleetStore = defineStore('fleet', () => {
     return set
   })
 
-  function isSessionStreaming(sKey: string) {
-    return (messagesBySession.value[sKey] ?? []).some(message => message.streaming)
+  function isSessionStreaming(sKey: string): boolean {
+    if (!sKey) return false
+    const hasStreaming = (messagesBySession.value[sKey] ?? []).some(message => message.streaming)
+    if (!hasStreaming) return false
+    if (runningBySession.value[sKey]) return true
+    const lastFrameAt = lastFrameAtBySession.value[sKey]
+    if (typeof lastFrameAt === 'number' && Date.now() - lastFrameAt < STREAM_STALE_MS) {
+      return true
+    }
+    settleSessionStreaming(sKey)
+    return false
   }
   const currentIsStreaming = computed<boolean>(() => isSessionStreaming(activeSessionKey.value))
 
@@ -880,7 +894,46 @@ export const useFleetStore = defineStore('fleet', () => {
     wsState.value = 'disconnected'
   }
 
+  function syncSessionSnapshot(sKey: string) {
+    if (!sKey) return
+    const sess = sessionsByKey.value[sKey]
+    if (sess && syncMode === 'epoch' && fleetRoute.value) {
+      try {
+        if (openEpochSession(sess, sKey)) return
+      } catch {
+        // Fall back to requestSnapshotHistory
+      }
+    }
+    if (activeFleetStoreInstance && typeof activeFleetStoreInstance.requestSnapshotHistory === 'function') {
+      activeFleetStoreInstance.requestSnapshotHistory(sKey)
+    } else {
+      requestSnapshotHistory(sKey)
+    }
+  }
+
+  function handleVisibilityChange() {
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+    const sKey = activeSessionKey.value
+    if (!sKey) return
+    const lastFrameAt = lastFrameAtBySession.value[sKey]
+    const idleMs = typeof lastFrameAt === 'number' ? Date.now() - lastFrameAt : Number.POSITIVE_INFINITY
+    if (wsState.value !== 'online' || idleMs > 30_000) {
+      if (activeFleetStoreInstance && typeof activeFleetStoreInstance.syncSessionSnapshot === 'function') {
+        activeFleetStoreInstance.syncSessionSnapshot(sKey)
+      } else {
+        syncSessionSnapshot(sKey)
+      }
+    }
+  }
+
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+  }
+
   onScopeDispose(() => {
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
     connectionHealth.dispose()
     disconnectSocket()
     for (const sKey of activityRequests.keys()) clearSessionActivity(sKey)
@@ -1241,6 +1294,19 @@ export const useFleetStore = defineStore('fleet', () => {
       }) }
   }
 
+  function settleSessionStreaming(sKey: string) {
+    const list = messagesBySession.value[sKey]
+    if (!list || !list.some(message => message.streaming)) return
+    messagesBySession.value = {
+      ...messagesBySession.value,
+      [sKey]: list.map(message =>
+        message.streaming || message.liveProgress
+          ? { ...message, streaming: false, liveProgress: undefined }
+          : message,
+      ),
+    }
+  }
+
   function reconcileRuntime(sKey: string, frame: FleetWsEvent) {
     if (frame.active && frame.runId) runningBySession.value = { ...runningBySession.value, [sKey]: frame.runId }
     else delete runningBySession.value[sKey]
@@ -1279,6 +1345,7 @@ export const useFleetStore = defineStore('fleet', () => {
       }
       delete runningBySession.value[key]
       reconcileRunMessages(key)
+      settleSessionStreaming(key)
     }
   }
 
@@ -1376,6 +1443,11 @@ export const useFleetStore = defineStore('fleet', () => {
     for (const { finish } of pendingSteers.values()) finish(false, 'disconnected')
     autoPulledProviders.clear()
     clearTransportRequests()
+    for (const key of Object.keys(messagesBySession.value)) {
+      if (!runningBySession.value[key]) {
+        settleSessionStreaming(key)
+      }
+    }
     forcedHistoryRequests.clear()
     contextReads.value = {}
     contextCompactions.value = {}
@@ -1897,6 +1969,9 @@ export const useFleetStore = defineStore('fleet', () => {
     if (frame.requestId && connectionHealth.consumeHeartbeatRequest(frame.requestId)
       && ['Failed', 'NodeUnavailable', 'Error'].includes(frame.type)) return
     const sKey = frameSessionKey(frame)
+    if (sKey && frame.type !== 'FleetSnapshot' && frame.type !== 'NodePresence') {
+      lastFrameAtBySession.value = { ...lastFrameAtBySession.value, [sKey]: Date.now() }
+    }
     try {
       if (frame.requestId && retiredStreamRequests.has(frame.requestId) && ['Failed', 'NodeUnavailable', 'Error'].includes(frame.type)) return
       if (frame.type === 'SessionStreamReplay' && sKey && Array.isArray(frame.events)) {
@@ -2650,6 +2725,9 @@ export const useFleetStore = defineStore('fleet', () => {
         stopStatusBySession.value[sKey] = { requestId: frame.status === 'accepted' ? frame.requestId : undefined,
           state: frame.status, message: frame.message }
       }
+      if (frame.status === 'accepted' && !runningBySession.value[sKey]) {
+        settleSessionStreaming(sKey)
+      }
       return
     }
 
@@ -3115,6 +3193,7 @@ export const useFleetStore = defineStore('fleet', () => {
         ...(durationMs !== undefined ? { durationMs } : {}),
         ...(modelLabel ? { modelLabel } : {}),
       }))
+      settleSessionStreaming(sKey)
       settleSessionRunningTools(sKey)
       if (frame.usage && typeof frame.usage === 'object') {
         const usage = { ...(frame.usage as TokenUsageInput), runId: frame.runId, requestId: frame.requestId }
@@ -3266,6 +3345,7 @@ export const useFleetStore = defineStore('fleet', () => {
         ...(frame.code === 'cancelled' || frame.code === 'stream_closed' ? { interrupted: true } : {}),
         error: errText,
       }))
+      settleSessionStreaming(sKey)
       settleSessionRunningTools(sKey)
       if (frame.runId) pendingRunPrompts.delete(`${sKey}::${frame.runId}`)
       if (frame.requestId) pendingRunPrompts.delete(`${sKey}::${frame.requestId}`)
@@ -5720,6 +5800,10 @@ export const useFleetStore = defineStore('fleet', () => {
     pendingStreamResync,
     lastSeqBySession,
     streamStateBySession,
+    lastFrameAtBySession,
+    settleSessionStreaming,
+    syncSessionSnapshot,
+    requestSnapshotHistory,
     isSessionStreaming,
     contextUsageBySession,
     contextCompactions,
@@ -5794,3 +5878,9 @@ export const useFleetStore = defineStore('fleet', () => {
     readHermesAttachment,
   }
 })
+
+export const useFleetStore: typeof useFleetStoreInternal = ((...args: any[]) => {
+  const store = (useFleetStoreInternal as any)(...args)
+  activeFleetStoreInstance = store
+  return store
+}) as any
