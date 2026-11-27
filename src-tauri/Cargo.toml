@@ -1,6 +1,6 @@
 [package]
 name = "studiolo-desktop"
-version = "0.9.11"
+version = "0.9.12"
 description = "Studiolo Desktop"
 authors = ["Studiolo contributors"]
 edition = "2021"

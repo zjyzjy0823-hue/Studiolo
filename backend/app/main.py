@@ -33,7 +33,7 @@ from .sync.notifications import register_coordinator, unregister_coordinator
 
 logger = logging.getLogger(__name__)
 runtime_config = load_runtime_config()
-APP_VERSION = "0.9.11"
+APP_VERSION = "0.9.12"
 
 
 @asynccontextmanager

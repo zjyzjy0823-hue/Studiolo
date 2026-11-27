@@ -281,6 +281,12 @@ jobs:
           codesign --force --sign "Studiolo Dev" "$APP/Contents/MacOS/studiolo-backend"
           codesign --force --deep --sign "Studiolo Dev" "$APP"
           codesign --verify --deep --strict "$APP"
+          # updater 产物按架构重命名：两个 matrix job 都产 Studiolo.app.tar.gz，上传会互相覆盖
+          UP_DIR="src-tauri/target/$TRIPLE/release/bundle/macos"
+          if [ -f "$UP_DIR/Studiolo.app.tar.gz" ]; then
+            mv "$UP_DIR/Studiolo.app.tar.gz" "$UP_DIR/Studiolo_${VERSION}_${{ matrix.arch }}.app.tar.gz"
+            mv "$UP_DIR/Studiolo.app.tar.gz.sig" "$UP_DIR/Studiolo_${VERSION}_${{ matrix.arch }}.app.tar.gz.sig"
+          fi
           STAGE=$(mktemp -d)
           ditto "$APP" "$STAGE/Studiolo.app"
           ln -s /Applications "$STAGE/Applications"
