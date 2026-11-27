@@ -326,6 +326,12 @@ const mobileDetailLabel = computed(() => sections.find(item => item.id === mobil
             <div class="set-row"><div class="grow"><div class="t">冲突中心</div><div class="d">{{ syncStatus?.conflicts ?? 0 }} 个冲突待处理</div></div><button type="button" class="btn btn-ghost btn-sm" @click="selectSection('sync')">查看</button></div>
           </div></section>
         </template>
+        <template v-else-if="activeSection === 'about'">
+          <section class="set-sec"><h2>关于</h2><div class="mat-solid" style="border-radius:var(--r-lg)">
+            <div class="set-row"><div class="grow"><div class="t">当前版本</div><div class="d">Studiolo {{ version }}</div></div></div>
+            <UpdateRow />
+          </div></section>
+        </template>
         <AccountSettings v-else-if="activeSection === 'account'" :profile="profile" :avatar-url="avatarUrl" :workstation="auth.workstation" @update:profile="updateProfile" @avatar="updateAvatar" @password="passwordOpen = true" />
         <SyncSettings v-else-if="activeSection === 'sync'" @action="emit('action', $event)" />
         <AgentsSettings v-else-if="activeSection === 'agents'" @navigate="emit('navigate', $event)" />

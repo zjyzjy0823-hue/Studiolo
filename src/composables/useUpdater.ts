@@ -52,7 +52,8 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
 }
 
-const CACHE_TTL_MS = 10 * 60 * 1000 // 10 minutes cache
+export const CACHE_TTL_MS = 10 * 60 * 1000 // 10 minutes cache
+export const PERIODIC_CHECK_MS = 3 * 60 * 60 * 1000 // 每 3 小时静默检查一次
 
 const defaultBackend: UpdaterBackend = {
   isTauri: () => {
@@ -245,9 +246,14 @@ export function useUpdater(customBackend?: UpdaterBackend): UseUpdaterReturn {
 
   if (!startupCheckTriggered && defaultBackend.isTauri()) {
     startupCheckTriggered = true
+    // 启动后 8 秒查一次
     setTimeout(() => {
       void globalUpdater?.check({ silent: true })
     }, 8000)
+    // 之后每 3 小时查一次（force 穿透 10 分钟缓存）
+    setInterval(() => {
+      void globalUpdater?.check({ silent: true, force: true })
+    }, PERIODIC_CHECK_MS)
   }
 
   return globalUpdater

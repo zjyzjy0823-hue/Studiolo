@@ -153,6 +153,10 @@ watch(dockOpen, open => {
 const updater = useUpdater()
 const updatePopoverOpen = ref(false)
 
+const showStatusbarUpdate = computed(() =>
+  ['available', 'downloading', 'ready'].includes(updater.state.value),
+)
+
 const updateBtnTitle = computed(() => {
   switch (updater.state.value) {
     case 'checking':
@@ -609,6 +613,7 @@ onUnmounted(() => {
           <span class="spacer"></span>
           <span class="sb-item faint">v{{ version }}</span>
           <button
+            v-if="showStatusbarUpdate"
             class="update-btn"
             type="button"
             :class="{

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createUpdater, formatBytes } from '../src/composables/useUpdater.ts'
+import { createUpdater, formatBytes, PERIODIC_CHECK_MS, CACHE_TTL_MS } from '../src/composables/useUpdater.ts'
 
 test('1. 初始状态为 idle，默认版本为空', () => {
   const updater = createUpdater({
@@ -150,4 +150,9 @@ test('9. formatBytes 格式化', () => {
   assert.equal(formatBytes(2048), '2.0 KB')
   assert.equal(formatBytes(15 * 1024 * 1024), '15.00 MB')
   assert.equal(formatBytes(2 * 1024 * 1024 * 1024), '2.00 GB')
+})
+
+test('10. 轮询与缓存常量：每 3 小时检查一次，结果缓存 10 分钟', () => {
+  assert.equal(PERIODIC_CHECK_MS, 3 * 60 * 60 * 1000)
+  assert.equal(CACHE_TTL_MS, 10 * 60 * 1000)
 })
