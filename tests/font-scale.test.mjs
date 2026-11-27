@@ -26,8 +26,9 @@ test('1. 档位映射：6 档 id/factor 与 spec 一致，默认 standard', () =
   }
 })
 
-test('2. 裸 px 守卫：扫描 src/**/*.{vue,css}，匹配 font-size: <n>px 的数量必须为 0', () => {
+test('2. 裸 px 守卫：扫描 src/**/*.{vue,css} 与 design/studiolo-redesign/*.css，匹配 font-size: <n>px 的数量必须为 0', () => {
   const srcDir = path.resolve(process.cwd(), 'src')
+  const designDir = path.resolve(process.cwd(), 'design/studiolo-redesign')
 
   function getFiles(dir) {
     let results = []
@@ -43,8 +44,12 @@ test('2. 裸 px 守卫：扫描 src/**/*.{vue,css}，匹配 font-size: <n>px 的
     return results
   }
 
-  const files = getFiles(srcDir)
-  assert.ok(files.length > 0, '扫描到 src 样式与组件文件')
+  const designFiles = fs.readdirSync(designDir, { withFileTypes: true })
+    .filter(item => item.isFile() && item.name.endsWith('.css'))
+    .map(item => path.join(designDir, item.name))
+
+  const files = [...getFiles(srcDir), ...designFiles]
+  assert.ok(files.length > 0, '扫描到 src 与 design 样式与组件文件')
 
   const nakedPxRegex = /font-size\s*:\s*[0-9.]+px/g
   const violations = []
