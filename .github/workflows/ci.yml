@@ -241,13 +241,30 @@ jobs:
           key: ${{ matrix.arch }}
       - run: npm ci
       - run: python -m pip install -r backend/requirements.txt 'pyinstaller>=6,<7'
+      - name: Import macOS signing certificate
+        env:
+          MACOS_SIGNING_CERT_P12: ${{ secrets.MACOS_SIGNING_CERT_P12 }}
+          MACOS_SIGNING_CERT_PASSWORD: ${{ secrets.MACOS_SIGNING_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "$MACOS_SIGNING_CERT_P12" | base64 -d > /tmp/studiolo.p12
+          security create-keychain -p actions tmp.keychain
+          security set-keychain-settings -lut 21600 tmp.keychain
+          security unlock-keychain -p actions tmp.keychain
+          security import /tmp/studiolo.p12 -k tmp.keychain -P "$MACOS_SIGNING_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k actions tmp.keychain
+          security list-keychains -d user -s tmp.keychain $(security list-keychains -d user | tr -d '"')
       - name: Build sidecar and .app
+        env:
+          CI: 'true'
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           npm run desktop:prepare
-          node node_modules/@tauri-apps/cli/tauri.js build --target "$(rustc --print host-tuple)" --bundles app --config '{"bundle":{"macOS":{"signingIdentity":"-"}}}'
+          node node_modules/@tauri-apps/cli/tauri.js build --target "$(rustc --print host-tuple)" --bundles app
       - run: python scripts/smoke-backend-sidecar.py
-      - name: Ad-hoc sign and package DMG
+      - name: Sign and package DMG
         run: |
           set -euo pipefail
           TRIPLE=$(rustc --print host-tuple)
@@ -257,8 +274,8 @@ jobs:
           DMG="$DMG_DIR/Studiolo_${VERSION}_${{ matrix.arch }}.dmg"
           mkdir -p "$DMG_DIR"
           # 先签名再打包：未签名的 .app 塞进 DMG 会被 Gatekeeper 直接判为不可用
-          codesign --force --sign - "$APP/Contents/MacOS/studiolo-backend"
-          codesign --force --deep --sign - "$APP"
+          codesign --force --sign "Studiolo Dev" "$APP/Contents/MacOS/studiolo-backend"
+          codesign --force --deep --sign "Studiolo Dev" "$APP"
           codesign --verify --deep --strict "$APP"
           STAGE=$(mktemp -d)
           ditto "$APP" "$STAGE/Studiolo.app"
@@ -273,14 +290,20 @@ jobs:
           path: |
             src-tauri/target/*/release/bundle/dmg/*.dmg
             src-tauri/target/*/release/bundle/dmg/*.sha256
-      - name: Attach DMG to release
+            src-tauri/target/*/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/*/release/bundle/macos/*.app.tar.gz.sig
+      - name: Attach DMG and updater artifacts to release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" src-tauri/target/*/release/bundle/dmg/*.dmg --clobber
+            gh release upload "$GITHUB_REF_NAME" \
+              src-tauri/target/*/release/bundle/dmg/*.dmg \
+              src-tauri/target/*/release/bundle/macos/*.app.tar.gz \
+              src-tauri/target/*/release/bundle/macos/*.app.tar.gz.sig \
+              --clobber
           else
             echo "No release for $GITHUB_REF_NAME yet — artifact only."
           fi

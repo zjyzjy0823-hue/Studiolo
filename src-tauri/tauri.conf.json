@@ -41,6 +41,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "externalBin": [
       "binaries/studiolo-backend"
     ],
@@ -51,6 +52,14 @@
     ],
     "macOS": {
       "signingIdentity": "Studiolo Dev"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY4QjJDQkI1MkU1NkMwMTUKUldRVndGWXV0Y3V5YUd2dElxK25CZzhJQk4yazZrL2FZME9VVFQwYXMzRWJ0RFppdk1VYjBhSWkK",
+      "endpoints": [
+        "https://github.com/zjyzjy0823-hue/Studiolo/releases/latest/download/latest.json"
+      ]
     }
   }
 }
