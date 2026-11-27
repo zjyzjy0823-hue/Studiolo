@@ -317,6 +317,7 @@ pub fn run() {
         android::android_notifications_enabled, android::android_set_notifications_enabled, android::android_show_fleet_notification,
         android::android_show_fleet_approval, android::android_listen_fleet_approval,
         android::android_read_device_space, android::android_save_attachment,
+        android::android_open_download,
         android::android_capture_photo, android::android_pick_images,
     ]);
     #[cfg(not(target_os = "android"))]

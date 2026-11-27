@@ -2,13 +2,19 @@ package com.isidel.studiolo
 
 import android.Manifest
 import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.ContentUris
 import android.content.ContentValues
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Base64
+import android.util.Log
 import android.webkit.MimeTypeMap
+import androidx.core.content.FileProvider
 import app.tauri.annotation.Command
 import app.tauri.annotation.Permission
 import app.tauri.annotation.PermissionCallback
@@ -34,6 +40,106 @@ class AndroidDownloads(private val host: Activity) : Plugin(host) {
             return
         }
         writer.execute { writeDownload(invoke) }
+    }
+
+    @Command
+    fun openDownload(invoke: Invoke) {
+        writer.execute {
+            try {
+                val args = invoke.getArgs()
+                val displayPath = args.optString("displayPath", "")
+                val nameArg = args.optString("name", "")
+                val rawName = if (nameArg.isNotEmpty()) nameArg else displayPath.substringAfterLast('/')
+                if (rawName.isEmpty()) {
+                    invoke.reject("文件不存在", "download_missing")
+                    return@execute
+                }
+                val name = sanitizeName(rawName)
+                Log.i(TAG, "openDownload name=$name displayPath=$displayPath")
+                val uri: Uri
+                var resolvedMime: String? = null
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val resolver = host.contentResolver
+                    var foundUri: Uri? = null
+                    val cursor = resolver.query(
+                        MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                        arrayOf(MediaStore.Downloads._ID, MediaStore.Downloads.MIME_TYPE),
+                        "(${MediaStore.Downloads.RELATIVE_PATH} = ? OR ${MediaStore.Downloads.RELATIVE_PATH} = ?) AND ${MediaStore.Downloads.DISPLAY_NAME} = ?",
+                        arrayOf("Download/Studiolo", "Download/Studiolo/", name),
+                        "${MediaStore.Downloads._ID} DESC"
+                    )
+                    cursor?.use {
+                        if (it.moveToFirst()) {
+                            val id = it.getLong(it.getColumnIndexOrThrow(MediaStore.Downloads._ID))
+                            foundUri = ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, id)
+                            val mimeIdx = it.getColumnIndex(MediaStore.Downloads.MIME_TYPE)
+                            if (mimeIdx != -1) {
+                                resolvedMime = it.getString(mimeIdx)
+                            }
+                        }
+                    }
+                    if (foundUri != null) {
+                        Log.i(TAG, "openDownload: resolved $foundUri mime=$resolvedMime")
+                        uri = foundUri
+                    } else {
+                        // MediaStore 尚未索引（本应用写入但索引延迟）→ 直接走 FileProvider
+                        @Suppress("DEPRECATION")
+                        val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                        val fallbackFile = File(File(downloadsDir, "Studiolo"), name)
+                        if (!fallbackFile.isFile) {
+                            Log.w(TAG, "openDownload: MediaStore miss for $name")
+                            invoke.reject("文件不存在：$name", "download_missing")
+                            return@execute
+                        }
+                        Log.i(TAG, "openDownload: FileProvider fallback $fallbackFile")
+                        uri = FileProvider.getUriForFile(host, "${host.packageName}.fileprovider", fallbackFile)
+                    }
+                } else {
+                    @Suppress("DEPRECATION")
+                    val downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                    val folder = File(downloads, "Studiolo")
+                    val file = File(folder, name)
+                    if (!file.exists()) {
+                        invoke.reject("文件不存在", "download_missing")
+                        return@execute
+                    }
+                    uri = FileProvider.getUriForFile(host, "${host.packageName}.fileprovider", file)
+                }
+
+                val extension = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
+                val fallbackMime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension) ?: "*/*"
+                val mime = resolvedMime ?: fallbackMime
+
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, mime)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                // 不要包 createChooser：APK 这类目标在部分系统（如 vivo）上会被 chooser 包一层后
+                // 变成空解析、界面一闪不出；直接 startActivity，系统需要时自己弹「打开方式」。
+                host.runOnUiThread {
+                    try {
+                        host.startActivity(intent)
+                        Log.i(TAG, "openDownload: startActivity ok for $uri")
+                        invoke.resolve(JSObject().put("opened", true))
+                    } catch (error: android.content.ActivityNotFoundException) {
+                        Log.w(TAG, "openDownload: no viewer for $mime", error)
+                        invoke.reject("没有能打开这种文件的应用", "no_viewer")
+                    } catch (error: SecurityException) {
+                        Log.w(TAG, "openDownload: install permission denied", error)
+                        invoke.reject("需要允许本应用安装应用（系统设置 → 安装未知应用）", "install_permission")
+                    } catch (error: Exception) {
+                        Log.w(TAG, "openDownload: startActivity failed", error)
+                        invoke.reject(error.message ?: "打开失败", "open_failed")
+                    }
+                }
+                return@execute
+            } catch (_: ActivityNotFoundException) {
+                invoke.reject("没有能打开这种文件的应用", "no_viewer")
+            } catch (error: Exception) {
+                invoke.reject(error.message ?: "打开失败", "open_failed")
+            }
+        }
     }
 
     @PermissionCallback
@@ -140,6 +246,7 @@ class AndroidDownloads(private val host: Activity) : Plugin(host) {
     }
 
     companion object {
+        private const val TAG = "StudioloDl"
         private const val MAX_BYTES = 32 * 1024 * 1024
         private const val MAX_BASE64_LENGTH = ((MAX_BYTES + 2) / 3) * 4
     }

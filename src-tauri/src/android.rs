@@ -166,6 +166,19 @@ impl AndroidDownloads {
                 _ => "download_failed".into(),
             })
     }
+
+    async fn open_download(&self, payload: Value) -> CommandResult<bool> {
+        self.handle
+            .run_mobile_plugin_async::<Value>("openDownload", payload)
+            .await
+            .map_err(|error| match error {
+                PluginInvokeError::InvokeRejected(response) => {
+                    response.code.unwrap_or_else(|| "open_failed".into())
+                }
+                _ => "open_failed".into(),
+            })?;
+        Ok(true)
+    }
 }
 
 #[tauri::command]
@@ -175,6 +188,15 @@ pub(crate) async fn android_save_attachment(
     base64: String,
 ) -> CommandResult<SavedDownload> {
     state.invoke("saveDownload", json!({ "name": name, "base64": base64 })).await
+}
+
+#[tauri::command]
+pub(crate) async fn android_open_download(
+    state: State<'_, AndroidDownloads>,
+    name: String,
+    display_path: Option<String>,
+) -> CommandResult<bool> {
+    state.open_download(json!({ "name": name, "displayPath": display_path })).await
 }
 
 pub struct AndroidMedia(PluginHandle<Wry>);

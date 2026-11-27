@@ -136,7 +136,9 @@ let manifest = await readFile(manifestPath, 'utf8')
 if (!/<application\b[^>]*>/s.test(manifest) || !manifest.includes('android.permission.INTERNET')) {
   throw new Error('Unexpected Tauri Android manifest template')
 }
-for (const permission of ['POST_NOTIFICATIONS', 'FOREGROUND_SERVICE', 'FOREGROUND_SERVICE_REMOTE_MESSAGING']) {
+// REQUEST_INSTALL_PACKAGES：targetSdk>25 时，启动系统安装器（ACTION_VIEW + apk mime）
+// 必须持有该权限，否则 startActivity 不报错但安装器不会出现。
+for (const permission of ['POST_NOTIFICATIONS', 'FOREGROUND_SERVICE', 'FOREGROUND_SERVICE_REMOTE_MESSAGING', 'REQUEST_INSTALL_PACKAGES']) {
   if (!manifest.includes('android.permission.' + permission + '"')) {
     manifest = manifest.replace(/<uses-permission\b[^>]*android.permission.INTERNET[^>]*\/>/,
       '$&\n    <uses-permission android:name="android.permission.' + permission + '" />')

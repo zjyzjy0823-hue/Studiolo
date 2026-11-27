@@ -46,3 +46,7 @@ src-tauri/icons/*
 !src-tauri/icons/icon.ico
 !src-tauri/icons/icon.icns
 dist-release/
+
+# 运行时数据与本地环境备份（含密钥，禁止入库）
+.env.core.*
+studiolo-blobs/
