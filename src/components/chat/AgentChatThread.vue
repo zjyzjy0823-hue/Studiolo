@@ -3574,7 +3574,6 @@ async function retryTurn(msg: ChatMessage) {
               <span class="option-title">选择照片</span>
             </button>
             <button
-              v-if="mobile"
               type="button"
               class="picker-option"
               @click="insertQuickTrigger('@')"
@@ -3584,7 +3583,6 @@ async function retryTurn(msg: ChatMessage) {
               <span class="picker-effort">@</span>
             </button>
             <button
-              v-if="mobile"
               type="button"
               class="picker-option"
               @click="insertQuickTrigger('/')"

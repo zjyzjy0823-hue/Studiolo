@@ -1,3 +1,4 @@
+import { invoke, isTauri } from '@tauri-apps/api/core'
 import { androidInvoke, isAndroidLocal, AndroidLocalError } from '../desktop/androidLocal'
 
 export async function saveBlobToDevice(blob: Blob, filename: string): Promise<string> {
@@ -17,6 +18,21 @@ export async function saveBlobToDevice(blob: Blob, filename: string): Promise<st
     return result.displayPath
   }
 
+  if (isTauri()) {
+    const bytes = new Uint8Array(await blob.arrayBuffer())
+    // 走 base64：IPC 会把 number[] 序列化成 JSON，20MB 文件会膨胀到 ~60MB 文本导致卡死
+    let binary = ''
+    const chunkSize = 0x8000
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize))
+    }
+    const displayPath = await invoke<string>('save_download_file_b64', {
+      name,
+      base64: btoa(binary),
+    })
+    return displayPath
+  }
+
   const link = document.createElement('a')
   const url = URL.createObjectURL(blob)
   try {
@@ -32,31 +48,48 @@ export async function saveBlobToDevice(blob: Blob, filename: string): Promise<st
 }
 
 export async function openSavedDownload(record: { name: string; displayPath?: string }): Promise<void> {
-  if (!isAndroidLocal()) {
-    throw new Error('仅 Android 支持打开已下载文件')
-  }
-  try {
-    await androidInvoke<boolean>('android_open_download', {
-      name: record.name,
-      displayPath: record.displayPath,
-    })
-  } catch (error) {
-    if (error instanceof AndroidLocalError) {
-      if (error.code === 'download_missing') {
+  if (isAndroidLocal()) {
+    try {
+      await androidInvoke<boolean>('android_open_download', {
+        name: record.name,
+        displayPath: record.displayPath,
+      })
+    } catch (error) {
+      if (error instanceof AndroidLocalError) {
+        if (error.code === 'download_missing') {
+          throw new Error('文件已被移动或删除')
+        }
+        if (error.code === 'no_viewer') {
+          throw new Error('没有能打开这种文件的应用')
+        }
+      }
+      const message = error instanceof Error ? error.message : String(error || '')
+      if (message.includes('download_missing')) {
         throw new Error('文件已被移动或删除')
       }
-      if (error.code === 'no_viewer') {
+      if (message.includes('no_viewer')) {
         throw new Error('没有能打开这种文件的应用')
       }
+      throw error instanceof Error ? error : new Error(message || '打开失败')
     }
-    const message = error instanceof Error ? error.message : String(error || '')
-    if (message.includes('download_missing')) {
+    return
+  }
+
+  if (isTauri()) {
+    if (!record.displayPath) {
       throw new Error('文件已被移动或删除')
     }
-    if (message.includes('no_viewer')) {
-      throw new Error('没有能打开这种文件的应用')
+    try {
+      await invoke('open_saved_path', { path: record.displayPath })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error || '')
+      if (message.includes('path_missing')) {
+        throw new Error('文件已被移动或删除')
+      }
+      throw error instanceof Error ? error : new Error(message || '打开失败')
     }
-    throw error instanceof Error ? error : new Error(message || '打开失败')
+    return
   }
-}
 
+  throw new Error('仅客户端支持打开已下载文件')
+}

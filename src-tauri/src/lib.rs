@@ -79,6 +79,120 @@ fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     Ok(())
 }
 
+fn sanitize_download_filename(name: &str) -> String {
+    let leaf = name
+        .split(|c| c == '/' || c == '\\')
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+        .last()
+        .unwrap_or("download");
+    let cleaned: String = leaf
+        .chars()
+        .filter(|c| !matches!(c, '/' | '\\' | '\0' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        .collect();
+    let sanitized = cleaned.replace("..", "");
+    let trimmed = sanitized.trim().trim_matches('.');
+    if trimmed.is_empty() {
+        "download".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
+    let mut out: Vec<u8> = Vec::with_capacity(input.len() / 4 * 3 + 3);
+    let mut buf: u32 = 0;
+    let mut bits: usize = 0;
+    for ch in input.bytes() {
+        if matches!(ch, b'=' | b'\n' | b'\r' | b' ' | b'\t') {
+            continue;
+        }
+        let val: u32 = match ch {
+            b'A'..=b'Z' => (ch - b'A') as u32,
+            b'a'..=b'z' => (ch - b'a') as u32 + 26,
+            b'0'..=b'9' => (ch - b'0') as u32 + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return Err("invalid base64 payload".to_string()),
+        };
+        buf = (buf << 6) | val;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Ok(out)
+}
+
+fn studiolo_download_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let base = app
+        .path()
+        .download_dir()
+        .or_else(|_| app.path().home_dir().map(|h| h.join("Downloads")))
+        .map_err(|e| format!("Failed to resolve downloads directory: {e}"))?;
+    Ok(base.join("Studiolo"))
+}
+
+fn write_download(app: &tauri::AppHandle, name: &str, bytes: &[u8]) -> Result<String, String> {
+    let clean_name = sanitize_download_filename(name);
+    let studiolo_dir = studiolo_download_dir(app)?;
+    std::fs::create_dir_all(&studiolo_dir)
+        .map_err(|e| format!("Failed to create download folder: {e}"))?;
+
+    let (stem, ext_suffix) = match clean_name.rfind('.') {
+        Some(idx) if idx > 0 => {
+            let (s, ext) = clean_name.split_at(idx);
+            (s.to_string(), ext.to_string())
+        }
+        _ => (clean_name.clone(), String::new()),
+    };
+
+    let mut target_path = studiolo_dir.join(&clean_name);
+    let mut counter = 1;
+    while target_path.exists() {
+        let candidate_name = format!("{stem} ({counter}){ext_suffix}");
+        target_path = studiolo_dir.join(candidate_name);
+        counter += 1;
+    }
+
+    std::fs::write(&target_path, bytes)
+        .map_err(|e| format!("Failed to save file: {e}"))?;
+
+    Ok(target_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn save_download_file(app: tauri::AppHandle, name: String, bytes: Vec<u8>) -> Result<String, String> {
+    write_download(&app, &name, &bytes)
+}
+
+// 大文件走 base64：Vec<u8> 会被序列化成 JSON 数字数组（20MB 文件 ≈ 60MB 文本），
+// 在 Android/桌面 WebView 里会卡死。base64 只有 33% 膨胀，且解码在 Rust 侧。
+#[tauri::command]
+fn save_download_file_b64(app: tauri::AppHandle, name: String, base64: String) -> Result<String, String> {
+    let bytes = decode_base64(&base64)?;
+    write_download(&app, &name, &bytes)
+}
+
+#[tauri::command]
+fn open_saved_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let dir = studiolo_download_dir(&app)?;
+    let raw = std::path::Path::new(&path);
+    let candidate = if raw.is_absolute() { raw.to_path_buf() } else { dir.join(raw) };
+    if !candidate.exists() {
+        return Err("path_missing".to_string());
+    }
+    // 只允许打开下载目录内的文件，避免这条命令退化成任意文件打开器
+    let allowed = dir.canonicalize().map_err(|_| "path_missing".to_string())?;
+    let target = candidate.canonicalize().map_err(|_| "path_missing".to_string())?;
+    if !target.starts_with(&allowed) {
+        return Err("path_not_allowed".to_string());
+    }
+    app.opener()
+        .open_path(target.to_string_lossy().as_ref(), None::<&str>)
+        .map_err(|e| format!("Failed to open file: {e}"))
+}
+
 fn set_status(app: &tauri::AppHandle, value: &str) {
     *app.state::<DesktopState>().status.lock().unwrap() = value.into();
 }
@@ -317,12 +431,13 @@ pub fn run() {
         android::android_notifications_enabled, android::android_set_notifications_enabled, android::android_show_fleet_notification,
         android::android_show_fleet_approval, android::android_listen_fleet_approval,
         android::android_read_device_space, android::android_save_attachment,
-        android::android_open_download,
+        android::android_open_download, save_download_file, save_download_file_b64, open_saved_path,
         android::android_capture_photo, android::android_pick_images,
     ]);
     #[cfg(not(target_os = "android"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
         desktop_platform, backend_status, open_external_url,
+        save_download_file, save_download_file_b64, open_saved_path,
         fleet::fleet_connect, fleet::fleet_disconnect, fleet::fleet_send, fleet::fleet_notifications,
         fleet::fleet_notify_attention,
     ]);
@@ -335,6 +450,8 @@ pub fn run() {
             }
         }));
     let app = builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
         .manage(DesktopState::default())
@@ -393,4 +510,41 @@ mod tests {
             assert!(browser_url(value).is_err(), "accepted unsupported link: {value}");
         }
     }
+
+    #[test]
+    fn sanitizes_download_filenames() {
+        use super::sanitize_download_filename;
+        assert_eq!(sanitize_download_filename("test.pdf"), "test.pdf");
+        assert_eq!(sanitize_download_filename("../test.pdf"), "test.pdf");
+        assert_eq!(sanitize_download_filename("foo/bar/baz.png"), "baz.png");
+        assert_eq!(sanitize_download_filename("foo\\bar\\baz.png"), "baz.png");
+        assert_eq!(sanitize_download_filename(".."), "download");
+        assert_eq!(sanitize_download_filename(""), "download");
+        assert_eq!(sanitize_download_filename("   "), "download");
+        assert_eq!(sanitize_download_filename("invalid:name*?.txt"), "invalidname.txt");
+    }
 }
+
+#[cfg(test)]
+mod download_cmd_tests {
+    use super::{decode_base64, sanitize_download_filename};
+
+    #[test]
+    fn base64_roundtrip_of_known_vectors() {
+        assert_eq!(decode_base64("aGVsbG8=").unwrap(), b"hello");
+        assert_eq!(decode_base64("").unwrap(), Vec::<u8>::new());
+        assert_eq!(decode_base64("AAEC").unwrap(), vec![0u8, 1, 2]);
+        assert_eq!(decode_base64("aGVs\nbG8=").unwrap(), b"hello");
+        assert!(decode_base64("!!!").is_err());
+    }
+
+    #[test]
+    fn filename_sanitization_blocks_traversal_and_reserved_chars() {
+        assert_eq!(sanitize_download_filename("../../etc/passwd"), "passwd");
+        assert_eq!(sanitize_download_filename("C:\\Users\\x\\a.txt"), "a.txt");
+        assert_eq!(sanitize_download_filename("a*b?c.txt"), "abc.txt");
+        assert_eq!(sanitize_download_filename(".."), "download");
+        assert_eq!(sanitize_download_filename(""), "download");
+    }
+}
+
