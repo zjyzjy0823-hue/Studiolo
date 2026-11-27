@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { RefreshCw, RotateCw, Wifi, WifiOff } from 'lucide-vue-next'
+import { RefreshCw, RotateCw, Wifi, WifiOff, X } from 'lucide-vue-next'
 import { desktopPlatform } from '../../desktop/platform'
 import type { WorkbenchTheme } from '../../composables/useWorkbenchTheme'
 import DesktopTitleBar from '../desktop/DesktopTitleBar.vue'
@@ -173,13 +173,22 @@ const updateBtnTitle = computed(() => {
   }
 })
 
-const notesPreviewLines = computed(() => {
-  if (!updater.notes.value) return ['包含性能优化与错误修复。']
-  return updater.notes.value
+const notesPreviewText = computed(() => {
+  if (!updater.notes.value) return '包含性能优化与错误修复。'
+  const lines = updater.notes.value
     .split('\n')
     .map(line => line.trim())
     .filter(Boolean)
-    .slice(0, 3)
+  return lines.length ? lines.join('\n') : '包含性能优化与错误修复。'
+})
+
+const installBtnRef = ref<HTMLButtonElement | null>(null)
+
+watch(updatePopoverOpen, async open => {
+  if (open) {
+    await nextTick()
+    installBtnRef.value?.focus()
+  }
 })
 
 function handleUpdateClick() {
@@ -608,6 +617,7 @@ onUnmounted(() => {
               'is-ready': updater.state.value === 'ready',
               'is-error': updater.state.value === 'error',
               'has-update': updater.state.value === 'available',
+              'motion-reduced': props.reducedMotion,
             }"
             :style="updater.state.value === 'downloading' ? { '--dl-percent': `${updater.percent.value}%` } : undefined"
             :title="updateBtnTitle"
@@ -615,15 +625,20 @@ onUnmounted(() => {
             @click="handleUpdateClick"
           >
             <div class="update-btn-inner">
-              <RotateCw v-if="updater.state.value === 'ready'" :size="15" :stroke-width="2" />
+              <RotateCw v-if="updater.state.value === 'ready'" :size="13" :stroke-width="2" />
               <RefreshCw
                 v-else
-                :size="15"
+                :size="13"
                 :stroke-width="2"
                 :class="{ 'spin-icon': updater.state.value === 'checking' }"
               />
             </div>
             <span v-if="updater.state.value === 'available'" class="update-dot" aria-hidden="true" />
+            <span
+              v-if="updater.state.value === 'downloading'"
+              class="update-progress-bubble mono"
+              aria-hidden="true"
+            >{{ updater.percent.value }}%</span>
           </button>
         </footer>
         <div
@@ -633,22 +648,42 @@ onUnmounted(() => {
           aria-label="版本更新"
         >
           <div class="update-popover-header">
-            <div class="update-popover-title">发现新版本</div>
-            <div class="update-popover-meta">
-              <span class="update-ver mono">v{{ updater.version.value }}</span>
-              <span v-if="updater.contentLength.value" class="update-size faint mono">{{ formatBytes(updater.contentLength.value) }}</span>
+            <span class="update-popover-title">发现新版本</span>
+            <button
+              type="button"
+              class="update-popover-close"
+              aria-label="关闭更新提示"
+              title="关闭"
+              @click="updatePopoverOpen = false"
+            >
+              <X :size="13" :stroke-width="2" />
+            </button>
+          </div>
+          <div class="update-popover-meta">
+            <span class="update-ver-chip mono">v{{ updater.version.value }}</span>
+            <span v-if="updater.contentLength.value" class="update-size faint mono">{{ formatBytes(updater.contentLength.value) }}</span>
+          </div>
+          <p v-if="notesPreviewText" class="update-popover-notes">{{ notesPreviewText }}</p>
+          <div class="update-popover-actions">
+            <button
+              ref="installBtnRef"
+              type="button"
+              class="btn btn-primary btn-sm update-act-btn"
+              @click="handleInstallFromPopover"
+            >
+              下载并安装
+            </button>
+            <div class="update-popover-footer">
+              <button
+                type="button"
+                class="btn btn-ghost btn-sm update-later-btn"
+                @click="updatePopoverOpen = false"
+              >
+                稍后
+              </button>
             </div>
           </div>
-          <div v-if="notesPreviewLines.length" class="update-popover-notes">
-            <p v-for="(line, idx) in notesPreviewLines" :key="idx">{{ line }}</p>
-          </div>
-          <button
-            type="button"
-            class="btn btn-primary btn-sm update-act-btn"
-            @click="handleInstallFromPopover"
-          >
-            下载并安装
-          </button>
+          <div class="update-popover-arrow" aria-hidden="true" />
         </div>
         <div id="sync-panel" class="sync-panel" :hidden="!panelOpen">
           <h3>同步</h3>
@@ -678,32 +713,60 @@ onUnmounted(() => {
 
 <style scoped>
 .update-btn {
-  width: 32px;
-  height: 32px;
-  min-width: 32px;
-  min-height: 32px;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
+  max-width: 24px;
+  max-height: 24px;
   padding: 0;
   border: none;
   border-radius: 50%;
-  background: #111;
-  color: #fff;
+  background: #0f1115;
+  color: #ffffff;
   cursor: pointer;
   position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex-shrink: 0;
+  flex: none;
   outline: none;
-  margin-left: 4px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
-  transition: transform 0.15s ease, background 0.2s ease;
+  margin-left: 8px;
+  margin-right: 0;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  transition: transform 160ms ease, box-shadow 160ms ease, background 180ms ease, color 180ms ease;
+  box-sizing: border-box;
 }
+
+:global([data-mode="dark"]) .update-btn {
+  background: rgba(255, 255, 255, 0.9);
+  color: #0f1115;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+
 .update-btn:hover {
-  transform: scale(1.05);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.25), inset 0 0 0 1px rgba(255, 255, 255, 0.12);
 }
+
+:global([data-mode="dark"]) .update-btn:hover {
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.35), inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+
+.update-btn:hover .update-btn-inner svg:not(.spin-icon) {
+  transform: rotate(18deg);
+}
+
 .update-btn:active {
-  transform: scale(0.95);
+  transform: scale(0.92);
+  transition: transform 90ms ease;
 }
+
+.update-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent), inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+
 .update-btn-inner {
   width: 100%;
   height: 100%;
@@ -711,29 +774,141 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+  pointer-events: none;
 }
-.update-btn.is-downloading {
-  background: conic-gradient(var(--accent, #3b82f6) var(--dl-percent, 0%), rgba(255, 255, 255, 0.15) 0);
-  padding: 2.5px;
+
+.update-btn-inner svg {
+  display: block;
+  transition: transform 160ms ease, color 180ms ease;
 }
-.update-btn.is-downloading .update-btn-inner {
-  background: #111;
+
+/* checking */
+.update-btn.is-checking {
+  background: #20242e;
+}
+:global([data-mode="dark"]) .update-btn.is-checking {
+  background: #ffffff;
+}
+
+/* available */
+.update-btn.has-update::before {
+  content: '';
+  position: absolute;
+  inset: 0;
   border-radius: 50%;
+  pointer-events: none;
+  animation: updateHalo 2s cubic-bezier(0.24, 0, 0.38, 1) infinite;
 }
-.update-btn.is-error {
-  color: var(--danger, #ef4444);
+.update-btn.has-update:hover::before {
+  animation-duration: 1s;
+}
+@keyframes updateHalo {
+  0% {
+    box-shadow: 0 0 0 0 var(--accent);
+    opacity: 0.8;
+  }
+  70% {
+    box-shadow: 0 0 0 6px var(--accent);
+    opacity: 0;
+  }
+  100% {
+    box-shadow: 0 0 0 6px var(--accent);
+    opacity: 0;
+  }
 }
 .update-dot {
   position: absolute;
-  top: 1px;
-  right: 1px;
-  width: 8px;
-  height: 8px;
+  top: -1px;
+  right: -1px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  background: var(--accent, #3b82f6);
-  border: 1.5px solid #111;
+  background: var(--accent);
+  border: 1.5px solid #0f1115;
   pointer-events: none;
+  z-index: 2;
+  box-sizing: border-box;
 }
+:global([data-mode="dark"]) .update-dot {
+  border-color: rgba(255, 255, 255, 0.9);
+}
+
+/* downloading */
+.update-btn.is-downloading {
+  background: conic-gradient(var(--accent) var(--dl-percent, 0%), rgba(255, 255, 255, 0.15) 0);
+  padding: 2px;
+}
+:global([data-mode="dark"]) .update-btn.is-downloading {
+  background: conic-gradient(var(--accent) var(--dl-percent, 0%), rgba(0, 0, 0, 0.2) 0);
+}
+.update-btn.is-downloading .update-btn-inner {
+  background: #0f1115;
+  color: #ffffff;
+  border-radius: 50%;
+}
+.update-progress-bubble {
+  position: absolute;
+  bottom: calc(100% + 7px);
+  left: 50%;
+  transform: translateX(-50%) translateY(2px);
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #0f1115;
+  color: #ffffff;
+  font-size: calc(10.5px * var(--fs));
+  line-height: 1.2;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 140ms ease, transform 140ms ease;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  z-index: 50;
+}
+.update-progress-bubble::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 3.5px solid transparent;
+  border-top-color: #0f1115;
+}
+.update-btn:hover .update-progress-bubble {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* ready */
+@keyframes nudge {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  25% {
+    transform: translateY(-3px);
+  }
+  50% {
+    transform: translateY(1px);
+  }
+  75% {
+    transform: translateY(-1.5px);
+  }
+}
+.update-btn.is-ready {
+  animation: nudge 600ms cubic-bezier(0.2, 0.8, 0.2, 1) 1;
+}
+
+/* error */
+.update-btn.is-error {
+  box-shadow: 0 0 0 1px var(--danger), inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  color: var(--danger);
+}
+:global([data-mode="dark"]) .update-btn.is-error {
+  box-shadow: 0 0 0 1px var(--danger), inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  color: var(--danger);
+}
+
+/* spin */
 .spin-icon {
   animation: spin 1s linear infinite;
 }
@@ -741,12 +916,14 @@ onUnmounted(() => {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
+
+/* popover */
 .update-popover {
   position: fixed;
   z-index: 60;
-  right: 16px;
-  bottom: 44px;
-  width: 240px;
+  right: 8px;
+  bottom: 36px;
+  width: 260px;
   padding: 12px 14px;
   border-radius: var(--r-lg);
   border: 1px solid var(--line);
@@ -755,31 +932,87 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  transform-origin: bottom right;
+  animation: popoverIn 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  box-sizing: border-box;
+}
+@keyframes popoverIn {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
 }
 [data-theme="glass"] .update-popover {
   background: var(--surface);
   backdrop-filter: var(--material-filter);
   -webkit-backdrop-filter: var(--material-filter);
 }
+.update-popover-arrow {
+  position: absolute;
+  bottom: -5px;
+  right: 8px;
+  width: 8px;
+  height: 8px;
+  transform: rotate(45deg);
+  background: var(--solid);
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  pointer-events: none;
+}
+[data-theme="glass"] .update-popover-arrow {
+  background: var(--surface);
+}
 .update-popover-header {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 .update-popover-title {
   font-size: calc(13px * var(--fs));
   font-weight: 600;
   color: var(--text);
 }
+.update-popover-close {
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-sm, 6px);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 150ms ease, color 150ms ease;
+}
+.update-popover-close:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
 .update-popover-meta {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: calc(12px * var(--fs));
+  gap: 8px;
 }
-.update-ver {
-  color: var(--accent);
+.update-ver-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: calc(11.5px * var(--fs));
   font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft, rgba(59, 130, 246, 0.12));
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .update-size {
   color: var(--text-3);
@@ -788,21 +1021,93 @@ onUnmounted(() => {
 .update-popover-notes {
   font-size: calc(11.5px * var(--fs));
   color: var(--text-2);
-  line-height: 1.4;
+  line-height: 1.45;
   margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.update-popover-notes p {
-  margin: 0;
+  white-space: pre-line;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  word-break: break-word;
+}
+.update-popover-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
 }
 .update-act-btn {
   width: 100%;
-  margin-top: 4px;
   justify-content: center;
+  font-size: calc(12.5px * var(--fs));
+}
+.update-popover-footer {
+  display: flex;
+  justify-content: flex-end;
+}
+.update-later-btn {
+  font-size: calc(11.5px * var(--fs));
+  color: var(--text-3);
+  padding: 2px 8px;
+  height: 24px;
+}
+.update-later-btn:hover {
+  color: var(--text);
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .update-btn,
+  .update-btn-inner svg,
+  .update-btn.is-ready,
+  .update-btn.has-update::before,
+  .spin-icon,
+  .update-popover {
+    animation: none !important;
+    transition: none !important;
+  }
+  .update-btn:hover {
+    transform: none !important;
+  }
+  .update-btn:hover .update-btn-inner svg {
+    transform: none !important;
+  }
+  .update-btn.has-update::before {
+    display: none !important;
+  }
+}
+:global([data-motion="reduced"]) .update-btn,
+:global([data-motion="reduced"]) .update-btn-inner svg,
+:global([data-motion="reduced"]) .update-btn.is-ready,
+:global([data-motion="reduced"]) .update-btn.has-update::before,
+:global([data-motion="reduced"]) .spin-icon,
+:global([data-motion="reduced"]) .update-popover {
+  animation: none !important;
+  transition: none !important;
+}
+:global([data-motion="reduced"]) .update-btn:hover {
+  transform: none !important;
+}
+:global([data-motion="reduced"]) .update-btn:hover .update-btn-inner svg {
+  transform: none !important;
+}
+:global([data-motion="reduced"]) .update-btn.has-update::before {
+  display: none !important;
+}
+.update-btn.motion-reduced,
+.update-btn.motion-reduced .update-btn-inner svg,
+.update-btn.motion-reduced::before {
+  animation: none !important;
+  transition: none !important;
+}
+.update-btn.motion-reduced:hover {
+  transform: none !important;
+}
+.update-btn.motion-reduced:hover .update-btn-inner svg {
+  transform: none !important;
+}
+.update-btn.motion-reduced::before {
+  display: none !important;
 }
 </style>
