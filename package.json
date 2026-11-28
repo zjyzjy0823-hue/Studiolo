@@ -1,7 +1,7 @@
 {
   "name": "studiolo",
   "private": true,
-  "version": "0.9.13",
+  "version": "0.9.14",
   "type": "module",
   "scripts": {
     "test:timestamps": "node --experimental-strip-types --test tests/timestamps.test.mjs",
@@ -37,7 +37,8 @@
     "test:downloads-view": "node --experimental-strip-types --test tests/downloads-view.test.mjs",
     "test:cors": "node --test tests/cors-headers.test.mjs",
     "test:streaming": "node --experimental-strip-types --test tests/streaming-state.test.mjs",
-    "test:updater": "node --experimental-strip-types --test tests/updater-state.test.mjs"
+    "test:updater": "node --experimental-strip-types --test tests/updater-state.test.mjs",
+    "test:updater-android": "node --experimental-strip-types --test tests/updater-android.test.mjs"
   },
   "dependencies": {
     "@noble/hashes": "^2.4.0",

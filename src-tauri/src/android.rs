@@ -167,6 +167,25 @@ impl AndroidDownloads {
             })
     }
 
+    async fn fetch_text(&self, url: String) -> CommandResult<String> {
+        #[derive(Deserialize)]
+        struct FetchResult {
+            text: String,
+        }
+
+        let result = self
+            .handle
+            .run_mobile_plugin_async::<FetchResult>("fetchText", json!({ "url": url }))
+            .await
+            .map_err(|error| match error {
+                PluginInvokeError::InvokeRejected(response) => {
+                    response.code.unwrap_or_else(|| "fetch_failed".into())
+                }
+                _ => "fetch_failed".into(),
+            })?;
+        Ok(result.text)
+    }
+
     async fn open_download(&self, payload: Value) -> CommandResult<bool> {
         self.handle
             .run_mobile_plugin_async::<Value>("openDownload", payload)
@@ -188,6 +207,14 @@ pub(crate) async fn android_save_attachment(
     base64: String,
 ) -> CommandResult<SavedDownload> {
     state.invoke("saveDownload", json!({ "name": name, "base64": base64 })).await
+}
+
+#[tauri::command]
+pub(crate) async fn android_fetch_text(
+    state: State<'_, AndroidDownloads>,
+    url: String,
+) -> CommandResult<String> {
+    state.fetch_text(url).await
 }
 
 #[tauri::command]

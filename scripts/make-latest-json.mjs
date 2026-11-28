@@ -2,27 +2,32 @@
 /**
  * scripts/make-latest-json.mjs
  * Generates latest.json updater manifest from release artifacts and .sig signatures.
+ * Also generates android.json updater manifest for Android APK releases.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 
 function printHelp() {
   console.log(`
 Usage: node scripts/make-latest-json.mjs [options]
 
 Options:
-  --version <version>    Release version (e.g. 0.9.11)
-  --release-dir <dir>    Directory containing release artifacts (*.sig, packages)
-  --base-url <url>       Base download URL for release assets
-  --notes <notes>        Release notes / changelog text (optional)
-  --output <path>        Output file path (default: <release-dir>/latest.json)
-  --help, -h             Show this help message
+  --version <version>           Release version (e.g. 0.9.11)
+  --release-dir <dir>           Directory containing release artifacts (*.sig, packages)
+  --base-url <url>              Base download URL for release assets
+  --notes <notes>               Release notes / changelog text (optional)
+  --apk <path>                  Path to Android APK (optional, auto-detected in release-dir if omitted)
+  --output <path>               Output file path for latest.json (default: <release-dir>/latest.json)
+  --android-output <path>       Output file path for android.json (default: <output-dir>/android.json)
+  --help, -h                    Show this help message
 
 Platform matching:
-  *_x64.app.tar.gz.sig    -> darwin-x86_64
-  *_aarch64.app.tar.gz.sig -> darwin-aarch64
-  *-setup.exe.sig         -> windows-x86_64
+  *_x64.app.tar.gz.sig          -> darwin-x86_64
+  *_aarch64.app.tar.gz.sig      -> darwin-aarch64
+  *-setup.exe.sig               -> windows-x86_64
+  *_arm64-release.apk           -> Android feed (android.json)
 `);
 }
 
@@ -42,6 +47,10 @@ function parseArgs(args) {
       options.notes = args[++i];
     } else if (arg === '--output') {
       options.output = args[++i];
+    } else if (arg === '--apk') {
+      options.apk = args[++i];
+    } else if (arg === '--android-output') {
+      options.androidOutput = args[++i];
     }
   }
   return options;
@@ -113,6 +122,46 @@ export function generateLatestManifest({ version, releaseDir, baseUrl, notes = '
   };
 }
 
+export function generateAndroidManifest({ version, releaseDir, baseUrl, notes = '', apk }) {
+  if (!version) {
+    throw new Error('Missing required option: --version');
+  }
+  if (!baseUrl) {
+    throw new Error('Missing required option: --base-url');
+  }
+
+  let apkPath = apk ? path.resolve(apk) : null;
+  if (!apkPath && releaseDir) {
+    const resolvedDir = path.resolve(releaseDir);
+    if (fs.existsSync(resolvedDir)) {
+      const entries = fs.readdirSync(resolvedDir);
+      const candidate = entries.find(e => e.endsWith('_arm64-release.apk'));
+      if (candidate) {
+        apkPath = path.join(resolvedDir, candidate);
+      }
+    }
+  }
+
+  if (!apkPath || !fs.existsSync(apkPath)) {
+    return null;
+  }
+
+  const fileBuffer = fs.readFileSync(apkPath);
+  const size = fs.statSync(apkPath).size;
+  const sha256 = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+  const assetFilename = path.basename(apkPath);
+  const cleanBaseUrl = baseUrl.replace(/\/+$/, '');
+  const url = `${cleanBaseUrl}/${assetFilename}`;
+
+  return {
+    version,
+    url,
+    size,
+    sha256,
+    notes,
+  };
+}
+
 function main() {
   const options = parseArgs(process.argv.slice(2));
 
@@ -136,6 +185,18 @@ function main() {
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
     fs.writeFileSync(outputPath, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
     console.log(`Successfully generated updater manifest: ${outputPath}`);
+
+    const androidManifest = generateAndroidManifest(options);
+    if (androidManifest) {
+      const androidOutputPath = options.androidOutput
+        ? path.resolve(options.androidOutput)
+        : path.join(path.dirname(outputPath), 'android.json');
+      fs.mkdirSync(path.dirname(androidOutputPath), { recursive: true });
+      fs.writeFileSync(androidOutputPath, JSON.stringify(androidManifest, null, 2) + '\n', 'utf8');
+      console.log(`Successfully generated Android manifest: ${androidOutputPath}`);
+    } else {
+      console.warn(`[make-latest-json] Warning: no *_arm64-release.apk found in ${options.releaseDir}; skipped android.json generation.`);
+    }
   } catch (err) {
     console.error(`Error: ${err.message}`);
     process.exit(1);

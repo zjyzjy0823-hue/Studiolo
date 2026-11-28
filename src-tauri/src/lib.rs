@@ -494,7 +494,7 @@ pub fn run() {
         android::android_notifications_enabled, android::android_set_notifications_enabled, android::android_show_fleet_notification,
         android::android_show_fleet_approval, android::android_listen_fleet_approval,
         android::android_read_device_space, android::android_save_attachment,
-        android::android_open_download, save_download_file, save_download_file_b64, open_saved_path, reveal_in_folder,
+        android::android_fetch_text, android::android_open_download, save_download_file, save_download_file_b64, open_saved_path, reveal_in_folder,
         android::android_capture_photo, android::android_pick_images,
     ]);
     #[cfg(not(target_os = "android"))]

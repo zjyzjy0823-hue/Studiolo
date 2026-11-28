@@ -24,6 +24,8 @@ import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import java.io.File
 import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.Locale
 import java.util.concurrent.Executors
 import org.json.JSONException
@@ -40,6 +42,43 @@ class AndroidDownloads(private val host: Activity) : Plugin(host) {
             return
         }
         writer.execute { writeDownload(invoke) }
+    }
+
+    @Command
+    fun fetchText(invoke: Invoke) {
+        val url = try {
+            invoke.getArgs().getString("url")
+        } catch (_: Exception) {
+            null
+        }
+        if (url.isNullOrBlank()) {
+            invoke.reject("missing url", "bad_args")
+            return
+        }
+        writer.execute {
+            var conn: HttpURLConnection? = null
+            try {
+                conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 15_000
+                    readTimeout = 20_000
+                    instanceFollowRedirects = true
+                    setRequestProperty("User-Agent", "Studiolo-Android")
+                    setRequestProperty("Accept", "application/json, text/plain, */*")
+                }
+                val code = conn.responseCode
+                if (code !in 200..299) {
+                    invoke.reject("HTTP $code", "http_error")
+                    return@execute
+                }
+                val text = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                invoke.resolve(JSObject().put("text", text))
+            } catch (error: Exception) {
+                Log.w(TAG, "fetchText failed", error)
+                invoke.reject(error.message ?: "network_error", "fetch_failed")
+            } finally {
+                conn?.disconnect()
+            }
+        }
     }
 
     @Command

@@ -258,8 +258,8 @@ const mobileDetailLabel = computed(() => sections.find(item => item.id === mobil
           <div><span>待同步</span><span>{{ (syncStatus?.pending ?? 0) + (syncStatus?.inFlight ?? 0) }} 项</span></div>
           <div v-if="syncStatus?.conflicts"><span>冲突</span><button type="button" class="btn btn-sm btn-danger" @click="openMobileSection('sync')">{{ syncStatus.conflicts }} 个待处理</button></div>
         </div>
-        <div v-if="store.loaded" class="sec-t">关于</div>
-        <div v-if="store.loaded" class="kvl mat-solid">
+        <div class="sec-t">关于</div>
+        <div class="kvl mat-solid">
           <div><span>当前版本</span><span class="mono faint">v{{ version }}</span></div>
           <UpdateRow />
         </div>

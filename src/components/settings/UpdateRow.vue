@@ -1,24 +1,44 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { AlertCircle, RefreshCw, RotateCw } from 'lucide-vue-next'
-import { useUpdater } from '../../composables/useUpdater'
+import { useUpdater, formatBytes } from '../../composables/useUpdater'
+import { isAndroidLocal } from '../../desktop/androidLocal'
+import { desktopPlatform } from '../../desktop/platform'
 
 const updater = useUpdater()
+const isAndroid = computed(() => isAndroidLocal() || desktopPlatform() === 'android'
+  || (typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent)))
+
+const formattedSize = computed(() => {
+  if (typeof updater.contentLength.value === 'number' && updater.contentLength.value > 0) {
+    return formatBytes(updater.contentLength.value)
+  }
+  return null
+})
 
 const statusText = computed(() => {
   switch (updater.state.value) {
     case 'checking':
       return '正在检查…'
     case 'available':
+      if (isAndroid.value) {
+        return '下载并安装'
+      }
       return `发现 v${updater.version.value || ''}`
     case 'downloading':
       return `下载中 ${updater.percent.value}%`
     case 'ready':
+      if (isAndroid.value) {
+        return '正在打开安装器…'
+      }
       return '重启生效'
     case 'up-to-date':
       return '已是最新'
     case 'error':
-      return '检查失败'
+      if (updater.error.value === '需要允许本应用安装应用') {
+        return '需要允许本应用安装应用'
+      }
+      return updater.error.value ? `检查失败：${updater.error.value}` : '检查失败'
     case 'idle':
     default:
       return '检查更新'
@@ -33,7 +53,7 @@ const buttonTitle = computed(() => {
     return '发现新版本，点击下载并安装'
   }
   if (updater.state.value === 'ready') {
-    return '更新已准备好，点击重启生效'
+    return isAndroid.value ? '安装包已保存，请在系统安装界面完成' : '更新已准备好，点击重启生效'
   }
   return statusText.value
 })
@@ -46,7 +66,10 @@ function handleClick() {
   if (s === 'available') {
     void updater.install()
   } else if (s === 'ready') {
-    void updater.restart()
+    // 桌面：重启生效；Android：安装器已拉起，重复点击不再重新下载
+    if (!isAndroid.value) {
+      void updater.restart()
+    }
   } else {
     // idle, up-to-date, error
     void updater.check({ force: true })
@@ -56,7 +79,12 @@ function handleClick() {
 
 <template>
   <div class="update-row">
-    <span>检查更新</span>
+    <div class="update-label-area">
+      <span v-if="!isAndroid || updater.state.value !== 'available'">检查更新</span>
+      <span v-else class="update-android-available">
+        v{{ updater.version.value }}{{ formattedSize ? ` · ${formattedSize}` : '' }}
+      </span>
+    </div>
     <button
       type="button"
       class="update-capsule"
@@ -72,13 +100,13 @@ function handleClick() {
       :title="buttonTitle"
       @click="handleClick"
     >
-      <RotateCw v-if="updater.state.value === 'ready'" :size="13" :stroke-width="2" />
+      <RotateCw v-if="updater.state.value === 'ready' && !isAndroid" :size="13" :stroke-width="2" />
       <AlertCircle v-else-if="updater.state.value === 'error'" :size="13" :stroke-width="2" />
       <RefreshCw
         v-else
         :size="13"
         :stroke-width="2"
-        :class="{ 'spin-icon': updater.state.value === 'checking' || updater.state.value === 'downloading' }"
+        :class="{ 'spin-icon': updater.state.value === 'checking' || updater.state.value === 'downloading' || (isAndroid && updater.state.value === 'ready') }"
       />
       <span>{{ statusText }}</span>
     </button>
@@ -95,6 +123,19 @@ function handleClick() {
   padding: 0 16px;
   font-size: calc(15px * var(--fs));
 }
+.update-label-area {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.update-android-available {
+  font-weight: 600;
+  color: var(--text);
+  font-family: var(--font-mono, monospace);
+  font-size: calc(14px * var(--fs));
+  letter-spacing: -0.01em;
+}
 .update-capsule {
   display: inline-flex;
   align-items: center;
@@ -110,6 +151,7 @@ function handleClick() {
   outline: none;
   box-sizing: border-box;
   transition: background 150ms ease, color 150ms ease, border-color 150ms ease, transform 100ms ease;
+  white-space: nowrap;
 }
 .update-capsule:hover:not(:disabled) {
   background: var(--surface-3);
