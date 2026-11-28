@@ -143,6 +143,7 @@ await build({
   stdin: { contents: `
     import AccountSettings from './src/components/settings/AccountSettings.vue'
     import SettingsPage from './src/pages/SettingsPage.vue'
+    import { resolveConfirmation } from './src/composables/useConfirm.ts'
     import { useSettingsStore } from './src/stores/settings.ts'
     import { useAuthStore } from './src/stores/auth.ts'
     import { createPinia } from 'pinia'
@@ -168,9 +169,20 @@ await build({
       app.use(pinia).mount({})
       const timezone = state.profile.value.timezone
       await state.updateProfile({ ...state.profile.value, language: 'en-US' })
-      state.resetSettings()
+
+      // 取消：不应产生任何写入
+      const cancelled = state.resetSettings()
+      resolveConfirmation(false)
+      await cancelled
+      const afterCancel = writes.length
+
+      // 确认：应产生一次写入
+      const confirmed = state.resetSettings()
+      resolveConfirmation(true)
+      await confirmed
+
       app.unmount()
-      return { timezone, writes }
+      return { timezone, writes, afterCancel }
     }
   `, resolveDir: process.cwd(), loader: 'ts' },
   bundle: true, format: 'esm', platform: 'node', outfile: settingsBundle,
@@ -194,6 +206,7 @@ test('settings displays the server deployment timezone and never edits timezone 
   const result = await deploymentTimezone.inspectPage()
   assert.equal(result.timezone, 'Pacific/Auckland')
   assert.equal(result.writes[0].language, 'en-US')
+  assert.equal(result.afterCancel, 1)
   assert.equal(result.writes.length, 2)
   for (const payload of result.writes) {
     assert.equal('timezone' in payload, false)
