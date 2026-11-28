@@ -829,7 +829,7 @@ onUnmounted(() => {
 }
 
 .pill-count {
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   color: var(--text-3);
   font-weight: 400;
 }
@@ -1103,7 +1103,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--text-3);
 }
 
@@ -1278,7 +1278,7 @@ onUnmounted(() => {
 }
 
 .file-path-hint {
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--text-3);
   font-family: var(--font-mono, monospace);
   overflow: hidden;

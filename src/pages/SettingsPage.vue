@@ -21,6 +21,7 @@ import UpdateRow from '../components/settings/UpdateRow.vue'
 import { version } from '../../package.json'
 import { isAndroidLocal } from '../desktop/androidLocal'
 import { FONT_SCALE_OPTIONS, useFontScale } from '../composables/useFontScale'
+import { confirmAction } from '../composables/useConfirm'
 import { useAuthStore } from '../stores/auth'
 import { useSettingsStore, defaultSettings } from '../stores/settings'
 import type { SyncStatus } from '../api/sync'
@@ -146,9 +147,10 @@ function selectFirstSearchResult() {
   const match = settingsNavigation.find(item => item.label.includes(searchQuery.value.trim()))
   if (match) selectSection(match.id)
 }
-function resetSettings() {
+async function resetSettings() {
+  if (!await confirmAction('恢复默认设置？这会重置外观、同步、安全、通知等所有设置项，且无法撤销。')) return
   const { timezone: _timezone, deploymentTimezone: _deploymentTimezone, ...editable } = structuredClone(defaultSettings)
-  saveSettings(editable)
+  await saveSettings(editable)
 }
 async function updatePassword() {
   if (!passwordDraft.value.current || passwordDraft.value.next.length < 8 || passwordDraft.value.next !== passwordDraft.value.confirm) {
@@ -286,7 +288,10 @@ const mobileDetailLabel = computed(() => sections.find(item => item.id === mobil
     </template>
 
     <div v-else-if="store.loaded" class="settings">
-      <nav class="set-nav" aria-label="设置类别"><button v-for="item in sections" :key="item.id" class="nav-item" type="button" :aria-current="activeSection === item.id ? 'page' : undefined" @click="selectSection(item.id)"><span>{{ item.label }}</span><span v-if="item.id === 'sync' && syncStatus?.conflicts" class="count alert">{{ syncStatus.conflicts }}</span></button></nav>
+      <nav class="set-nav" aria-label="设置类别">
+        <button v-for="item in sections" :key="item.id" class="nav-item" type="button" :aria-current="activeSection === item.id ? 'page' : undefined" @click="selectSection(item.id)"><span>{{ item.label }}</span><span v-if="item.id === 'sync' && syncStatus?.conflicts" class="count alert">{{ syncStatus.conflicts }}</span></button>
+        <button class="nav-item" type="button" @click="resetSettings"><span>恢复默认设置</span></button>
+      </nav>
       <div class="settings-content" :inert="saving">
         <template v-if="activeSection === 'appearance'">
           <section class="set-sec"><h2>主题</h2><div class="theme-cards">
@@ -320,6 +325,7 @@ const mobileDetailLabel = computed(() => sections.find(item => item.id === mobil
             <div class="set-row"><div class="grow"><div class="t">外观模式</div><div class="d">跟随系统或手动选择</div></div><OpusSegment><button v-for="item in modes" :key="item.id" type="button" :aria-pressed="appearance.theme === item.id" @click="setMode(item.id)">{{ item.label }}</button></OpusSegment></div>
             <div class="set-row"><div class="grow"><div class="t">减少透明度</div><div class="d">关闭模糊，玻璃材质改为不透明表面；低性能设备可开启</div></div><button class="switch" type="button" role="switch" aria-label="减少透明度" :aria-checked="appearance.blur === 0" @click="toggleBlur"></button></div>
             <div class="set-row"><div class="grow"><div class="t">减少动态效果</div><div class="d">去掉位移与缩放，只保留淡入淡出与颜色变化</div></div><button class="switch" type="button" role="switch" aria-label="减少动态效果" :aria-checked="!!reducedMotion" @click="emit('update:reducedMotion', !reducedMotion)"></button></div>
+            <div class="set-row"><div class="grow"><div class="t">字号</div><div class="d">只影响文字大小；保存在本设备，不参与同步</div></div><OpusSegment><button v-for="item in FONT_SCALE_OPTIONS" :key="item.id" type="button" :aria-pressed="fontScale === item.id" @click="setFontScale(item.id)">{{ item.label }}</button></OpusSegment></div>
           </div></section>
           <section class="set-sec"><h2>同步</h2><div class="mat-solid" style="border-radius:var(--r-lg)">
             <div class="set-row"><div class="grow"><div class="t">Core 服务器</div><div class="d">{{ syncLabel }}</div></div><button type="button" class="btn btn-ghost btn-sm" @click="selectSection('sync')">同步设置</button></div>

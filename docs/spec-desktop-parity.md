@@ -16,7 +16,7 @@
 | 助手消息时间戳 | 桌面 hover 显示，移动端常显（有意差异） |
 | 附件缩略图 / `[附带文件]` 剥离 | `messageSegments.ts` + `AgentChatThread.vue` 共享 |
 | 停止/发送双键、运行中「发送（插话）」 | 两端都改过（`send-follow`） |
-| 字号六档 | `SettingsPage.vue` 共享，桌面有独立「显示」区 |
+| 字号六档 | `SettingsPage.vue`：移动端首页分段控件；桌面「外观 → 显示」行（2026-11-28 补齐） |
 | 主题 / 气泡样式 / 减少透明度 / 减少动态效果 | `SettingsPage.vue` 共享 |
 | 模型与思考强度选择 | 桌面在 `composer-row` 的 `model-trigger`（移动端是常驻胶囊条，形态差异） |
 | 系统通知（后台任务、待审批） | 移动端走原生通知，桌面走 Web Notification |
