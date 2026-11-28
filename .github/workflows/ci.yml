@@ -40,6 +40,17 @@ jobs:
       - run: npm run test:scheduler
       - run: npm run test:desktop
       - run: node --test tests/diagnostics.test.mjs
+      - run: npm run test:timestamps
+      - run: npm run test:font-scale
+      - run: npm run test:worklog
+      - run: npm run test:outbox
+      - run: npm run test:attachment
+      - run: npm run test:downloads
+      - run: npm run test:downloads-view
+      - run: npm run test:cors
+      - run: npm run test:streaming
+      - run: npm run test:updater
+      - run: npm run test:updater-android
   contracts:
     runs-on: ubuntu-latest
     steps:

@@ -1,5 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import crypto from 'node:crypto'
 import {
   createUpdater,
   compareSemver,
@@ -208,20 +212,191 @@ test('6. 版本比较函数：0.9.13 vs 0.9.9、0.10.0 vs 0.9.13、0.9.13 vs 0.9
 })
 
 test('7. scripts/make-latest-json.mjs 生成 android.json 格式结构', () => {
-  const manifest = generateAndroidManifest({
-    version: '0.9.13',
-    releaseDir: 'dist-release',
-    baseUrl: 'https://github.com/zjyzjy0823-hue/Studiolo/releases/download/v0.9.13',
-    notes: '下载页 + 更新入口打磨',
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'studiolo-apk-'))
+  try {
+    const fakeContent = Buffer.from('fake-apk-for-manifest-test')
+    const apkFileName = 'Studiolo_0.9.13_arm64-release.apk'
+    fs.writeFileSync(path.join(tmpDir, apkFileName), fakeContent)
+    const expectedSha256 = crypto.createHash('sha256').update(fakeContent).digest('hex')
+    const baseUrl = 'https://github.com/zjyzjy0823-hue/Studiolo/releases/download/v0.9.13'
+
+    const manifest = generateAndroidManifest({
+      version: '0.9.13',
+      releaseDir: tmpDir,
+      baseUrl,
+      notes: '下载页 + 更新入口打磨',
+    })
+
+    assert.ok(manifest)
+    assert.equal(manifest.version, '0.9.13')
+    assert.equal(manifest.url, `${baseUrl}/${apkFileName}`)
+    assert.equal(manifest.size, fakeContent.length)
+    assert.equal(manifest.sha256, expectedSha256)
+    assert.equal(manifest.notes, '下载页 + 更新入口打磨')
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('8. 同目录同时有 0.9.13 与 0.9.14 两个 APK，请求 0.9.14 -> url/size/sha256 全部是 0.9.14 那份', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'studiolo-apk-'))
+  try {
+    const content13 = Buffer.from('fake-apk-0.9.13-payload')
+    const content14 = Buffer.from('fake-apk-0.9.14-payload-different-bytes')
+    fs.writeFileSync(path.join(tmpDir, 'Studiolo_0.9.13_arm64-release.apk'), content13)
+    fs.writeFileSync(path.join(tmpDir, 'Studiolo_0.9.14_arm64-release.apk'), content14)
+
+    const expectedSha14 = crypto.createHash('sha256').update(content14).digest('hex')
+    const baseUrl = 'https://github.com/zjyzjy0823-hue/Studiolo/releases/download/v0.9.14'
+
+    const manifest = generateAndroidManifest({
+      version: '0.9.14',
+      releaseDir: tmpDir,
+      baseUrl,
+      notes: '0.9.14 更新说明',
+    })
+
+    assert.ok(manifest)
+    assert.equal(manifest.version, '0.9.14')
+    assert.equal(manifest.url, `${baseUrl}/Studiolo_0.9.14_arm64-release.apk`)
+    assert.equal(manifest.size, content14.length)
+    assert.equal(manifest.sha256, expectedSha14)
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('9. 目录里一个 APK 都没有 -> generateAndroidManifest(...) === null', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'studiolo-apk-'))
+  try {
+    fs.writeFileSync(path.join(tmpDir, 'Studiolo_0.9.14_x64.app.tar.gz.sig'), 'dummy')
+
+    const manifest = generateAndroidManifest({
+      version: '0.9.14',
+      releaseDir: tmpDir,
+      baseUrl: 'https://example.com/releases',
+    })
+
+    assert.equal(manifest, null)
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('10. 目录里只有 0.9.13，请求 0.9.14 -> assert.throws 且错误文案含 0.9.14', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'studiolo-apk-'))
+  try {
+    fs.writeFileSync(path.join(tmpDir, 'Studiolo_0.9.13_arm64-release.apk'), Buffer.from('old-apk'))
+
+    assert.throws(
+      () => {
+        generateAndroidManifest({
+          version: '0.9.14',
+          releaseDir: tmpDir,
+          baseUrl: 'https://example.com/releases',
+        })
+      },
+      (err) => {
+        assert.ok(err instanceof Error)
+        assert.ok(err.message.includes('0.9.14'), `expected error to include '0.9.14', got: ${err.message}`)
+        return true
+      }
+    )
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('11. 更新流：manifest.sha256 与下载字节不一致 -> error，含「校验失败」，未调用 android_save_attachment', async () => {
+  const calls = []
+  const apkBytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0xaa, 0xbb, 0xcc, 0xdd])
+  const manifest = {
+    version: '0.9.14',
+    url: 'https://alist.isidel.com/p/dl/Studiolo_0.9.14_arm64-release.apk',
+    size: apkBytes.length,
+    notes: '测试哈希校验不匹配',
+    sha256: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+  }
+
+  const mockInvoke = async (command, args) => {
+    calls.push({ command, args })
+    if (command === 'android_fetch_text') {
+      return { text: JSON.stringify(manifest) }
+    }
+    if (command === 'android_save_attachment') {
+      return { saved: true, displayPath: '/storage/emulated/0/Download/Studiolo/app.apk' }
+    }
+    if (command === 'android_open_download') {
+      return true
+    }
+    throw new Error(`Unexpected command: ${command}`)
+  }
+
+  const updater = createUpdater({
+    platform: 'android',
+    isTauri: () => true,
+    currentVersion: '0.9.13',
+    fetch: apkFetch(apkBytes),
+    invoke: mockInvoke,
   })
 
-  assert.ok(manifest)
-  assert.equal(manifest.version, '0.9.13')
-  assert.equal(
-    manifest.url,
-    'https://github.com/zjyzjy0823-hue/Studiolo/releases/download/v0.9.13/Studiolo_0.9.13_arm64-release.apk'
+  await updater.check({ force: true })
+  assert.equal(updater.state.value, 'available')
+
+  await updater.install()
+
+  assert.equal(updater.state.value, 'error')
+  assert.ok(
+    updater.error.value?.includes('校验失败'),
+    `expected error message to include '校验失败', got: '${updater.error.value}'`
   )
-  assert.equal(manifest.size, 22378187)
-  assert.ok(manifest.sha256?.startsWith('92d8'))
-  assert.equal(manifest.notes, '下载页 + 更新入口打磨')
+  const saveCalls = calls.filter(c => c.command === 'android_save_attachment')
+  assert.equal(saveCalls.length, 0, 'android_save_attachment should not be called when sha256 mismatch')
+  const openCalls = calls.filter(c => c.command === 'android_open_download')
+  assert.equal(openCalls.length, 0, 'android_open_download should not be called when sha256 mismatch')
+})
+
+test('12. 更新流：manifest.sha256 与下载字节一致 -> 正常走到 android_save_attachment', async () => {
+  const calls = []
+  const apkBytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x11, 0x22, 0x33, 0x44])
+  const actualSha256 = crypto.createHash('sha256').update(apkBytes).digest('hex')
+  const manifest = {
+    version: '0.9.14',
+    url: 'https://alist.isidel.com/p/dl/Studiolo_0.9.14_arm64-release.apk',
+    size: apkBytes.length,
+    notes: '测试哈希校验匹配',
+    sha256: actualSha256,
+  }
+
+  const mockInvoke = async (command, args) => {
+    calls.push({ command, args })
+    if (command === 'android_fetch_text') {
+      return { text: JSON.stringify(manifest) }
+    }
+    if (command === 'android_save_attachment') {
+      return { saved: true, displayPath: '/storage/emulated/0/Download/Studiolo/Studiolo_0.9.14_arm64-release.apk' }
+    }
+    if (command === 'android_open_download') {
+      return true
+    }
+    throw new Error(`Unexpected command: ${command}`)
+  }
+
+  const updater = createUpdater({
+    platform: 'android',
+    isTauri: () => true,
+    currentVersion: '0.9.13',
+    fetch: apkFetch(apkBytes),
+    invoke: mockInvoke,
+  })
+
+  await updater.check({ force: true })
+  assert.equal(updater.state.value, 'available')
+
+  await updater.install()
+
+  const commands = calls.map(c => c.command)
+  assert.deepEqual(commands, ['android_fetch_text', 'android_save_attachment', 'android_open_download'])
+  assert.equal(updater.state.value, 'ready')
+  assert.equal(updater.error.value, null)
 })

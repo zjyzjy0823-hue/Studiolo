@@ -283,7 +283,8 @@ export function createUpdater(customBackend?: UpdaterBackend): UseUpdaterReturn 
 
     if (isAndroidPlatform()) {
       try {
-        const downloadUrl = ANDROID_APK_PROXY || currentUpdate.url || (currentUpdate.rawJson?.url as string)
+        // Android 固定走代理，manifest.url 不参与下载
+        const downloadUrl = ANDROID_APK_PROXY
         if (!downloadUrl) {
           throw new Error('未找到更新下载地址')
         }
@@ -332,6 +333,25 @@ export function createUpdater(customBackend?: UpdaterBackend): UseUpdaterReturn 
         for (const chunk of chunks) {
           fullBytes.set(chunk, offset)
           offset += chunk.length
+        }
+
+        // 更新包完整性校验：manifest 带 sha256 时必须匹配，否则不落盘、不拉起安装器
+        const expectedSha = typeof currentUpdate.rawJson?.sha256 === 'string'
+          ? (currentUpdate.rawJson.sha256 as string).trim().toLowerCase()
+          : ''
+        if (expectedSha) {
+          let actualSha = ''
+          try {
+            const digest = await crypto.subtle.digest('SHA-256', fullBytes)
+            actualSha = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('')
+          } catch {
+            actualSha = ''
+          }
+          if (actualSha !== expectedSha) {
+            state.value = 'error'
+            error.value = '更新包校验失败，请重试'
+            return
+          }
         }
 
         // Chunked Base64 (0x8000 bytes per chunk)

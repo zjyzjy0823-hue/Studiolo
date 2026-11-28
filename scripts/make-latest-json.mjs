@@ -130,15 +130,36 @@ export function generateAndroidManifest({ version, releaseDir, baseUrl, notes = 
     throw new Error('Missing required option: --base-url');
   }
 
-  let apkPath = apk ? path.resolve(apk) : null;
-  if (!apkPath && releaseDir) {
+  let apkPath = null;
+  if (apk) {
+    const filename = path.basename(apk);
+    if (!filename.includes(`_${version}_`)) {
+      throw new Error(`APK 文件名 (${filename}) 与版本 (${version}) 不一致，必须包含 _${version}_`);
+    }
+    apkPath = path.resolve(apk);
+  } else if (releaseDir) {
     const resolvedDir = path.resolve(releaseDir);
     if (fs.existsSync(resolvedDir)) {
       const entries = fs.readdirSync(resolvedDir);
-      const candidate = entries.find(e => e.endsWith('_arm64-release.apk'));
-      if (candidate) {
-        apkPath = path.join(resolvedDir, candidate);
+      const apkCandidates = entries.filter(e => e.endsWith('_arm64-release.apk'));
+      if (apkCandidates.length === 0) {
+        return null;
       }
+      const targetSuffix = `_${version}_arm64-release.apk`;
+      const matched = apkCandidates.find(e => e.endsWith(targetSuffix));
+      if (!matched) {
+        const foundVersions = apkCandidates.map(e => {
+          const m = e.match(/_([^_]+)_arm64-release\.apk$/);
+          return m ? m[1] : e;
+        });
+        throw new Error(
+          `未在 releaseDir (${resolvedDir}) 中找到版本 ${version} 的 APK (期望匹配 *${targetSuffix})。` +
+          `目录中存在的 APK: ${apkCandidates.join(', ')} (版本: ${foundVersions.join(', ')})，请求的版本: ${version}`
+        );
+      }
+      apkPath = path.join(resolvedDir, matched);
+    } else {
+      return null;
     }
   }
 
