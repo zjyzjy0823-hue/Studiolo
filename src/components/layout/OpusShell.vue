@@ -527,8 +527,8 @@ onUnmounted(() => {
               </template>
               <div class="nav-foot">
                 <button v-for="item in footer" :key="item.page" class="nav-item" type="button" :title="item.label" :aria-current="page === item.page && !downloadsActive ? 'page' : undefined" @click="go(item.page)"><OpusIcon :name="item.icon" /><span class="label">{{ item.label }}</span><span v-if="item.page === 'Settings' && syncStatus?.conflicts" class="count alert">{{ syncStatus.conflicts }}</span></button>
-                <button class="nav-item" type="button" title="下载记录" :aria-current="downloadsActive ? 'page' : undefined" @click="go('Settings', false, 'downloads')">
-                  <OpusIcon name="download" /><span class="label">下载记录</span>
+                <button class="nav-item" type="button" title="下载" :aria-current="page === 'Downloads' || downloadsActive ? 'page' : undefined" @click="go('Downloads')">
+                  <OpusIcon name="download" /><span class="label">下载</span>
                 </button>
                 <button
                   class="nav-item nav-item--collapse"

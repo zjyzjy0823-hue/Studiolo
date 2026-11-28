@@ -193,6 +193,69 @@ fn open_saved_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
         .map_err(|e| format!("Failed to open file: {e}"))
 }
 
+#[tauri::command]
+fn reveal_in_folder(app: tauri::AppHandle, path: Option<String>) -> Result<(), String> {
+    let dir = studiolo_download_dir(&app)?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create download folder: {e}"))?;
+    let path_str = path.unwrap_or_default();
+    let raw = std::path::Path::new(&path_str);
+    let candidate = if path_str.trim().is_empty() {
+        dir.clone()
+    } else if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        dir.join(raw)
+    };
+    if !candidate.exists() {
+        return Err("path_missing".to_string());
+    }
+    let allowed = dir.canonicalize().map_err(|_| "path_missing".to_string())?;
+    let target = candidate.canonicalize().map_err(|_| "path_missing".to_string())?;
+    if !target.starts_with(&allowed) {
+        return Err("path_not_allowed".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = std::process::Command::new("open");
+        if target == allowed || target.is_dir() {
+            cmd.arg(&target);
+        } else {
+            cmd.arg("-R").arg(&target);
+        }
+        cmd.spawn().map_err(|e| format!("Failed to reveal path: {e}"))?;
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        let mut cmd = std::process::Command::new("explorer");
+        if target == allowed || target.is_dir() {
+            cmd.arg(&target);
+        } else {
+            cmd.arg(format!("/select,{}", target.to_string_lossy()));
+        }
+        cmd.spawn().map_err(|e| format!("Failed to reveal path: {e}"))?;
+        Ok(())
+    }
+    #[cfg(all(not(target_os = "macos"), not(windows), not(target_os = "android")))]
+    {
+        let open_target = if target.is_dir() {
+            &target
+        } else {
+            target.parent().unwrap_or(&target)
+        };
+        std::process::Command::new("xdg-open")
+            .arg(open_target)
+            .spawn()
+            .map_err(|e| format!("Failed to reveal path: {e}"))?;
+        Ok(())
+    }
+    #[cfg(target_os = "android")]
+    {
+        Err("reveal_in_folder is not supported on Android".to_string())
+    }
+}
+
 fn set_status(app: &tauri::AppHandle, value: &str) {
     *app.state::<DesktopState>().status.lock().unwrap() = value.into();
 }
@@ -431,13 +494,14 @@ pub fn run() {
         android::android_notifications_enabled, android::android_set_notifications_enabled, android::android_show_fleet_notification,
         android::android_show_fleet_approval, android::android_listen_fleet_approval,
         android::android_read_device_space, android::android_save_attachment,
-        android::android_open_download, save_download_file, save_download_file_b64, open_saved_path,
+        android::android_open_download, save_download_file, save_download_file_b64, open_saved_path, reveal_in_folder,
         android::android_capture_photo, android::android_pick_images,
     ]);
     #[cfg(not(target_os = "android"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
         desktop_platform, backend_status, open_external_url,
         save_download_file, save_download_file_b64, open_saved_path,
+        reveal_in_folder,
         fleet::fleet_connect, fleet::fleet_disconnect, fleet::fleet_send, fleet::fleet_notifications,
         fleet::fleet_notify_attention,
     ]);

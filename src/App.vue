@@ -24,6 +24,7 @@ import LedgerPage from './pages/LedgerPage.vue'
 import AutomationPage from './pages/AutomationPage.vue'
 import ApiPage from './pages/ApiPage.vue'
 import SettingsPage from './pages/SettingsPage.vue'
+import DownloadsPage from './pages/DownloadsPage.vue'
 import { ApiError } from './api/client'
 import { useAuthStore } from './stores/auth'
 import { useDashboardStore } from './stores/dashboard'
@@ -40,11 +41,12 @@ import { nextWorkbenchTheme, useWorkbenchTheme, workbenchThemeLabel } from './co
 import type { WorkbenchTheme } from './composables/useWorkbenchTheme'
 import { applyThemeToRoot, resolveThemeState } from './theme/registry'
 
-type Page = 'Home' | 'Dashboard' | 'Websites' | 'Devices' | 'Agents' | 'Data' | 'Ledger' | 'Automation' | 'API' | 'Settings' | 'Space' | 'Chat'
+type Page = 'Home' | 'Dashboard' | 'Websites' | 'Devices' | 'Agents' | 'Data' | 'Ledger' | 'Automation' | 'API' | 'Settings' | 'Space' | 'Chat' | 'Downloads'
 type SettingsDestination = 'sync' | 'downloads'
 const pagePaths: Record<Page, string> = {
   Home: '/', Dashboard: '/dashboard', Websites: '/websites', Devices: '/devices', Agents: '/agents',
   Data: '/data', Ledger: '/ledger', Automation: '/automation', API: '/api', Settings: '/settings', Space: '/space', Chat: '/chat',
+  Downloads: '/downloads',
 }
 const pageByPath = Object.fromEntries(Object.entries(pagePaths).map(([key, value]) => [value, key])) as Record<string, Page>
 function pageFromLocation(): Page {
@@ -108,6 +110,7 @@ const currentComponent = computed(() => ({
   Websites: WebsitesPage, Devices: DevicesPage, Agents: AgentsPage,
   Data: DataPage, Ledger: LedgerPage, Automation: AutomationPage,
   API: ApiPage, Settings: SettingsPage, Space: OpusModulePage, Chat: OpusModulePage,
+  Downloads: DownloadsPage,
 })[currentPage.value])
 const pageRef = ref<{
   openCreate?: (value?: string) => void
@@ -372,7 +375,7 @@ onUnmounted(() => {
       </div>
     </div>
   </template>
-  <OpusShell v-else ref="shellRef" :page="currentPage" :downloads-active="currentPage === 'Settings' && settingsSection === 'downloads'" :mobile="mobile" :hide-mobile-tabbar="hideMobileTabbar" :toast="toast" :toast-key="toastKey" :theme="theme" :mode="mode" :reduced-motion="motionReduced"
+  <OpusShell v-else ref="shellRef" :page="currentPage" :downloads-active="currentPage === 'Downloads' || (currentPage === 'Settings' && settingsSection === 'downloads')" :mobile="mobile" :hide-mobile-tabbar="hideMobileTabbar" :toast="toast" :toast-key="toastKey" :theme="theme" :mode="mode" :reduced-motion="motionReduced"
     @navigate="navigate" @mobile-tab="navigate($event, undefined, 'replace')" @create="create" @action="showToast" @open-space="openQuickSpace" @sync-settings="openSyncSettings" @back="back" @toggle-mode="toggleColorMode" @toggle-theme="toggleWorkbenchTheme" @set-theme="setThemeWithToast" @toggle-reduced-motion="setReducedMotionWithToast(!motionReduced)">
     <template #default="{ syncStatus, syncLabel, syncKind, openSync, inLibrary }">
       <TodayPage v-if="currentPage === 'Home'" :mobile="mobile" :sync-status="syncStatus" :sync-label="syncLabel" :sync-kind="syncKind" @navigate="navigate" @action="showToast" @create="create" @sync="openSync" @ask-agent="shellRef?.openDock()" />
@@ -392,6 +395,7 @@ onUnmounted(() => {
       </div>
       <SettingsPage v-else-if="currentPage === 'Settings'" :key="settingsPageKey" ref="settingsPageRef" :sync-status="syncStatus" :sync-label="syncLabel" :mobile="mobile" :reduced-motion="motionReduced" :open-sync="settingsSection === 'sync'" @update:reduced-motion="setReducedMotion" @section-change="settingsSection = $event" @action="showToast" @navigate="navigate" @back="back" />
       <DataPage v-else-if="currentPage === 'Data'" ref="pageRef" @action="showToast" />
+      <DownloadsPage v-else-if="currentPage === 'Downloads'" :mobile="mobile" @action="showToast" @navigate="navigate" @back="back" />
       <div v-else :class="mobile ? 'opus-subpage-host' : 'page'">
         <component :is="currentComponent" :key="currentPage" ref="pageRef" :mobile="mobile" @action="showToast" @navigate="navigate" @back="back" />
       </div>
